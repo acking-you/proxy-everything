@@ -10,10 +10,12 @@ use ring::aead::{
     Aad, BoundKey, Nonce, NonceSequence, OpeningKey, SealingKey, Tag, UnboundKey, AES_256_GCM,
     NONCE_LEN,
 };
-use runtime_codec::CodecError;
+use runtime_codec::{AsyncNormalCodec, CodecError};
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use tracing_subscriber::{fmt, layer::SubscriberExt};
+
+use crate::runtime_codec::{AsyncDecryptCodec, AsyncEncryptCodec};
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -31,12 +33,17 @@ pub enum Error {
     CheckSum { size: u32 },
     #[snafu(display("Data size must be less than `{size}`"))]
     MaxSize { size: u32 },
-    #[snafu(display("Write data error in proxy"))]
-    WriteDataInProxy { source: std::io::Error },
+    #[snafu(display("Write data error in `codec_and_write`.detail:{detail}"))]
+    WriteDataInProxy {
+        detail: &'static str,
+        source: std::io::Error,
+    },
     #[snafu(display("Reader codec error in proxy"))]
     Codec { source: CodecError },
     #[snafu(display("Proxy error! Send data to server or client fails!,detail:{msg}"))]
     Proxy { msg: String },
+    #[snafu(display("Construct cryptor error! detail:{detail}"))]
+    ConstructCryptor { detail: String },
 }
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -63,13 +70,13 @@ pub fn gen_random_key() -> String {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct Address {
+pub struct ProxyHeader {
     pub host: String,
     pub port: u16,
-    pub key: String,
+    pub key: Option<String>,
 }
 
-impl Display for Address {
+impl Display for ProxyHeader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}:{}", self.host, self.port)
     }
@@ -115,16 +122,16 @@ impl NonceSequence for CounterNonceSequence {
 }
 
 pub struct Aes256GcmCryption {
-    seal: SealingKey<CounterNonceSequence>,
-    open: OpeningKey<CounterNonceSequence>,
+    seal: Aes256GcmEncryptor,
+    open: Aes256GcmDecryptor,
 }
 
 impl Aes256GcmCryption {
     pub fn try_new(key: &[u8]) -> RingResult<Self> {
-        let counter = CounterNonceSequence(0);
-        let seal = SealingKey::new(UnboundKey::new(&AES_256_GCM, key)?, counter);
-        let open = OpeningKey::new(UnboundKey::new(&AES_256_GCM, key)?, counter);
-        Ok(Self { seal, open })
+        Ok(Self {
+            seal: Aes256GcmEncryptor::try_new(key)?,
+            open: Aes256GcmDecryptor::try_new(key)?,
+        })
     }
 
     pub fn try_new_with_default_key() -> RingResult<Self> {
@@ -132,18 +139,71 @@ impl Aes256GcmCryption {
     }
 
     pub fn encrypt(&mut self, data: &mut [u8]) -> RingResult<Tag> {
-        self.seal.seal_in_place_separate_tag(Aad::empty(), data)
+        self.seal.encrypt(data)
     }
 
     pub fn decrypt(&mut self, decrypeted_data: &[u8], tag: Tag) -> RingResult<(Vec<u8>, usize)> {
+        self.open.decrypt(decrypeted_data, tag)
+    }
+
+    pub fn decrypt_with_tag<'a>(&mut self, data: &'a mut [u8]) -> RingResult<&'a mut [u8]> {
+        self.open.decrypt_with_tag(data)
+    }
+}
+
+#[derive(Debug)]
+pub struct Aes256GcmEncryptor {
+    seal: SealingKey<CounterNonceSequence>,
+}
+
+impl Aes256GcmEncryptor {
+    pub fn try_new(key: &[u8]) -> RingResult<Self> {
+        let counter = CounterNonceSequence(0);
+        Ok(Self {
+            seal: SealingKey::new(UnboundKey::new(&AES_256_GCM, key)?, counter),
+        })
+    }
+}
+
+impl Encryptor for Aes256GcmEncryptor {
+    fn encrypt(&mut self, data: &mut [u8]) -> RingResult<Tag> {
+        self.seal.seal_in_place_separate_tag(Aad::empty(), data)
+    }
+}
+
+#[derive(Debug)]
+pub struct Aes256GcmDecryptor {
+    open: OpeningKey<CounterNonceSequence>,
+}
+
+impl Aes256GcmDecryptor {
+    pub fn try_new(key: &[u8]) -> RingResult<Self> {
+        let counter = CounterNonceSequence(0);
+        Ok(Self {
+            open: OpeningKey::new(UnboundKey::new(&AES_256_GCM, key)?, counter),
+        })
+    }
+}
+
+impl Decryptor for Aes256GcmDecryptor {
+    fn decrypt(&mut self, decrypeted_data: &[u8], tag: Tag) -> RingResult<(Vec<u8>, usize)> {
         let mut new_data = [decrypeted_data, tag.as_ref()].concat();
         let new_data_len = self.decrypt_with_tag(&mut new_data)?.len();
         Ok((new_data, new_data_len))
     }
 
-    pub fn decrypt_with_tag<'a>(&mut self, data: &'a mut [u8]) -> RingResult<&'a mut [u8]> {
+    fn decrypt_with_tag<'a>(&mut self, data: &'a mut [u8]) -> RingResult<&'a mut [u8]> {
         self.open.open_in_place(Aad::empty(), data)
     }
+}
+
+pub trait Encryptor: 'static {
+    fn encrypt(&mut self, data: &mut [u8]) -> RingResult<Tag>;
+}
+
+pub trait Decryptor {
+    fn decrypt(&mut self, decrypeted_data: &[u8], tag: Tag) -> RingResult<(Vec<u8>, usize)>;
+    fn decrypt_with_tag<'a>(&mut self, data: &'a mut [u8]) -> RingResult<&'a mut [u8]>;
 }
 
 /// Checksum for read data length
@@ -158,7 +218,7 @@ type DataSize = u32;
 pub const MAX_DATA_SIZE: DataSize = 30 * 1024 * 1024;
 
 /// Abstraction of intermediate layers for free switching of runtimes (e.g. monoio and tokio)
-pub(crate) trait MyAsyncReadExt {
+pub(crate) trait MyAsyncReadExt: 'static {
     async fn read_u32(&mut self) -> Result<u32, std::io::Error>;
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error>;
     async fn read_exact(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error>;
@@ -209,26 +269,20 @@ pub(crate) async fn set_data_size<T: MyAsyncWriteExt + Unpin>(
 
 /// For free choice of unpacking when reading data
 pub(crate) trait MyAsyncCodecReader {
-    async fn codec(&mut self) -> Result<&[u8]>;
+    type Item<'a>
+    where
+        Self: 'a;
+    async fn codec(&mut self) -> Result<Self::Item<'_>>;
+    async fn codec_and_write<W: MyAsyncWriteExt + Unpin>(
+        &mut self,
+        writer: &mut W,
+    ) -> Result<DataSize>;
 }
 
-pub(crate) async fn copy<R: MyAsyncCodecReader, W: MyAsyncWriteExt>(
-    mut reader: R,
-    mut writer: W,
-) -> Result<u64> {
-    let mut length: u64 = 0;
-    loop {
-        let src = reader.codec().await?;
-        let n = src.len();
-        if n == 0 {
-            return Ok(length);
-        }
-        length += n as u64;
-        writer.write_all(src).await.context(WriteDataInProxySnafu)?;
-    }
-}
-
-pub(crate) fn proxy_result_handle(c_to_s_res: Result<u64>, s_to_c_res: Result<u64>) -> Result<()> {
+pub(crate) fn proxy_result_handle(
+    c_to_s_res: Result<DataSize>,
+    s_to_c_res: Result<DataSize>,
+) -> Result<()> {
     match (c_to_s_res, s_to_c_res) {
         (Ok(n_c_to_s), Ok(n_s_to_c)) => {
             tracing::info!(
@@ -263,6 +317,108 @@ pub(crate) fn proxy_result_handle(c_to_s_res: Result<u64>, s_to_c_res: Result<u6
         .fail()?,
     }
     Ok(())
+}
+
+fn get_decyptor_codec<R: MyAsyncReadExt + Unpin>(
+    key: &impl AsRef<str>,
+    reader: R,
+) -> Result<AsyncDecryptCodec<R, Aes256GcmDecryptor>> {
+    Ok(AsyncDecryptCodec::new(
+        reader,
+        Aes256GcmDecryptor::try_new(key.as_ref().as_bytes()).map_err(|e| {
+            Error::ConstructCryptor {
+                detail: format!("{e}"),
+            }
+        })?,
+    ))
+}
+
+fn get_encyptor_codec<R: MyAsyncReadExt + Unpin>(
+    key: impl AsRef<str>,
+    reader: R,
+) -> Result<AsyncEncryptCodec<R, Aes256GcmEncryptor>> {
+    Ok(AsyncEncryptCodec::new(
+        reader,
+        Aes256GcmEncryptor::try_new(key.as_ref().as_bytes()).map_err(|e| {
+            Error::ConstructCryptor {
+                detail: format!("{e}"),
+            }
+        })?,
+    ))
+}
+
+async fn start_proxy<
+    ClientCodec: MyAsyncCodecReader + Unpin,
+    ServerCodec: MyAsyncCodecReader + Unpin,
+    W: MyAsyncWriteExt + Unpin,
+>(
+    client_codec: ClientCodec,
+    server_codec: ServerCodec,
+    client_writer: W,
+    server_writer: W,
+) -> Result<()> {
+    let client_to_server = runtime_codec::copy(client_codec, server_writer);
+    let server_to_client = runtime_codec::copy(server_codec, client_writer);
+    let (r1, r2) = futures::future::join(client_to_server, server_to_client).await;
+    proxy_result_handle(r1, r2)
+}
+
+pub(crate) async fn client_proxy_with_cryptor_codec<
+    R: MyAsyncReadExt + Unpin,
+    W: MyAsyncWriteExt + Unpin,
+>(
+    key: &impl AsRef<str>,
+    client_reader: R,
+    server_reader: R,
+    client_writer: W,
+    server_writer: W,
+) -> Result<()> {
+    tracing::info!("Client start proxy with random_key:{}", key.as_ref());
+    start_proxy(
+        get_encyptor_codec(key, client_reader)?,
+        get_decyptor_codec(key, server_reader)?,
+        client_writer,
+        server_writer,
+    )
+    .await
+}
+
+pub(crate) async fn server_proxy_with_cryptor_codec<
+    R: MyAsyncReadExt + Unpin,
+    W: MyAsyncWriteExt + Unpin,
+>(
+    key: &impl AsRef<str>,
+    client_reader: R,
+    server_reader: R,
+    client_writer: W,
+    server_writer: W,
+) -> Result<()> {
+    tracing::info!("Server start proxy with random_key:{}", key.as_ref());
+    start_proxy(
+        get_decyptor_codec(key, client_reader)?,
+        get_encyptor_codec(key, server_reader)?,
+        client_writer,
+        server_writer,
+    )
+    .await
+}
+
+pub(crate) async fn proxy_with_norlmal_codec<
+    R: MyAsyncReadExt + Unpin,
+    W: MyAsyncWriteExt + Unpin,
+>(
+    client_reader: R,
+    server_reader: R,
+    client_writer: W,
+    server_writer: W,
+) -> Result<()> {
+    start_proxy(
+        AsyncNormalCodec::new(client_reader),
+        AsyncNormalCodec::new(server_reader),
+        client_writer,
+        server_writer,
+    )
+    .await
 }
 
 #[cfg(test)]

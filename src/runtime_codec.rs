@@ -1,7 +1,17 @@
+use ring::aead::chacha20_poly1305_openssh::TAG_LEN;
+use ring::aead::Tag;
 use snafu::ResultExt;
 use snafu::Snafu;
 
-use crate::{MyAsyncCodecReader, MyAsyncReadExt, MyAsyncWriteExt};
+use crate::get_data_size;
+use crate::set_data_size;
+use crate::CodecSnafu;
+use crate::DataSize;
+use crate::Decryptor;
+use crate::Encryptor;
+use crate::MyAsyncCodecReader;
+use crate::WriteDataInProxySnafu;
+use crate::{MyAsyncReadExt, MyAsyncWriteExt};
 
 pub struct AsyncReader<T>(T);
 pub struct AsyncWriter<T>(T);
@@ -21,7 +31,7 @@ impl<T: tokio::io::AsyncWriteExt + Unpin> AsyncWriter<T> {
 }
 
 #[cfg(feature = "tokio")]
-impl<T: tokio::io::AsyncReadExt + Unpin> MyAsyncReadExt for AsyncReader<T> {
+impl<T: tokio::io::AsyncReadExt + Unpin + 'static> MyAsyncReadExt for AsyncReader<T> {
     async fn read_u32(&mut self) -> crate::Result<u32, std::io::Error> {
         self.0.read_u32().await
     }
@@ -50,20 +60,66 @@ impl<T: tokio::io::AsyncWriteExt + Unpin> MyAsyncWriteExt for AsyncWriter<T> {
     }
 }
 
-#[repr(u8)]
-pub enum Pattern {
-    Normal,
-    Decrypt,
-    Encrypt,
+/// For monoio
+#[cfg(feature = "monoio")]
+impl<T: monoio::io::AsyncReadRentExt + Unpin> AsyncReader<T> {
+    pub fn new(reader: T) -> Self {
+        Self(reader)
+    }
+}
+#[cfg(feature = "monoio")]
+impl<T: monoio::io::AsyncBufRead + monoio::io::AsyncReadRentExt + Unpin> AsyncWriter<T> {
+    pub fn new(writer: T) -> Self {
+        Self(writer)
+    }
+}
+
+#[cfg(feature = "monoio")]
+impl<T: monoio::io::AsyncBufRead + monoio::io::AsyncBufReadExt + Unpin + 'static> MyAsyncReadExt
+    for AsyncReader<T>
+{
+    async fn read_u32(&mut self) -> crate::Result<u32, std::io::Error> {
+        self.0.read(buf).await
+    }
+
+    async fn read(&mut self, buf: &mut [u8]) -> crate::Result<usize, std::io::Error> {
+        let buf = Vec::with_capacity(10);
+        let buf_mut = &mut buf;
+        let (sz, _) = self.0.read(buf_mut).await;
+        sz
+    }
+
+    async fn read_exact(&mut self, buf: &mut [u8]) -> crate::Result<usize, std::io::Error> {
+        self.0.read_exact(buf).await
+    }
+}
+
+#[cfg(feature = "monoio")]
+impl<T: tokio::io::AsyncWriteExt + Unpin> MyAsyncWriteExt for AsyncWriter<T> {
+    async fn write_u32(&mut self, n: u32) -> crate::Result<(), std::io::Error> {
+        self.0.write_u32(n).await
+    }
+
+    async fn write(&mut self, src: &[u8]) -> crate::Result<usize, std::io::Error> {
+        self.0.write(src).await
+    }
+
+    async fn write_all(&mut self, src: &[u8]) -> crate::Result<(), std::io::Error> {
+        self.0.write_all(src).await
+    }
 }
 
 #[derive(Debug, Snafu)]
 pub enum CodecError {
     #[snafu(display("Normal reader errror"))]
     Normal { source: std::io::Error },
+    #[snafu(display("Decrypt error: detail:{detail}"))]
+    Decrypt { detail: String },
+    #[snafu(display("Encrypt error: detail:{detail}"))]
+    Encrypt { detail: String },
 }
 
-pub struct AsyncReaderCodec<const PATTERN: u8, T> {
+pub struct AsyncNormalCodec<T> {
     reader: T,
     buffer: Vec<u8>,
     need_resize: usize,
@@ -72,7 +128,8 @@ pub struct AsyncReaderCodec<const PATTERN: u8, T> {
 const INIT_BUF_SIZE: usize = 8 * 1024;
 const MAX_BUF_SIZE: usize = 8 * 1024 * 1024;
 
-impl<const PATTERN: u8, T> AsyncReaderCodec<PATTERN, T>
+/// For common codec
+impl<T> AsyncNormalCodec<T>
 where
     T: MyAsyncReadExt + Unpin,
 {
@@ -105,16 +162,14 @@ where
             self.need_resize = INIT_BUF_SIZE;
         }
     }
+}
 
-    async fn read_with_encrypt(&mut self) -> crate::Result<&[u8]> {
-        todo!()
-    }
+impl<T: MyAsyncReadExt + Unpin> MyAsyncCodecReader for AsyncNormalCodec<T> {
+    type Item<'a> = &'a mut [u8]
+    where
+        Self: 'a;
 
-    async fn read_with_decrypt(&mut self) -> crate::Result<&[u8]> {
-        todo!()
-    }
-
-    async fn read_norlmal(&mut self) -> crate::Result<&[u8]> {
+    async fn codec(&mut self) -> crate::Result<Self::Item<'_>> {
         if self.need_resize != self.buffer.len() {
             self.resize()
         }
@@ -123,29 +178,156 @@ where
             .read(&mut self.buffer)
             .await
             .context(NormalSnafu)
-            .map_err(|e| super::Error::Codec { source: e })?;
+            .context(CodecSnafu)?;
         self.update_need_resize(n);
-        Ok(&self.buffer[0..n])
+        Ok(&mut self.buffer[0..n])
+    }
+
+    async fn codec_and_write<W: MyAsyncWriteExt + Unpin>(
+        &mut self,
+        writer: &mut W,
+    ) -> crate::Result<DataSize> {
+        let src = self.codec().await?;
+        let n = src.len();
+        if n == 0 {
+            return Ok(0);
+        }
+        writer.write_all(src).await.context(WriteDataInProxySnafu {
+            detail: "normal write",
+        })?;
+        Ok(n as DataSize)
     }
 }
 
-macro_rules! make_codec {
-    ($pattern:expr,$codec_method:ident,$new_func:ident) => {
-        impl<T: MyAsyncReadExt + Unpin> MyAsyncCodecReader
-            for AsyncReaderCodec<{ $pattern as u8 }, T>
-        {
-            async fn codec(&mut self) -> crate::Result<&[u8]> {
-                self.$codec_method().await
-            }
-        }
-        pub fn $new_func<T: MyAsyncReadExt + Unpin>(
-            reader: T,
-        ) -> AsyncReaderCodec<{ $pattern as u8 }, T> {
-            AsyncReaderCodec::<{ $pattern as u8 }, _>::new(reader)
-        }
-    };
+/// For decrypt codec
+pub struct AsyncDecryptCodec<T, D> {
+    codec_normal: AsyncNormalCodec<T>,
+    decryptor: D,
 }
 
-make_codec! {Pattern::Normal,read_norlmal,new_normal_codec}
-make_codec! {Pattern::Encrypt,read_with_encrypt,new_encrypt_codec}
-make_codec! {Pattern::Decrypt,read_with_decrypt,new_decrypt_codec}
+impl<T: MyAsyncReadExt + Unpin, D: Decryptor + Unpin> AsyncDecryptCodec<T, D> {
+    pub fn new(reader: T, decryptor: D) -> Self {
+        Self {
+            codec_normal: AsyncNormalCodec::new(reader),
+            decryptor,
+        }
+    }
+}
+
+impl<T: MyAsyncReadExt + Unpin, D: Decryptor + Unpin + 'static> MyAsyncCodecReader
+    for AsyncDecryptCodec<T, D>
+{
+    type Item<'a> = &'a mut[u8]
+    where
+        Self: 'a;
+    async fn codec(&mut self) -> crate::Result<&mut [u8]> {
+        let reader = &mut self.codec_normal.reader;
+        let buffer = &mut self.codec_normal.buffer;
+        let data_size = get_data_size(reader).await?;
+        buffer.resize(data_size as usize, 0);
+        reader
+            .read_exact(buffer)
+            .await
+            .context(WriteDataInProxySnafu {
+                detail: "decrypt_codec:read_exact datasize",
+            })?;
+        self.decryptor
+            .decrypt_with_tag(buffer)
+            .map_err(|e| CodecError::Decrypt {
+                detail: format!("{e}"),
+            })
+            .context(CodecSnafu)
+    }
+
+    async fn codec_and_write<W: MyAsyncWriteExt + Unpin>(
+        &mut self,
+        writer: &mut W,
+    ) -> crate::Result<DataSize> {
+        let data = self.codec().await?;
+        writer
+            .write_all(data)
+            .await
+            .context(WriteDataInProxySnafu {
+                detail: "decrypt_write:write data",
+            })?;
+        Ok(data.len() as DataSize)
+    }
+}
+
+/// For encrypt codec
+pub struct AsyncEncryptCodec<T, E> {
+    codec_normal: AsyncNormalCodec<T>,
+    encryptor: E,
+}
+
+impl<T: MyAsyncReadExt + Unpin, E: Encryptor + Unpin> AsyncEncryptCodec<T, E> {
+    pub fn new(reader: T, encryptor: E) -> Self {
+        Self {
+            codec_normal: AsyncNormalCodec::new(reader),
+            encryptor,
+        }
+    }
+}
+
+impl<T: MyAsyncReadExt + Unpin, E: Encryptor + Unpin> MyAsyncCodecReader
+    for AsyncEncryptCodec<T, E>
+{
+    type Item<'a> = (&'a[u8],Tag)
+    where
+        Self: 'a;
+
+    async fn codec(&mut self) -> crate::Result<Self::Item<'_>> {
+        let raw_data = self.codec_normal.codec().await?;
+        if raw_data.is_empty() {
+            return Ok((raw_data, Tag::from([0; TAG_LEN])));
+        }
+        let tag = self
+            .encryptor
+            .encrypt(raw_data)
+            .map_err(|e| CodecError::Encrypt {
+                detail: format!("{}", e),
+            })
+            .context(CodecSnafu)?;
+        Ok((raw_data, tag))
+    }
+
+    async fn codec_and_write<W: MyAsyncWriteExt + Unpin>(
+        &mut self,
+        writer: &mut W,
+    ) -> crate::Result<DataSize> {
+        let (data, tag) = self.codec().await?;
+        if data.is_empty() {
+            return Ok(0);
+        }
+        let length = (data.len() + tag.as_ref().len()) as DataSize;
+        set_data_size(writer, length).await?;
+        writer
+            .write_all(data)
+            .await
+            .context(WriteDataInProxySnafu {
+                detail: "encrypt_write:write data",
+            })?;
+        writer
+            .write_all(tag.as_ref())
+            .await
+            .context(WriteDataInProxySnafu {
+                detail: "encrypt_write:write tag",
+            })?;
+        Ok(length)
+    }
+}
+
+pub async fn copy<R: MyAsyncCodecReader + Unpin, W: MyAsyncWriteExt + Unpin>(
+    mut reader: R,
+    mut writer: W,
+) -> crate::Result<DataSize> {
+    let mut length: DataSize = 0;
+    loop {
+        let n = reader.codec_and_write(&mut writer).await?;
+        if n == 0 {
+            break;
+        }
+        length += n;
+    }
+    Ok(length)
+}

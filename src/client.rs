@@ -1,14 +1,21 @@
-use crate::runtime_codec::{new_normal_codec, AsyncReader, AsyncWriter};
+use crate::runtime_codec::{AsyncReader, AsyncWriter};
 use crate::{
-    copy, gen_random_key, proxy_result_handle, set_data_size, Address, Aes256GcmCryption,
-    MyAsyncReadExt, MyAsyncWriteExt,
+    client_proxy_with_cryptor_codec, gen_random_key, proxy_with_norlmal_codec, set_data_size,
+    Aes256GcmCryption, MyAsyncReadExt, MyAsyncWriteExt, ProxyHeader,
 };
-use futures::future;
+
+#[cfg(feature = "monoio")]
+use monoio::io::Splitable;
 use once_cell::sync::Lazy;
-use snafu::{OptionExt, ResultExt, Snafu};
+use snafu::{OptionExt, Report, ResultExt, Snafu};
 use std::str::FromStr;
 #[cfg(feature = "tokio")]
+use tokio::net::TcpListener;
+#[cfg(feature = "tokio")]
 use tokio::net::TcpStream;
+
+#[cfg(feature = "monoio")]
+use monoio::net::TcpStream;
 
 #[derive(Debug, Snafu)]
 pub enum ClientError {
@@ -54,7 +61,10 @@ pub static SERVER_HOST: Lazy<String> = Lazy::new(|| match std::env::var("SERVER_
 pub const SERVER_PORT: u16 = 1081;
 pub const CLIENT_PORT: u16 = 1080;
 
-pub async fn handle_client(client_socket: TcpStream) -> Result<()> {
+pub async fn handle_client(client_socket: TcpStream, msg_key: Option<String>) -> Result<()> {
+    if let Some(key) = msg_key.as_ref() {
+        tracing::info!("Start handle stream:random key is:{}", key);
+    }
     let (r, w) = client_socket.into_split();
     let (mut client_reader, mut client_writer) = (AsyncReader::new(r), AsyncWriter::new(w));
     let mut buffer = [0; 4096];
@@ -99,19 +109,19 @@ pub async fn handle_client(client_socket: TcpStream) -> Result<()> {
         tracing::info!("Start proxy {}:{}", host, port);
 
         // 通知服务器进行流量转发
-        let addr_struct = Address {
+        let proxy_header = ProxyHeader {
             host: host.into(),
             port,
-            key: gen_random_key(),
+            key: msg_key,
         };
-        let mut addr_json = serde_json::to_string(&addr_struct).context(SerdeJsonSnafu)?;
+        let mut header_json = serde_json::to_string(&proxy_header).context(SerdeJsonSnafu)?;
         let mut cryption =
             Aes256GcmCryption::try_new_with_default_key().map_err(|e| ClientError::Encryption {
                 detail: e.to_string(),
             })?;
 
         let (addr, tag, len) = unsafe {
-            let addr = addr_json.as_bytes_mut();
+            let addr = header_json.as_bytes_mut();
             let tag = cryption
                 .encrypt(addr)
                 .map_err(|e| ClientError::Encryption {
@@ -120,12 +130,12 @@ pub async fn handle_client(client_socket: TcpStream) -> Result<()> {
             let len = addr.len() + tag.as_ref().len();
             (addr, tag, len as u32)
         };
-        let mut server_socket = TcpStream::connect((SERVER_HOST.as_ref(), SERVER_PORT))
+        let server_socket = TcpStream::connect((SERVER_HOST.as_ref(), SERVER_PORT))
             .await
             .context(IoSnafu {
                 detail: "Connect to proxy server",
             })?;
-        let (r, w) = server_socket.split();
+        let (r, w) = server_socket.into_split();
         let (server_reader, mut server_writer) = (AsyncReader::new(r), AsyncWriter::new(w));
 
         // 发送数据头部用于确定数据包大小
@@ -144,15 +154,59 @@ pub async fn handle_client(client_socket: TcpStream) -> Result<()> {
             })?;
         tracing::info!(
             "Proxy Header({}) send Ok! Start to forward net flow",
-            addr_struct
+            proxy_header
         );
 
         // 开始进行流量转发
-        let client_to_server = copy(new_normal_codec(client_reader), server_writer);
-        let server_to_client = copy(new_normal_codec(server_reader), client_writer);
-        let (r1, r2) = future::join(client_to_server, server_to_client).await;
-        proxy_result_handle(r1, r2).context(ProxySnafu)?;
+        if let Some(key) = proxy_header.key.as_ref() {
+            client_proxy_with_cryptor_codec(
+                key,
+                client_reader,
+                server_reader,
+                client_writer,
+                server_writer,
+            )
+            .await
+            .context(ProxySnafu)?;
+        } else {
+            proxy_with_norlmal_codec(client_reader, server_reader, client_writer, server_writer)
+                .await
+                .context(ProxySnafu)?;
+        }
     }
 
     Ok(())
+}
+
+pub async fn start_normal_client(host: impl AsRef<str>, port: u16) {
+    let listener = TcpListener::bind((host.as_ref(), port)).await.unwrap();
+    loop {
+        let (client_socket, _) = listener.accept().await.unwrap();
+
+        tokio::spawn(async move {
+            if let Err(e) = handle_client(client_socket, None).await {
+                let report = Report::from_error(e).to_string();
+                tracing::error!("Error happens in client handling: {}", report);
+            }
+        });
+    }
+}
+
+pub async fn start_codec_msg_client(host: impl AsRef<str>, port: u16) {
+    let listener = TcpListener::bind((host.as_ref(), port)).await.unwrap();
+    loop {
+        let (client_socket, _) = listener.accept().await.unwrap();
+
+        tokio::spawn(async move {
+            let rand_key = gen_random_key();
+            if let Err(e) = handle_client(client_socket, Some(rand_key.clone())).await {
+                let report = Report::from_error(e).to_string();
+                tracing::error!(
+                    "random_key_is:{} Error happens in client handling: {}",
+                    rand_key,
+                    report
+                );
+            }
+        });
+    }
 }

@@ -1,10 +1,15 @@
+# 检查是否设置了TAG环境变量
+if [ -z "$TAG" ]; then
+    # 如果TAG环境变量未设置，则使用默认值v2
+    TAG="v2"
+fi
 rm -rf ./target
 IMAGE_NAME="http2-client"
 echo "Start build $IMAGE_NAME image"
 docker build -f client.dockerfile . -t $IMAGE_NAME
 echo "Build $IMAGE_NAME successful"
 
-TAG_NAME="ackingliu/$IMAGE_NAME:v2"
+TAG_NAME="ackingliu/$IMAGE_NAME:$TAG"
 
 echo "Tag with $TAG_NAME"
 docker tag http2-client $TAG_NAME

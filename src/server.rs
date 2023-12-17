@@ -29,9 +29,9 @@ pub enum ServerError {
 }
 
 use crate::{
-    copy, get_data_size, proxy_result_handle,
-    runtime_codec::{new_normal_codec, AsyncReader, AsyncWriter},
-    Address, Aes256GcmCryption, DataSize, MyAsyncReadExt,
+    get_data_size, proxy_with_norlmal_codec,
+    runtime_codec::{AsyncReader, AsyncWriter},
+    server_proxy_with_cryptor_codec, Aes256GcmCryption, DataSize, MyAsyncReadExt, ProxyHeader,
 };
 
 type Result<T> = std::result::Result<T, ServerError>;
@@ -59,25 +59,35 @@ pub async fn handle_connect(conn: TcpStream) -> Result<()> {
             detail: format!("{e}"),
         })?;
 
-    let addr = cryption
+    let header = cryption
         .decrypt_with_tag(real_buf)
         .map_err(|e| ServerError::Decryption {
             detail: format!("{e}"),
         })?;
 
-    let addr: Address = serde_json::from_slice(addr).context(SerdeJsonSnafu)?;
-    let mut dest_stream = TcpStream::connect((addr.host.as_str(), addr.port))
+    let header: ProxyHeader = serde_json::from_slice(header).context(SerdeJsonSnafu)?;
+    let dest_stream = TcpStream::connect((header.host.as_str(), header.port))
         .await
         .context(IoSnafu {
-            detail: format!("Connect to `dest_server({})`", addr),
+            detail: format!("Connect to `dest_server({})`", header),
         })?;
-    let (r, w) = dest_stream.split();
+    let (r, w) = dest_stream.into_split();
     let (server_reader, server_writer) = (AsyncReader::new(r), AsyncWriter::new(w));
 
     // 开始进行流量转发
-    let client_to_server = copy(new_normal_codec(client_reader), server_writer);
-    let server_to_client = copy(new_normal_codec(server_reader), client_writer);
-
-    let (r1, r2) = futures::future::join(client_to_server, server_to_client).await;
-    proxy_result_handle(r1, r2).context(ProxySnafu)
+    if let Some(key) = header.key.as_ref() {
+        server_proxy_with_cryptor_codec(
+            key,
+            client_reader,
+            server_reader,
+            client_writer,
+            server_writer,
+        )
+        .await
+        .context(ProxySnafu)
+    } else {
+        proxy_with_norlmal_codec(client_reader, server_reader, client_writer, server_writer)
+            .await
+            .context(ProxySnafu)
+    }
 }
