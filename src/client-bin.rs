@@ -1,4 +1,4 @@
-use http_proxy::client::{start_codec_msg_client, start_normal_client, CLIENT_PORT, SERVER_HOST};
+use http_proxy::client::{start_client, CLIENT_PORT, SERVER_HOST};
 use http_proxy::init_tracing;
 
 #[cfg(not(target_env = "msvc"))]
@@ -15,9 +15,9 @@ async fn main() {
     let msg_key = std::env::var("MSG_KEY").is_ok();
     if msg_key {
         tracing::info!("`MSG_KEY=ON`, message encryption is used");
-        start_codec_msg_client("0.0.0.0", CLIENT_PORT).await;
+        start_client::<true>("0.0.0.0", CLIENT_PORT).await;
     } else {
         tracing::info!("MSG_KEY not set, message send raw data");
-        start_normal_client("0.0.0.0", CLIENT_PORT).await;
+        start_client::<false>("0.0.0.0", CLIENT_PORT).await;
     }
 }

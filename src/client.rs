@@ -1,3 +1,5 @@
+#[cfg(feature = "auto-proxy")]
+use crate::auto_proxy::{run_auto_proxy_by_country, SendItem, SenderChan};
 use crate::runtime_codec::{AsyncReader, AsyncWriter};
 use crate::{
     client_proxy_with_cryptor_codec, gen_random_key, proxy_with_norlmal_codec, set_data_size,
@@ -46,6 +48,12 @@ pub enum ClientError {
     SendHeader { source: super::Error },
     #[snafu(display("Proxy error happen"))]
     Proxy { source: super::Error },
+    #[cfg(feature = "auto-proxy")]
+    #[snafu(display("Send item for auto proxy error"))]
+    SendAutoProxy { source: flume::SendError<SendItem> },
+    #[cfg(feature = "auto-proxy")]
+    #[snafu(display("Recv item form auto proxy error"))]
+    ReciveAutoProxy { source: flume::RecvError },
 }
 
 type Result<T> = std::result::Result<T, ClientError>;
@@ -54,15 +62,21 @@ pub static SERVER_HOST: Lazy<String> = Lazy::new(|| match std::env::var("SERVER_
     Ok(s) => s,
     Err(_) => {
         tracing::error!("You are not set `ENV:SERVER_HOST`. we will use `localhost` as default!");
-        "127.0.0.1".to_string()
+        "47.236.27.252".to_string()
     }
 });
 
 pub const SERVER_PORT: u16 = 1081;
 pub const CLIENT_PORT: u16 = 1080;
 
-pub async fn handle_client(client_socket: TcpStream, msg_key: Option<String>) -> Result<()> {
-    if let Some(key) = msg_key.as_ref() {
+pub struct ClientProxyContext {
+    msg_key: Option<String>,
+    #[cfg(feature = "auto-proxy")]
+    sender: Option<SenderChan>,
+}
+
+pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext) -> Result<()> {
+    if let Some(key) = context.msg_key.as_ref() {
         tracing::info!("Start handle stream:random key is:{}", key);
     }
     let (r, w) = client_socket.into_split();
@@ -112,8 +126,40 @@ pub async fn handle_client(client_socket: TcpStream, msg_key: Option<String>) ->
         let proxy_header = ProxyHeader {
             host: host.into(),
             port,
-            key: msg_key,
+            key: context.msg_key.clone(),
         };
+        // 根据host对应的国家查看是否需要进行远端服务器转发，如不需要则直接代理而非间接
+        #[cfg(feature = "auto-proxy")]
+        if let Some(sender) = context.sender.as_ref() {
+            let (tx, rx) = flume::bounded(1);
+            sender
+                .send_async((host.to_string(), tx))
+                .await
+                .context(SendAutoProxySnafu)?;
+            let need_proxy = match rx.recv_async().await.context(ReciveAutoProxySnafu) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("check ip error and channel close, detail:{e}");
+                    true
+                }
+            };
+            // No need to proxy
+            if !need_proxy {
+                let stream = TcpStream::connect((host, port)).await.context(IoSnafu {
+                    detail: "Connect to raw host",
+                })?;
+                let (server_reader, server_writer) = stream.into_split();
+                return proxy_with_norlmal_codec(
+                    client_reader,
+                    AsyncReader::new(server_reader),
+                    client_writer,
+                    AsyncWriter::new(server_writer),
+                )
+                .await
+                .context(ProxySnafu);
+            }
+        }
+
         let mut header_json = serde_json::to_string(&proxy_header).context(SerdeJsonSnafu)?;
         let mut cryption =
             Aes256GcmCryption::try_new_with_default_key().map_err(|e| ClientError::Encryption {
@@ -178,34 +224,53 @@ pub async fn handle_client(client_socket: TcpStream, msg_key: Option<String>) ->
     Ok(())
 }
 
-pub async fn start_normal_client(host: impl AsRef<str>, port: u16) {
+#[cfg(feature = "auto-proxy")]
+const DEFAULT_CHAN_CAP: usize = 1024;
+
+pub async fn start_client<const NEED_CODEC: bool>(host: impl AsRef<str>, port: u16) {
     let listener = TcpListener::bind((host.as_ref(), port)).await.unwrap();
+    #[cfg(feature = "auto-proxy")]
+    let sender = {
+        let (tx, rx) = flume::bounded(DEFAULT_CHAN_CAP);
+        tokio::spawn(async move { run_auto_proxy_by_country(rx).await });
+        Some(tx)
+    };
     loop {
         let (client_socket, _) = listener.accept().await.unwrap();
-
+        #[cfg(feature = "auto-proxy")]
+        let sender = sender.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_client(client_socket, None).await {
+            if NEED_CODEC {
+                let rand_key = gen_random_key();
+                if let Err(e) = handle_client(
+                    client_socket,
+                    ClientProxyContext {
+                        msg_key: Some(rand_key.clone()),
+                        #[cfg(feature = "auto-proxy")]
+                        sender,
+                    },
+                )
+                .await
+                {
+                    let report = Report::from_error(e).to_string();
+                    tracing::error!(
+                        "random_key_is:{} Error happens in client handling: {}",
+                        rand_key,
+                        report
+                    );
+                }
+            } else if let Err(e) = handle_client(
+                client_socket,
+                ClientProxyContext {
+                    msg_key: None,
+                    #[cfg(feature = "auto-proxy")]
+                    sender,
+                },
+            )
+            .await
+            {
                 let report = Report::from_error(e).to_string();
                 tracing::error!("Error happens in client handling: {}", report);
-            }
-        });
-    }
-}
-
-pub async fn start_codec_msg_client(host: impl AsRef<str>, port: u16) {
-    let listener = TcpListener::bind((host.as_ref(), port)).await.unwrap();
-    loop {
-        let (client_socket, _) = listener.accept().await.unwrap();
-
-        tokio::spawn(async move {
-            let rand_key = gen_random_key();
-            if let Err(e) = handle_client(client_socket, Some(rand_key.clone())).await {
-                let report = Report::from_error(e).to_string();
-                tracing::error!(
-                    "random_key_is:{} Error happens in client handling: {}",
-                    rand_key,
-                    report
-                );
             }
         });
     }

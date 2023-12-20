@@ -1,5 +1,7 @@
 use std::fmt::Display;
 
+#[cfg(feature = "auto-proxy")]
+pub mod auto_proxy;
 pub mod client;
 pub(crate) mod runtime_codec;
 pub mod server;
