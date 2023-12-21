@@ -54,6 +54,9 @@ pub enum ClientError {
     #[cfg(feature = "auto-proxy")]
     #[snafu(display("Recv item form auto proxy error"))]
     ReciveAutoProxy { source: flume::RecvError },
+    #[cfg(feature = "auto-proxy")]
+    #[snafu(display("Can't proxy localhost!!! Host(`127.0.0.1:{port}`)"))]
+    LocalHost { port: u16 },
 }
 
 type Result<T> = std::result::Result<T, ClientError>;
@@ -62,7 +65,7 @@ pub static SERVER_HOST: Lazy<String> = Lazy::new(|| match std::env::var("SERVER_
     Ok(s) => s,
     Err(_) => {
         tracing::error!("You are not set `ENV:SERVER_HOST`. we will use `localhost` as default!");
-        "47.236.27.252".to_string()
+        "127.0.0.1".to_string()
     }
 });
 
@@ -120,8 +123,6 @@ pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext
                 detail: "Write Http Connection Ok",
             })?;
 
-        tracing::info!("Start proxy {}:{}", host, port);
-
         // 通知服务器进行流量转发
         let proxy_header = ProxyHeader {
             host: host.into(),
@@ -131,6 +132,31 @@ pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext
         // 根据host对应的国家查看是否需要进行远端服务器转发，如不需要则直接代理而非间接
         #[cfg(feature = "auto-proxy")]
         if let Some(sender) = context.sender.as_ref() {
+            async fn handle_no_proxy(
+                host: &str,
+                port: u16,
+                client_reader: AsyncReader<tokio::net::tcp::OwnedReadHalf>,
+                client_writer: AsyncWriter<tokio::net::tcp::OwnedWriteHalf>,
+            ) -> Result<()> {
+                tracing::info!("Start No Proxy: Host(`{host}:{port}`)");
+                let stream = TcpStream::connect((host, port)).await.context(IoSnafu {
+                    detail: "Connect to raw host",
+                })?;
+                let (server_reader, server_writer) = stream.into_split();
+                proxy_with_norlmal_codec(
+                    client_reader,
+                    AsyncReader::new(server_reader),
+                    client_writer,
+                    AsyncWriter::new(server_writer),
+                )
+                .await
+                .context(ProxySnafu)
+            }
+
+            if host == "127.0.0.1" {
+                LocalHostSnafu { port }.fail()?;
+            }
+
             let (tx, rx) = flume::bounded(1);
             sender
                 .send_async((host.to_string(), tx))
@@ -145,21 +171,11 @@ pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext
             };
             // No need to proxy
             if !need_proxy {
-                let stream = TcpStream::connect((host, port)).await.context(IoSnafu {
-                    detail: "Connect to raw host",
-                })?;
-                let (server_reader, server_writer) = stream.into_split();
-                return proxy_with_norlmal_codec(
-                    client_reader,
-                    AsyncReader::new(server_reader),
-                    client_writer,
-                    AsyncWriter::new(server_writer),
-                )
-                .await
-                .context(ProxySnafu);
+                return handle_no_proxy(host, port, client_reader, client_writer).await;
             }
         }
 
+        tracing::info!("Start proxy {}:{}", host, port);
         let mut header_json = serde_json::to_string(&proxy_header).context(SerdeJsonSnafu)?;
         let mut cryption =
             Aes256GcmCryption::try_new_with_default_key().map_err(|e| ClientError::Encryption {

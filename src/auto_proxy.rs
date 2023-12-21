@@ -59,7 +59,6 @@ use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock};
-use tokio::task::JoinHandle;
 use tracing::info;
 
 async fn get_http_body(stream: TcpStream) -> Result<String> {
@@ -179,7 +178,7 @@ const PROXY_FILE_NAME: &str = ".http2-config-proxy.txt";
 type RwSharedSet = Arc<RwLock<HashSet<String>>>;
 type SharedFile = Arc<Mutex<tokio::fs::File>>;
 type TaskId = u64;
-type TaskMap = Arc<DashMap<String, (TaskId, JoinHandle<bool>)>>;
+type TaskMap = Arc<DashMap<String, (TaskId, async_broadcast::Receiver<bool>)>>;
 
 struct TaskContext {
     task_id: TaskId,
@@ -234,7 +233,7 @@ pub async fn run_auto_proxy_by_country(receiver: ReceiverChan) {
                 continue;
             }
         };
-        // TODO handle regex by default
+        // FIXME Maybe add regex handle?
         // check by cache
         {
             let non_proxy_set = non_proxy_set.read().await;
@@ -250,8 +249,8 @@ pub async fn run_auto_proxy_by_country(receiver: ReceiverChan) {
                 continue;
             }
         }
-        //HOTFIX change handle to broadcast
-        let handle = tokio::spawn(check_proxy(TaskContext {
+        // A [`host`] will only correspond to one task to execute the HTTP request, and the rest will wait for the task to complete.
+        tokio::spawn(check_proxy(TaskContext {
             task_id,
             proxy_set: proxy_set.clone(),
             non_proxy_set: non_proxy_set.clone(),
@@ -261,11 +260,6 @@ pub async fn run_auto_proxy_by_country(receiver: ReceiverChan) {
             notifier,
             tasks: tasks.clone(),
         }));
-
-        // only one task per every host can wait
-        if !tasks.contains_key(&host) {
-            tasks.insert(host, (task_id, handle));
-        }
         task_id += 1;
     }
 }
@@ -288,7 +282,12 @@ async fn cache_miss_send(notifier: Sender<bool>, need_proxy: bool, host: &str) {
     }
 }
 
-async fn check_proxy(context: TaskContext) -> bool {
+enum ChannelContext {
+    Sender(async_broadcast::Sender<bool>),
+    Receiver(async_broadcast::Receiver<bool>),
+}
+
+async fn check_proxy(context: TaskContext) {
     let TaskContext {
         task_id,
         proxy_set,
@@ -299,31 +298,44 @@ async fn check_proxy(context: TaskContext) -> bool {
         notifier,
         tasks,
     } = context;
+    tracing::info!("Start check proxy TaskId:{task_id} Host:{host}");
+    // register task or waiting exist task
+    let channel = match tasks.entry(host.clone()) {
+        dashmap::mapref::entry::Entry::Occupied(o) => {
+            // Don't use await in this scope!!! it lead to deadlock!!!
+            let (exist_task_id, receiver) = o.get();
+            tracing::info!("TaskID:{task_id} ExistTaskId:{exist_task_id} Host:{host}  Info:start to waiting task finish");
+            ChannelContext::Receiver(receiver.clone())
+        }
+        dashmap::mapref::entry::Entry::Vacant(v) => {
+            tracing::info!("Register Task:{task_id} Host({host})");
+            let (tx, rx) = async_broadcast::broadcast(1);
+            v.insert((task_id, rx));
+            ChannelContext::Sender(tx)
+        }
+    };
 
-    // get result by exist task
-    if let Some(mut o) = tasks.get_mut(&host) {
-        let (join_task_id, handle) = o.value_mut();
-        if task_id != *join_task_id {
-            tracing::info!("start waitting for exist task({task_id}) host({host})");
-            return match handle.await {
+    //  get result by http api
+    let tx = match channel {
+        ChannelContext::Receiver(mut rx) => {
+            match rx.recv().await {
                 Ok(r) => {
-                    tracing::info!("Wait for exist task ok!");
+                    tracing::info!(
+                        "TaskId:{task_id} Host({host}) ProxyResult({r}) Info:waiting task ok!"
+                    );
                     cache_miss_send(notifier, r, &host).await;
-                    r
                 }
                 Err(e) => {
-                    tracing::error!(
-                        "Host:{} wait for exist task error:{} we will try to proxy",
-                        host,
-                        e
-                    );
+                    tracing::error!("Task:{task_id} Host({host}) Recevie task result error,we will send true. detail{e}");
                     cache_miss_send(notifier, true, &host).await;
-                    true
                 }
-            };
+            }
+            return;
         }
-    }
-    //  get result by http api
+        ChannelContext::Sender(tx) => tx,
+    };
+
+    tracing::info!("TaskID:{task_id} Host({host}) info:start to query by http");
     let need_proxy = match get_country_code(host.as_str()).await {
         Ok(c) => c != CountryCode::Cn,
         Err(e) => {
@@ -335,7 +347,11 @@ async fn check_proxy(context: TaskContext) -> bool {
         }
     };
     cache_miss_send(notifier, need_proxy, &host).await;
-    //  update cache and config file
+    // broadcast result & update cache & config file
+    match tx.broadcast(need_proxy).await {
+        Ok(_) => tracing::info!("Broadcast ok! Task({task_id}) Host({host})"),
+        Err(e) => tracing::error!("Broadcast error! Task({task_id}) Host({host}) detail:{e}"),
+    }
     if need_proxy {
         let mut proxy_set = proxy_set.write().await;
         let mut proxy_file = proxy_file.lock().await;
@@ -351,7 +367,6 @@ async fn check_proxy(context: TaskContext) -> bool {
         wal_tracing(&mut non_proxy_file, "\n").await;
         non_proxy_set.insert(host);
     }
-    need_proxy
 }
 
 async fn wal_tracing(file: &mut tokio::fs::File, text: impl AsRef<str>) {
@@ -366,49 +381,37 @@ async fn wal_tracing(file: &mut tokio::fs::File, text: impl AsRef<str>) {
 
 #[cfg(test)]
 mod tests {
-    use async_broadcast::{broadcast, TryRecvError};
-    use futures::StreamExt;
+    use async_broadcast::broadcast;
 
     use super::*;
 
     #[tokio::test]
     async fn test_get_country_code() {
-        println!("{:?}", get_country_code("www.bilibli.com").await.unwrap());
+        println!(
+            "{:?}",
+            get_country_code("api-v3.speedtest.cn").await.unwrap()
+        );
     }
     #[tokio::test]
     async fn test_broadcast() {
-        let (s1, r0) = broadcast(2);
-        let s2 = s1.clone();
-        let mut r1 = r0.clone();
-        let mut r2 = r0.clone();
+        let (s, r) = broadcast(2);
+        let mut joins = Vec::new();
 
-        // Send 2 messages from two different senders.
-        s1.broadcast(7).await.unwrap();
-        s2.broadcast(8).await.unwrap();
+        let j = tokio::spawn(async move {
+            // Send 2 messages from two different senders.
+            s.broadcast(7).await.unwrap();
+            s.broadcast(8).await.unwrap();
+        });
+        joins.push(j);
 
-        // Channel is now at capacity so sending more messages will result in an error.
-        assert!(s2.try_broadcast(9).unwrap_err().is_full());
-        assert!(s1.try_broadcast(10).unwrap_err().is_full());
-
-        // We can use `recv` method of the `Stream` implementation to receive messages.
-        assert_eq!(r1.next().await.unwrap(), 7);
-        assert_eq!(r1.recv().await.unwrap(), 8);
-        assert_eq!(r2.next().await.unwrap(), 7);
-        assert_eq!(r2.recv().await.unwrap(), 8);
-
-        let mut r3 = r0.clone();
-        assert_eq!(r3.next().await.unwrap(), 7);
-        assert_eq!(r3.recv().await.unwrap(), 8);
-
-        // All receiver got all messages so channel is now empty.
-        assert_eq!(r1.try_recv(), Err(TryRecvError::Empty));
-        assert_eq!(r2.try_recv(), Err(TryRecvError::Empty));
-
-        // Drop both senders, which closes the channel.
-        drop(s1);
-        drop(s2);
-
-        assert_eq!(r1.try_recv(), Err(TryRecvError::Closed));
-        assert_eq!(r2.try_recv(), Err(TryRecvError::Closed));
+        for _ in 1..5 {
+            let mut r1 = r.clone();
+            let j = tokio::spawn(async move {
+                assert_eq!(r1.recv().await.unwrap(), 7);
+                assert_eq!(r1.recv().await.unwrap(), 8);
+            });
+            joins.push(j);
+        }
+        futures::future::join_all(joins).await;
     }
 }
