@@ -15,6 +15,7 @@ use std::str::FromStr;
 use tokio::net::TcpListener;
 #[cfg(feature = "tokio")]
 use tokio::net::TcpStream;
+use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "monoio")]
 use monoio::net::TcpStream;
@@ -65,7 +66,7 @@ pub static SERVER_HOST: Lazy<String> = Lazy::new(|| match std::env::var("SERVER_
     Ok(s) => s,
     Err(_) => {
         tracing::error!("You are not set `ENV:SERVER_HOST`. we will use `localhost` as default!");
-        "127.0.0.1".to_string()
+        "47.236.111.15".to_string()
     }
 });
 
@@ -75,7 +76,7 @@ pub const CLIENT_PORT: u16 = 1080;
 pub struct ClientProxyContext {
     msg_key: Option<String>,
     #[cfg(feature = "auto-proxy")]
-    sender: Option<SenderChan>,
+    sender: SenderChan,
 }
 
 pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext) -> Result<()> {
@@ -129,9 +130,10 @@ pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext
             port,
             key: context.msg_key.clone(),
         };
+
         // 根据host对应的国家查看是否需要进行远端服务器转发，如不需要则直接代理而非间接
         #[cfg(feature = "auto-proxy")]
-        if let Some(sender) = context.sender.as_ref() {
+        {
             async fn handle_no_proxy(
                 host: &str,
                 port: u16,
@@ -152,10 +154,10 @@ pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext
                 .await
                 .context(ProxySnafu)
             }
-
             if host == "127.0.0.1" {
                 LocalHostSnafu { port }.fail()?;
             }
+            let sender = &context.sender;
 
             let (tx, rx) = flume::bounded(1);
             sender
@@ -243,51 +245,53 @@ pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext
 #[cfg(feature = "auto-proxy")]
 const DEFAULT_CHAN_CAP: usize = 1024;
 
+async fn client_proxy_background_task<const NEED_CODEC: bool>(
+    client_socket: TcpStream,
+    context: ClientProxyContext,
+) {
+    if NEED_CODEC {
+        let random_key = context
+            .msg_key
+            .clone()
+            .expect("must be Some when it `NEED_CODEC` is true");
+        if let Err(e) = handle_client(client_socket, context).await {
+            let report = Report::from_error(e).to_string();
+            tracing::error!(
+                "random_key_is:{random_key} Error happens in client handling: {report}",
+            );
+        }
+    } else if let Err(e) = handle_client(client_socket, context).await {
+        let report = Report::from_error(e).to_string();
+        tracing::error!("Error happens in client handling: {}", report);
+    }
+}
+
 pub async fn start_client<const NEED_CODEC: bool>(host: impl AsRef<str>, port: u16) {
     let listener = TcpListener::bind((host.as_ref(), port)).await.unwrap();
+    let token = CancellationToken::new();
     #[cfg(feature = "auto-proxy")]
     let sender = {
         let (tx, rx) = flume::bounded(DEFAULT_CHAN_CAP);
         tokio::spawn(async move { run_auto_proxy_by_country(rx).await });
-        Some(tx)
+        tx
     };
     loop {
         let (client_socket, _) = listener.accept().await.unwrap();
         #[cfg(feature = "auto-proxy")]
         let sender = sender.clone();
         tokio::spawn(async move {
-            if NEED_CODEC {
-                let rand_key = gen_random_key();
-                if let Err(e) = handle_client(
-                    client_socket,
-                    ClientProxyContext {
-                        msg_key: Some(rand_key.clone()),
-                        #[cfg(feature = "auto-proxy")]
-                        sender,
-                    },
-                )
-                .await
-                {
-                    let report = Report::from_error(e).to_string();
-                    tracing::error!(
-                        "random_key_is:{} Error happens in client handling: {}",
-                        rand_key,
-                        report
-                    );
-                }
-            } else if let Err(e) = handle_client(
+            let background_task = client_proxy_background_task::<NEED_CODEC>(
                 client_socket,
                 ClientProxyContext {
-                    msg_key: None,
+                    msg_key: if NEED_CODEC {
+                        Some(gen_random_key())
+                    } else {
+                        None
+                    },
                     #[cfg(feature = "auto-proxy")]
                     sender,
                 },
-            )
-            .await
-            {
-                let report = Report::from_error(e).to_string();
-                tracing::error!("Error happens in client handling: {}", report);
-            }
+            );
         });
     }
 }

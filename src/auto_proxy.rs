@@ -381,7 +381,11 @@ async fn wal_tracing(file: &mut tokio::fs::File, text: impl AsRef<str>) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use async_broadcast::broadcast;
+    use tokio::time::{self};
+    use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
     use super::*;
 
@@ -392,6 +396,7 @@ mod tests {
             get_country_code("api-v3.speedtest.cn").await.unwrap()
         );
     }
+
     #[tokio::test]
     async fn test_broadcast() {
         let (s, r) = broadcast(2);
@@ -413,5 +418,53 @@ mod tests {
             joins.push(j);
         }
         futures::future::join_all(joins).await;
+    }
+
+    async fn background_task(num: u64) {
+        for i in 0..10 {
+            time::sleep(Duration::from_millis(100 * num)).await;
+            println!("Background task {} in iteration {}.", num, i);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_shutdown() {
+        let tracker = TaskTracker::new();
+        let token = CancellationToken::new();
+
+        for i in 0..10 {
+            let token = token.clone();
+            tracker.spawn(async move {
+                // Use a `tokio::select!` to kill the background task if the token is
+                // cancelled.
+                tokio::select! {
+                    () = background_task(i) => {
+                        println!("Task {} exiting normally.", i);
+                    },
+                    () = token.cancelled() => {
+                        // Do some cleanup before we really exit.
+                        time::sleep(Duration::from_millis(50)).await;
+                        println!("Task {} finished cleanup.", i);
+                    },
+                }
+            });
+        }
+
+        // Spawn a background task that will send the shutdown signal.
+        {
+            let tracker = tracker.clone();
+            tokio::spawn(async move {
+                // Normally you would use something like ctrl-c instead of
+                // sleeping.
+                time::sleep(Duration::from_secs(2)).await;
+                tracker.close();
+                token.cancel();
+            });
+        }
+
+        // Wait for all tasks to exit.
+        tracker.wait().await;
+
+        println!("All tasks have exited now.");
     }
 }

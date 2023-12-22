@@ -11,7 +11,7 @@ static GLOBAL: Jemalloc = Jemalloc;
 use clap::Parser;
 
 #[derive(Parser)]
-#[command(author, version, about, long_about = None)]
+#[command(author = "L_B__", version, about, long_about = None)]
 struct Cli {
     /// [required] IP or domain name of the proxy server (port is fixed to 1081)
     #[arg(short, long, value_name = "SERVER_HOST")]

@@ -5,6 +5,7 @@ pub mod auto_proxy;
 pub mod client;
 pub(crate) mod runtime_codec;
 pub mod server;
+pub(crate) mod util;
 
 use once_cell::sync::Lazy;
 use rand::Rng;
