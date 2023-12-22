@@ -1,10 +1,13 @@
 #[cfg(feature = "auto-proxy")]
-use crate::auto_proxy::{run_auto_proxy_by_country, SendItem, SenderChan};
-use crate::runtime_codec::{AsyncReader, AsyncWriter};
+pub mod auto_proxy;
+use crate::codec::{AsyncReader, AsyncWriter};
+use crate::util::{GracefulShutdownManager, GracefulShutdownManagerImpl};
 use crate::{
     client_proxy_with_cryptor_codec, gen_random_key, proxy_with_norlmal_codec, set_data_size,
     Aes256GcmCryption, MyAsyncReadExt, MyAsyncWriteExt, ProxyHeader,
 };
+#[cfg(feature = "auto-proxy")]
+use auto_proxy::{run_auto_proxy_by_country, SendItem, SenderChan};
 
 #[cfg(feature = "monoio")]
 use monoio::io::Splitable;
@@ -15,7 +18,6 @@ use std::str::FromStr;
 use tokio::net::TcpListener;
 #[cfg(feature = "tokio")]
 use tokio::net::TcpStream;
-use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "monoio")]
 use monoio::net::TcpStream;
@@ -46,9 +48,9 @@ pub enum ClientError {
     #[snafu(display("Encryption error occur,detail:{detail}"))]
     Encryption { detail: String },
     #[snafu(display("Send header error"))]
-    SendHeader { source: super::Error },
+    SendHeader { source: crate::Error },
     #[snafu(display("Proxy error happen"))]
-    Proxy { source: super::Error },
+    Proxy { source: crate::Error },
     #[cfg(feature = "auto-proxy")]
     #[snafu(display("Send item for auto proxy error"))]
     SendAutoProxy { source: flume::SendError<SendItem> },
@@ -156,6 +158,9 @@ pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext
             }
             if host == "127.0.0.1" {
                 LocalHostSnafu { port }.fail()?;
+            }
+            if host.starts_with("cn") || host.ends_with("cn") {
+                return handle_no_proxy(host, port, client_reader, client_writer).await;
             }
             let sender = &context.sender;
 
@@ -268,30 +273,38 @@ async fn client_proxy_background_task<const NEED_CODEC: bool>(
 
 pub async fn start_client<const NEED_CODEC: bool>(host: impl AsRef<str>, port: u16) {
     let listener = TcpListener::bind((host.as_ref(), port)).await.unwrap();
-    let token = CancellationToken::new();
+    let mut manager = GracefulShutdownManagerImpl::new();
+    let mut task_id = 0;
+    // Register SIGINT & SIGTERM & SIGQUIT
+    if !manager.spawn_graceful_signals() {
+        return;
+    }
     #[cfg(feature = "auto-proxy")]
     let sender = {
         let (tx, rx) = flume::bounded(DEFAULT_CHAN_CAP);
-        tokio::spawn(async move { run_auto_proxy_by_country(rx).await });
+        manager.spawn(task_id, async move { run_auto_proxy_by_country(rx).await });
+        task_id += 1;
         tx
     };
-    loop {
+
+    while !manager.is_cancelled() {
         let (client_socket, _) = listener.accept().await.unwrap();
         #[cfg(feature = "auto-proxy")]
         let sender = sender.clone();
-        tokio::spawn(async move {
-            let background_task = client_proxy_background_task::<NEED_CODEC>(
-                client_socket,
-                ClientProxyContext {
-                    msg_key: if NEED_CODEC {
-                        Some(gen_random_key())
-                    } else {
-                        None
-                    },
-                    #[cfg(feature = "auto-proxy")]
-                    sender,
+        let background_task = client_proxy_background_task::<NEED_CODEC>(
+            client_socket,
+            ClientProxyContext {
+                msg_key: if NEED_CODEC {
+                    Some(gen_random_key())
+                } else {
+                    None
                 },
-            );
-        });
+                #[cfg(feature = "auto-proxy")]
+                sender,
+            },
+        );
+        manager.spawn(task_id, background_task);
+        task_id += 1;
     }
+    manager.wait().await;
 }

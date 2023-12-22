@@ -35,8 +35,8 @@ pub enum Error {
     ReadHttpKey,
     #[snafu(display("Read http response value error!"))]
     ReadHttpValue,
-    #[snafu(display("Read http response body error!"))]
-    ReadHttpBody,
+    #[snafu(display("Read http response body error! detail:{detail}"))]
+    ReadHttpBody { detail: &'static str },
     #[snafu(display("Read http response body error!"))]
     ReadHttpBodyWithIO { source: std::io::Error },
     #[snafu(display("Get content length error when parse http response"))]
@@ -105,8 +105,17 @@ async fn get_http_body(stream: TcpStream) -> Result<String> {
         buf.clear();
     };
     // read body
-    if is_eof || body_length.is_none() {
-        ReadHttpBodySnafu {}.fail()?;
+    if is_eof {
+        ReadHttpBodySnafu {
+            detail: "Body not received but EOF",
+        }
+        .fail()?;
+    }
+    if body_length.is_none() {
+        ReadHttpBodySnafu {
+            detail: "Content-Length not received,",
+        }
+        .fail()?;
     }
     buf.resize(body_length.expect("checked by `body_length.is_none()`"), 0);
     reader
@@ -391,10 +400,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_country_code() {
-        println!(
-            "{:?}",
-            get_country_code("api-v3.speedtest.cn").await.unwrap()
-        );
+        println!("{:?}", get_country_code("test.ustc.edu.cn").await.unwrap());
     }
 
     #[tokio::test]
@@ -420,11 +426,12 @@ mod tests {
         futures::future::join_all(joins).await;
     }
 
-    async fn background_task(num: u64) {
+    async fn background_task(num: u64) -> i64 {
         for i in 0..10 {
             time::sleep(Duration::from_millis(100 * num)).await;
             println!("Background task {} in iteration {}.", num, i);
         }
+        10
     }
 
     #[tokio::test]
@@ -438,7 +445,7 @@ mod tests {
                 // Use a `tokio::select!` to kill the background task if the token is
                 // cancelled.
                 tokio::select! {
-                    () = background_task(i) => {
+                    _ = background_task(i) => {
                         println!("Task {} exiting normally.", i);
                     },
                     () = token.cancelled() => {

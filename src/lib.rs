@@ -1,24 +1,22 @@
 use std::fmt::Display;
 
-#[cfg(feature = "auto-proxy")]
-pub mod auto_proxy;
 pub mod client;
-pub(crate) mod runtime_codec;
+pub(crate) mod codec;
 pub mod server;
 pub(crate) mod util;
 
+use codec::{AsyncNormalCodec, CodecError};
 use once_cell::sync::Lazy;
 use rand::Rng;
 use ring::aead::{
     Aad, BoundKey, Nonce, NonceSequence, OpeningKey, SealingKey, Tag, UnboundKey, AES_256_GCM,
     NONCE_LEN,
 };
-use runtime_codec::{AsyncNormalCodec, CodecError};
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use tracing_subscriber::{fmt, layer::SubscriberExt};
 
-use crate::runtime_codec::{AsyncDecryptCodec, AsyncEncryptCodec};
+use codec::{AsyncDecryptCodec, AsyncEncryptCodec};
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -360,8 +358,8 @@ async fn start_proxy<
     client_writer: W,
     server_writer: W,
 ) -> Result<()> {
-    let client_to_server = runtime_codec::copy(client_codec, server_writer);
-    let server_to_client = runtime_codec::copy(server_codec, client_writer);
+    let client_to_server = codec::copy(client_codec, server_writer);
+    let server_to_client = codec::copy(server_codec, client_writer);
     let (r1, r2) = futures::future::join(client_to_server, server_to_client).await;
     proxy_result_handle(r1, r2)
 }

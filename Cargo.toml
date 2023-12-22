@@ -38,13 +38,13 @@ futures = "0.3"
 
 [[bin]]
 name = "http-proxy-client"
-path = "src/client-bin.rs"
+path = "src/bin/client-bin.rs"
 [[bin]]
 name = "http-proxy-server"
-path = "src/server-bin.rs"
+path = "src/bin/server-bin.rs"
 [[bin]]
 name = "http-proxy-cli"
-path = "src/http-proxy-cli.rs"
+path = "src/bin/http-proxy-cli.rs"
 required-features = ["cli-dep"]
 
 [features]
