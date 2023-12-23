@@ -22,6 +22,12 @@ struct Cli {
     /// [optional] Keys for symmetric encryption (must be 32 bytes in length, default value is `my-secret-key123my-secret-key123`)
     #[arg(short, long, value_name = "SECRET_KEY")]
     key: Option<String>,
+    /// [optional] Keywords-set for identify no proxy
+    #[arg(long, value_name = "NONPROXY_KEYWORDS")]
+    nonproxy_keywords: Option<String>,
+    /// [optional] Keywords-set for identify proxy
+    #[arg(long, value_name = "PROXY_KEYWORDS")]
+    proxy_keywords: Option<String>,
     ///[optional] Enable random key for sending message, default is false
     #[arg(short, long, value_name = "MSG_KEY")]
     msg_key: bool,
@@ -33,6 +39,12 @@ async fn main() {
     std::env::set_var("SERVER_HOST", &cli.server_host);
     if let Some(key) = &cli.key {
         std::env::set_var("SECRET_KEY", key);
+    }
+    if let Some(key) = &cli.nonproxy_keywords {
+        std::env::set_var("NONPROXY_KEYWORDS", key);
+    }
+    if let Some(key) = &cli.proxy_keywords {
+        std::env::set_var("PROXY_KEYWORDS", key);
     }
     let port = match cli.port {
         Some(p) => p,
