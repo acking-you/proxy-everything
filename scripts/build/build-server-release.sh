@@ -5,5 +5,5 @@ PROJECT_DIR="$SCRIPT_DIR/../.."
 cd $PROJECT_DIR
 
 echo "Build(Release)..."
-cargo build --bin http-server-client --release
+cargo build --bin http-proxy-server --release
 echo "Build success!"
