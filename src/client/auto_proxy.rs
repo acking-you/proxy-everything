@@ -61,6 +61,8 @@ use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock};
 use tracing::info;
 
+use crate::util::{QueryIpTaskId, TaskId, TaskIdGenerator};
+
 async fn get_http_body(stream: TcpStream) -> Result<String> {
     let mut reader = BufReader::new(stream);
     let mut buf = Vec::new();
@@ -139,6 +141,9 @@ pub async fn get_country_code(host: impl AsRef<str>) -> Result<CountryCode> {
         .context(WriteIpAPISnafu)?;
     let text = get_http_body(stream).await?;
     tracing::info!("Host({}) ipapi body info:{}", host.as_ref(), text);
+    if text.contains("China") {
+        return Ok(CountryCode::Cn);
+    }
     let mut lines = text.lines();
     if !lines.any(|line| line == "success") {
         IpAPINotWorkSnafu {}.fail()?;
@@ -186,7 +191,6 @@ const PROXY_FILE_NAME: &str = ".http2-config-proxy.txt";
 
 type RwSharedSet = Arc<RwLock<HashSet<String>>>;
 type SharedFile = Arc<Mutex<tokio::fs::File>>;
-type TaskId = u64;
 type TaskMap = Arc<DashMap<String, (TaskId, async_broadcast::Receiver<bool>)>>;
 
 struct TaskContext {
@@ -200,15 +204,16 @@ struct TaskContext {
     tasks: TaskMap,
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn run_auto_proxy_by_country(receiver: ReceiverChan) {
     let (non_proxy_set, non_proxy_file) = match get_data_set_and_file(NON_PROXY_FILE_NAME).await {
         Ok(v) => {
-            info!("Init non_proxy_set:{:?}", v.0);
+            info!("`non_proxy_set`:{:?}", v.0);
             v
         }
         Err(e) => {
             tracing::error!(
-                "Get non proxy data set and file error! Stop auto proxy. detail:{}",
+                "init `non_proxy_file` error: detail:{}",
                 snafu::Report::from_error(e)
             );
             return;
@@ -216,12 +221,12 @@ pub async fn run_auto_proxy_by_country(receiver: ReceiverChan) {
     };
     let (proxy_set, proxy_file) = match get_data_set_and_file(PROXY_FILE_NAME).await {
         Ok(v) => {
-            info!("Init proxy_set:{:?}", v.0);
+            info!("`proxy_set`:{:?}", v.0);
             v
         }
         Err(e) => {
             tracing::error!(
-                "Get proxy data set and file error! Stop auto proxy. detail:{}",
+                "init `proxy_file` error: detail:{}",
                 snafu::Report::from_error(e)
             );
             return;
@@ -233,12 +238,12 @@ pub async fn run_auto_proxy_by_country(receiver: ReceiverChan) {
     let proxy_file = Arc::new(Mutex::new(proxy_file));
     let non_proxy_file = Arc::new(Mutex::new(non_proxy_file));
     let tasks = Arc::new(DashMap::new());
-    let mut task_id: TaskId = 0;
+    let mut query_task_id = QueryIpTaskId::new();
     loop {
         let (host, notifier) = match receiver.recv_async().await {
             Ok(v) => v,
             Err(e) => {
-                tracing::error!("get msg error:{}", e);
+                tracing::error!(channel_msg_error = ?e);
                 continue;
             }
         };
@@ -260,7 +265,7 @@ pub async fn run_auto_proxy_by_country(receiver: ReceiverChan) {
         }
         // A [`host`] will only correspond to one task to execute the HTTP request, and the rest will wait for the task to complete.
         tokio::spawn(check_proxy(TaskContext {
-            task_id,
+            task_id: query_task_id.gen(),
             proxy_set: proxy_set.clone(),
             non_proxy_set: non_proxy_set.clone(),
             proxy_file: proxy_file.clone(),
@@ -269,25 +274,22 @@ pub async fn run_auto_proxy_by_country(receiver: ReceiverChan) {
             notifier,
             tasks: tasks.clone(),
         }));
-        task_id += 1;
     }
 }
 
 async fn cached_send(notifier: Sender<bool>, need_proxy: bool, host: &str) {
     if let Err(e) = notifier.send_async(need_proxy).await {
-        tracing::error!(
-            "(Cached) Notify error with {host}:this host will be proxy({need_proxy}),detail:{e}"
-        );
+        tracing::error!(cached_proxy = need_proxy,proxy_host=host ,notifier_send_error = ?e);
     } else {
-        tracing::info!("Hit cache({host}) need_proxy({need_proxy:?})");
+        tracing::info!(cached_proxy = need_proxy, proxy_host = host);
     }
 }
 
 async fn cache_miss_send(notifier: Sender<bool>, need_proxy: bool, host: &str) {
     if let Err(e) = notifier.send_async(need_proxy).await {
-        tracing::error!("(Cache miss) Notify error with {host}:this host will be proxy({need_proxy}),detail:{e}");
+        tracing::error!(cache_miss = need_proxy,proxy_host = host,notifier_send_error = ?e);
     } else {
-        tracing::info!("Cached({host})  need_proxy({need_proxy:?})");
+        tracing::info!(cached_proxy = need_proxy, proxy_host = host);
     }
 }
 
@@ -296,6 +298,7 @@ enum ChannelContext {
     Receiver(async_broadcast::Receiver<bool>),
 }
 
+#[tracing::instrument(skip_all, fields(task_id, host))]
 async fn check_proxy(context: TaskContext) {
     let TaskContext {
         task_id,
@@ -307,17 +310,16 @@ async fn check_proxy(context: TaskContext) {
         notifier,
         tasks,
     } = context;
-    tracing::info!("Start check proxy TaskId:{task_id} Host:{host}");
     // register task or waiting exist task
     let channel = match tasks.entry(host.clone()) {
         dashmap::mapref::entry::Entry::Occupied(o) => {
             // Don't use await in this scope!!! it lead to deadlock!!!
             let (exist_task_id, receiver) = o.get();
-            tracing::info!("TaskID:{task_id} ExistTaskId:{exist_task_id} Host:{host}  Info:start to waiting task finish");
+            tracing::info!(task_id, exist_task_id, host, info = "waiting exist task");
             ChannelContext::Receiver(receiver.clone())
         }
         dashmap::mapref::entry::Entry::Vacant(v) => {
-            tracing::info!("Register Task:{task_id} Host({host})");
+            tracing::info!(register_task_id = task_id, host);
             let (tx, rx) = async_broadcast::broadcast(1);
             v.insert((task_id, rx));
             ChannelContext::Sender(tx)
@@ -329,13 +331,11 @@ async fn check_proxy(context: TaskContext) {
         ChannelContext::Receiver(mut rx) => {
             match rx.recv().await {
                 Ok(r) => {
-                    tracing::info!(
-                        "TaskId:{task_id} Host({host}) ProxyResult({r}) Info:waiting task ok!"
-                    );
+                    tracing::info!(task_id, host, result = r, info = "waiting task finished!");
                     cache_miss_send(notifier, r, &host).await;
                 }
                 Err(e) => {
-                    tracing::error!("Task:{task_id} Host({host}) Recevie task result error,we will send true. detail{e}");
+                    tracing::error!(task_id, host, receive_exist_task_error = ?e);
                     cache_miss_send(notifier, true, &host).await;
                 }
             }
@@ -344,34 +344,31 @@ async fn check_proxy(context: TaskContext) {
         ChannelContext::Sender(tx) => tx,
     };
 
-    tracing::info!("TaskID:{task_id} Host({host}) info:start to query by http");
+    tracing::info!(task_id, host, info = "start to query ip-api");
     let need_proxy = match get_country_code(host.as_str()).await {
         Ok(c) => c != CountryCode::Cn,
         Err(e) => {
-            tracing::error!(
-                "Get country code error:host:{host} we will try to proxy. detail:{}",
-                snafu::Report::from_error(e)
-            );
+            tracing::error!(task_id,host,get_country_code_error = ?snafu::Report::from_error(e));
             true
         }
     };
     cache_miss_send(notifier, need_proxy, &host).await;
     // broadcast result & update cache & config file
     match tx.broadcast(need_proxy).await {
-        Ok(_) => tracing::info!("Broadcast ok! Task({task_id}) Host({host})"),
-        Err(e) => tracing::error!("Broadcast error! Task({task_id}) Host({host}) detail:{e}"),
+        Ok(_) => tracing::info!(task_id, host, info = "broadcast ok!"),
+        Err(e) => tracing::error!(task_id, host, broadcast_error= ?e),
     }
     if need_proxy {
         let mut proxy_set = proxy_set.write().await;
         let mut proxy_file = proxy_file.lock().await;
-        tracing::info!("Add host:{host} to proxy set");
+        tracing::info!(task_id, host, info = "add host to proxy set");
         wal_tracing(&mut proxy_file, host.as_str()).await;
         wal_tracing(&mut proxy_file, "\n").await;
         proxy_set.insert(host);
     } else {
         let mut non_proxy_set = non_proxy_set.write().await;
         let mut non_proxy_file = non_proxy_file.lock().await;
-        tracing::info!("Add host:{host} to no proxy set");
+        tracing::info!(task_id, host, info = "add host to no proxy set");
         wal_tracing(&mut non_proxy_file, host.as_str()).await;
         wal_tracing(&mut non_proxy_file, "\n").await;
         non_proxy_set.insert(host);
@@ -384,7 +381,7 @@ async fn wal_tracing(file: &mut tokio::fs::File, text: impl AsRef<str>) {
         .await
         .context(WALSnafu)
     {
-        tracing::error!("{}", snafu::Report::from_error(e));
+        tracing::error!(wal_error = ?snafu::Report::from_error(e));
     }
 }
 
@@ -400,7 +397,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_country_code() {
-        println!("{:?}", get_country_code("test.ustc.edu.cn").await.unwrap());
+        println!("{:?}", get_country_code("v.qq.com").await.unwrap());
     }
 
     #[tokio::test]

@@ -1,9 +1,12 @@
+use std::fmt::Debug;
+
 #[cfg(feature = "monoio")]
 use monoio::{
     io::{AsyncReadRentExt, Splitable},
     net::TcpStream,
 };
-use snafu::{ResultExt, Snafu};
+use snafu::{Report, ResultExt, Snafu};
+use tokio::net::TcpListener;
 #[cfg(feature = "tokio")]
 use tokio::net::TcpStream;
 
@@ -30,8 +33,9 @@ pub enum ServerError {
 
 use crate::{
     codec::{AsyncReader, AsyncWriter},
-    get_data_size, proxy_with_norlmal_codec, server_proxy_with_cryptor_codec, Aes256GcmCryption,
-    DataSize, MyAsyncReadExt, ProxyHeader,
+    get_data_size, proxy_with_norlmal_codec, server_proxy_with_cryptor_codec,
+    util::{GracefulShutdownManager, GracefulShutdownManagerImpl, ProxyTaskId, TaskIdGenerator},
+    Aes256GcmCryption, DataSize, MyAsyncReadExt, ProxyHeader,
 };
 
 type Result<T> = std::result::Result<T, ServerError>;
@@ -59,6 +63,7 @@ pub async fn handle_connect(conn: TcpStream) -> Result<()> {
             detail: format!("{e}"),
         })?;
 
+    // get header
     let header = cryption
         .decrypt_with_tag(real_buf)
         .map_err(|e| ServerError::Decryption {
@@ -74,7 +79,7 @@ pub async fn handle_connect(conn: TcpStream) -> Result<()> {
     let (r, w) = dest_stream.into_split();
     let (server_reader, server_writer) = (AsyncReader::new(r), AsyncWriter::new(w));
 
-    // 开始进行流量转发
+    // start forward
     if let Some(key) = header.key.as_ref() {
         server_proxy_with_cryptor_codec(
             key,
@@ -89,5 +94,36 @@ pub async fn handle_connect(conn: TcpStream) -> Result<()> {
         proxy_with_norlmal_codec(client_reader, server_reader, client_writer, server_writer)
             .await
             .context(ProxySnafu)
+    }
+}
+
+#[tracing::instrument]
+pub async fn start_server(host: impl AsRef<str> + Debug, port: u16) {
+    let listener = TcpListener::bind((host.as_ref(), port))
+        .await
+        .expect("start lisenter never fails");
+    let mut manager = GracefulShutdownManagerImpl::new();
+    if !manager.spawn_graceful_signals() {
+        return;
+    }
+    let mut task_id = ProxyTaskId::new();
+
+    while !manager.is_cancelled() {
+        let ret = listener.accept().await;
+        let (client_socket, _) = match ret {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(accept_error = ?e,info = "pause 3s,and retry again");
+                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                continue;
+            }
+        };
+
+        manager.spawn(task_id.gen(), async move {
+            if let Err(e) = handle_connect(client_socket).await {
+                let report = Report::from_error(e).to_string();
+                tracing::warn!(handle_client_proxy_error = report);
+            }
+        });
     }
 }

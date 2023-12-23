@@ -17,7 +17,7 @@ async fn main() {
         tracing::info!("`MSG_KEY=ON`, message encryption is used");
         start_client::<true>("0.0.0.0", CLIENT_PORT).await;
     } else {
-        tracing::info!("MSG_KEY not set, message send raw data");
+        tracing::info!("MSG_KEY not set, message will send raw data");
         start_client::<false>("0.0.0.0", CLIENT_PORT).await;
     }
 }

@@ -70,7 +70,7 @@ pub fn gen_random_key() -> String {
     random_string
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ProxyHeader {
     pub host: String,
     pub port: u16,
@@ -280,37 +280,32 @@ pub(crate) trait MyAsyncCodecReader {
     ) -> Result<DataSize>;
 }
 
+#[tracing::instrument(skip_all)]
 pub(crate) fn proxy_result_handle(
-    c_to_s_res: Result<DataSize>,
-    s_to_c_res: Result<DataSize>,
+    client_res: Result<DataSize>,
+    server_res: Result<DataSize>,
 ) -> Result<()> {
-    match (c_to_s_res, s_to_c_res) {
-        (Ok(n_c_to_s), Ok(n_s_to_c)) => {
-            tracing::info!(
-                "Proxy finish! We send {}bytes to server and send {}bytes to client",
-                n_c_to_s,
-                n_s_to_c
-            );
+    match (client_res, server_res) {
+        (Ok(c), Ok(s)) => {
+            tracing::info!("We send {} bytes to server,send {} bytes to client", c, s);
         }
         (Ok(n), Err(e)) => {
             tracing::info!(
-                "Send data to server finish! We send {}bytes to server.
-                But got error when send to client,detail:{}",
+                "We send {} bytes to server,ot error when send to client,detail:{}",
                 n,
                 snafu::Report::from_error(e)
             );
         }
         (Err(e), Ok(n)) => {
             tracing::info!(
-                "Send data to client finish! We send {}bytes to client.
-                But got error when send to server,detail:{}",
+                "We send {} bytes to client,got error when send to server,detail:{}",
                 n,
                 snafu::Report::from_error(e)
             );
         }
         (Err(e1), Err(e2)) => ProxySnafu {
             msg: format!(
-                "send to server:{}\nsend to client:{}",
+                "send to server:{},send to client:{}",
                 snafu::Report::from_error(e1),
                 snafu::Report::from_error(e2)
             ),
@@ -374,7 +369,7 @@ pub(crate) async fn client_proxy_with_cryptor_codec<
     client_writer: W,
     server_writer: W,
 ) -> Result<()> {
-    tracing::info!("Client start proxy with random_key:{}", key.as_ref());
+    tracing::info!("client start forward with random_key:{}", key.as_ref());
     start_proxy(
         get_encyptor_codec(key, client_reader)?,
         get_decyptor_codec(key, server_reader)?,
@@ -394,7 +389,7 @@ pub(crate) async fn server_proxy_with_cryptor_codec<
     client_writer: W,
     server_writer: W,
 ) -> Result<()> {
-    tracing::info!("Server start proxy with random_key:{}", key.as_ref());
+    tracing::info!("server start forward with random_key:{}", key.as_ref());
     start_proxy(
         get_decyptor_codec(key, client_reader)?,
         get_encyptor_codec(key, server_reader)?,

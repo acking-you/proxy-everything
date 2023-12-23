@@ -1,4 +1,4 @@
-use http_proxy::client::{start_codec_msg_client, start_normal_client, CLIENT_PORT, SERVER_HOST};
+use http_proxy::client::{start_client, CLIENT_PORT, SERVER_HOST};
 use http_proxy::{init_tracing, DEFAULT_KEY};
 
 #[cfg(not(target_env = "msvc"))]
@@ -42,8 +42,8 @@ async fn main() {
     tracing::info!("SERVER_HOST:{}", *SERVER_HOST);
     tracing::info!("SECRET_KEY:{}", String::from_utf8_lossy(&DEFAULT_KEY.0));
     if cli.msg_key {
-        start_codec_msg_client("0.0.0.0", port).await;
+        start_client::<true>("0.0.0.0", port).await;
     } else {
-        start_normal_client("0.0.0.0", port).await;
+        start_client::<false>("0.0.0.0", port).await;
     }
 }

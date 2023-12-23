@@ -1,7 +1,9 @@
 #[cfg(feature = "auto-proxy")]
 pub mod auto_proxy;
 use crate::codec::{AsyncReader, AsyncWriter};
-use crate::util::{GracefulShutdownManager, GracefulShutdownManagerImpl};
+use crate::util::{
+    GracefulShutdownManager, GracefulShutdownManagerImpl, ProxyTaskId, TaskIdGenerator,
+};
 use crate::{
     client_proxy_with_cryptor_codec, gen_random_key, proxy_with_norlmal_codec, set_data_size,
     Aes256GcmCryption, MyAsyncReadExt, MyAsyncWriteExt, ProxyHeader,
@@ -13,6 +15,7 @@ use auto_proxy::{run_auto_proxy_by_country, SendItem, SenderChan};
 use monoio::io::Splitable;
 use once_cell::sync::Lazy;
 use snafu::{OptionExt, Report, ResultExt, Snafu};
+use std::fmt::Debug;
 use std::str::FromStr;
 #[cfg(feature = "tokio")]
 use tokio::net::TcpListener;
@@ -62,13 +65,80 @@ pub enum ClientError {
     LocalHost { port: u16 },
 }
 
+#[cfg(feature = "auto-proxy")]
+pub static NONPROXY_KEYWORDS: Lazy<Vec<String>> =
+    Lazy::new(|| match std::env::var("NONPROXY_KEYWORDS") {
+        Ok(k) => {
+            let keywords = k
+                .trim()
+                .split(',')
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>();
+            tracing::info!("`NONPROXY_KEYWORDS` is `{keywords:?}`");
+            keywords
+        }
+        Err(_) => {
+            let keywords = vec![
+                "bilibili".to_string(),
+                "bili".to_string(),
+                "xigua".to_string(),
+                "byte".to_string(),
+                "douyin".to_string(),
+                "cnblogs".to_string(),
+                "qq.com".to_string(),
+                "jd.com".to_string(),
+                "meituan".to_string(),
+                "jianguoyun".to_string(),
+                "taobao.com".to_string(),
+                "csdn".to_string(),
+                "juejin".to_string(),
+                "zhihu".to_string(),
+                "bytedance".to_string(),
+                "ximalaya".to_string(),
+                "cn".to_string(),
+            ];
+            tracing::info!(
+                "No ENV:`NONPROXY_KEYWORDS` provided,we use default keywords:{keywords:?}"
+            );
+            keywords
+        }
+    });
+
+#[cfg(feature = "auto-proxy")]
+pub static PROXY_KEYWORDS: Lazy<Vec<String>> =
+    Lazy::new(|| match std::env::var("PROXY_KEYWORDS") {
+        Ok(k) => {
+            let keywords = k
+                .trim()
+                .split(',')
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>();
+            tracing::info!("`PROXY_KEYWORDS` is `{keywords:?}`");
+            keywords
+        }
+        Err(_) => {
+            let keywords = vec![
+                "tiktok".to_string(),
+                "youtube".to_string(),
+                "google".to_string(),
+                "chatgpt".to_string(),
+                "twitter".to_string(),
+                "facebook".to_string(),
+                "github".to_string(),
+                "docker".to_string(),
+            ];
+            tracing::info!("No ENV:`PROXY_KEYWORDS` provided,we use default keywords:{keywords:?}");
+            keywords
+        }
+    });
+
 type Result<T> = std::result::Result<T, ClientError>;
 
 pub static SERVER_HOST: Lazy<String> = Lazy::new(|| match std::env::var("SERVER_HOST") {
     Ok(s) => s,
     Err(_) => {
         tracing::error!("You are not set `ENV:SERVER_HOST`. we will use `localhost` as default!");
-        "47.236.111.15".to_string()
+        "127.0.0.1".to_string()
     }
 });
 
@@ -81,10 +151,8 @@ pub struct ClientProxyContext {
     sender: SenderChan,
 }
 
+#[tracing::instrument(skip_all, fields(msg_key))]
 pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext) -> Result<()> {
-    if let Some(key) = context.msg_key.as_ref() {
-        tracing::info!("Start handle stream:random key is:{}", key);
-    }
     let (r, w) = client_socket.into_split();
     let (mut client_reader, mut client_writer) = (AsyncReader::new(r), AsyncWriter::new(w));
     let mut buffer = [0; 4096];
@@ -92,7 +160,7 @@ pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext
         detail: "Read Http Header",
     })?;
 
-    // 解析客户端请求
+    // Parse http `CONNECT` request
     let request = String::from_utf8_lossy(&buffer[..]);
     let mut lines = request.lines();
     if let Some(first_line) = lines.next() {
@@ -118,7 +186,7 @@ pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext
             .parse()
             .context(StrPortSnafu)?;
 
-        // 响应客户端连接已建立
+        // response to 200
         client_writer
             .write_all(b"HTTP/1.1 200 OK\r\n\r\n")
             .await
@@ -126,14 +194,7 @@ pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext
                 detail: "Write Http Connection Ok",
             })?;
 
-        // 通知服务器进行流量转发
-        let proxy_header = ProxyHeader {
-            host: host.into(),
-            port,
-            key: context.msg_key.clone(),
-        };
-
-        // 根据host对应的国家查看是否需要进行远端服务器转发，如不需要则直接代理而非间接
+        // check auto proxy to prevent proxy to remote server
         #[cfg(feature = "auto-proxy")]
         {
             async fn handle_no_proxy(
@@ -142,9 +203,9 @@ pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext
                 client_reader: AsyncReader<tokio::net::tcp::OwnedReadHalf>,
                 client_writer: AsyncWriter<tokio::net::tcp::OwnedWriteHalf>,
             ) -> Result<()> {
-                tracing::info!("Start No Proxy: Host(`{host}:{port}`)");
+                tracing::info!(host, port, info = "start no proxy");
                 let stream = TcpStream::connect((host, port)).await.context(IoSnafu {
-                    detail: "Connect to raw host",
+                    detail: format!("Connect to `{host}:{port}` error"),
                 })?;
                 let (server_reader, server_writer) = stream.into_split();
                 proxy_with_norlmal_codec(
@@ -159,30 +220,41 @@ pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext
             if host == "127.0.0.1" {
                 LocalHostSnafu { port }.fail()?;
             }
-            if host.starts_with("cn") || host.ends_with("cn") {
+            // prehandle when host contain `NONPROXY_KEYWORS` or `PROXY_KEYWORDS`
+            let has_nonproxy_list = NONPROXY_KEYWORDS.iter().any(|v| host.contains(v));
+            let has_proxy_list = PROXY_KEYWORDS.iter().any(|v| host.contains(v));
+            if has_nonproxy_list && !has_proxy_list {
                 return handle_no_proxy(host, port, client_reader, client_writer).await;
             }
-            let sender = &context.sender;
+            if !has_proxy_list {
+                // start check by ip-api.com
+                let sender = &context.sender;
 
-            let (tx, rx) = flume::bounded(1);
-            sender
-                .send_async((host.to_string(), tx))
-                .await
-                .context(SendAutoProxySnafu)?;
-            let need_proxy = match rx.recv_async().await.context(ReciveAutoProxySnafu) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::error!("check ip error and channel close, detail:{e}");
-                    true
+                let (tx, rx) = flume::bounded(1);
+                sender
+                    .send_async((host.to_string(), tx))
+                    .await
+                    .context(SendAutoProxySnafu)?;
+                let need_proxy = match rx.recv_async().await.context(ReciveAutoProxySnafu) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!(received_auto_proxy_error=?e);
+                        true
+                    }
+                };
+                // No need to proxy
+                if !need_proxy {
+                    return handle_no_proxy(host, port, client_reader, client_writer).await;
                 }
-            };
-            // No need to proxy
-            if !need_proxy {
-                return handle_no_proxy(host, port, client_reader, client_writer).await;
             }
         }
-
-        tracing::info!("Start proxy {}:{}", host, port);
+        // Start to proxy
+        let proxy_header = ProxyHeader {
+            host: host.into(),
+            port,
+            key: context.msg_key.clone(),
+        };
+        tracing::info!(host, port, info = "start proxy",);
         let mut header_json = serde_json::to_string(&proxy_header).context(SerdeJsonSnafu)?;
         let mut cryption =
             Aes256GcmCryption::try_new_with_default_key().map_err(|e| ClientError::Encryption {
@@ -207,11 +279,10 @@ pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext
         let (r, w) = server_socket.into_split();
         let (server_reader, mut server_writer) = (AsyncReader::new(r), AsyncWriter::new(w));
 
-        // 发送数据头部用于确定数据包大小
+        // send msg header
         set_data_size(&mut server_writer, len)
             .await
             .context(SendHeaderSnafu)?;
-        // 发送addr信息给代理服务器
         server_writer.write_all(addr).await.context(IoSnafu {
             detail: "Send Header(host,ip)",
         })?;
@@ -221,12 +292,9 @@ pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext
             .context(IoSnafu {
                 detail: "Send Header(tag)",
             })?;
-        tracing::info!(
-            "Proxy Header({}) send Ok! Start to forward net flow",
-            proxy_header
-        );
 
-        // 开始进行流量转发
+        // start to forward
+        tracing::info!(?proxy_header, info = "start to forward");
         if let Some(key) = proxy_header.key.as_ref() {
             client_proxy_with_cryptor_codec(
                 key,
@@ -261,20 +329,19 @@ async fn client_proxy_background_task<const NEED_CODEC: bool>(
             .expect("must be Some when it `NEED_CODEC` is true");
         if let Err(e) = handle_client(client_socket, context).await {
             let report = Report::from_error(e).to_string();
-            tracing::error!(
-                "random_key_is:{random_key} Error happens in client handling: {report}",
-            );
+            tracing::error!(random_key, proxy_with_randomkey_handle_error = report);
         }
     } else if let Err(e) = handle_client(client_socket, context).await {
         let report = Report::from_error(e).to_string();
-        tracing::error!("Error happens in client handling: {}", report);
+        tracing::error!(proxy_handle_error = report);
     }
 }
 
-pub async fn start_client<const NEED_CODEC: bool>(host: impl AsRef<str>, port: u16) {
+#[tracing::instrument]
+pub async fn start_client<const NEED_CODEC: bool>(host: impl AsRef<str> + Debug, port: u16) {
     let listener = TcpListener::bind((host.as_ref(), port)).await.unwrap();
     let mut manager = GracefulShutdownManagerImpl::new();
-    let mut task_id = 0;
+    let mut proxy_id = ProxyTaskId::new();
     // Register SIGINT & SIGTERM & SIGQUIT
     if !manager.spawn_graceful_signals() {
         return;
@@ -282,8 +349,9 @@ pub async fn start_client<const NEED_CODEC: bool>(host: impl AsRef<str>, port: u
     #[cfg(feature = "auto-proxy")]
     let sender = {
         let (tx, rx) = flume::bounded(DEFAULT_CHAN_CAP);
-        manager.spawn(task_id, async move { run_auto_proxy_by_country(rx).await });
-        task_id += 1;
+        manager.spawn(proxy_id.gen(), async move {
+            run_auto_proxy_by_country(rx).await
+        });
         tx
     };
 
@@ -303,8 +371,7 @@ pub async fn start_client<const NEED_CODEC: bool>(host: impl AsRef<str>, port: u
                 sender,
             },
         );
-        manager.spawn(task_id, background_task);
-        task_id += 1;
+        manager.spawn(proxy_id.gen(), background_task);
     }
     manager.wait().await;
 }

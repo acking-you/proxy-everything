@@ -7,8 +7,35 @@ use tokio::{
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-type TaskId = i64;
+pub type TaskId = i64;
 const SIGNAL_TASK_ID: TaskId = -1;
+
+pub trait TaskIdGenerator {
+    fn gen(&mut self) -> TaskId;
+}
+
+macro_rules! make_task_id {
+    ($name:ident) => {
+        #[derive(Debug)]
+        pub struct $name(TaskId);
+        impl $name {
+            pub fn new() -> Self {
+                Self(0)
+            }
+        }
+
+        impl TaskIdGenerator for $name {
+            fn gen(&mut self) -> TaskId {
+                let ret = self.0;
+                self.0 += 1;
+                ret
+            }
+        }
+    };
+}
+
+make_task_id!(ProxyTaskId);
+make_task_id!(QueryIpTaskId);
 
 pub trait GracefulShutdownManager {
     async fn wait(&self);
@@ -76,10 +103,10 @@ impl GracefulShutdownManager for GracefulShutdownManagerImpl {
         self.tracker.spawn(async move {
             tokio::select! {
                 _ = token.cancelled()=>{
-                    tracing::info!("TaskId:{task_id} cancelled ok!");
+                    tracing::info!(task_id, "cancelled ok!");
                 }
                 _ = task =>{
-                    tracing::info!("TaskId:{task_id} norlmal finished!");
+                    tracing::info!(task_id, "finished ok!");
                 }
             }
         })
@@ -96,10 +123,10 @@ impl GracefulShutdownManager for GracefulShutdownManagerImpl {
                 .await
                 .expect("Received signal must nerver fails!");
             if is_cancle.load(std::sync::atomic::Ordering::Acquire) {
-                tracing::info!("Received {}, but tasks already cancle", fmt_sig);
+                tracing::info!(signal = fmt_sig, "Tasks already cancle",);
                 return;
             }
-            tracing::info!("Received {}, Start to cancle tasks", fmt_sig);
+            tracing::info!(signal = fmt_sig, "Start to cancle tasks");
             is_cancle.store(true, std::sync::atomic::Ordering::Release);
             tracker.close();
             token.cancel();
