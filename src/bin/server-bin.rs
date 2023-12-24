@@ -3,10 +3,10 @@ use http_proxy::{
     server::{start_server, SERVER_PORT},
 };
 
-#[cfg(not(target_env = "msvc"))]
+#[cfg(not(target_os = "android"))]
 use tikv_jemallocator::Jemalloc;
 
-#[cfg(not(target_env = "msvc"))]
+#[cfg(not(target_os = "android"))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 

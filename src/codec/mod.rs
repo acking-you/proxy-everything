@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use ring::aead::chacha20_poly1305_openssh::TAG_LEN;
 use ring::aead::Tag;
 use snafu::ResultExt;
@@ -31,7 +32,8 @@ impl<T: tokio::io::AsyncWriteExt + Unpin> AsyncWriter<T> {
 }
 
 #[cfg(feature = "tokio")]
-impl<T: tokio::io::AsyncReadExt + Unpin + 'static> MyAsyncReadExt for AsyncReader<T> {
+#[async_trait]
+impl<T: tokio::io::AsyncReadExt + Send + Unpin + 'static> MyAsyncReadExt for AsyncReader<T> {
     async fn read_u32(&mut self) -> crate::Result<u32, std::io::Error> {
         self.0.read_u32().await
     }
@@ -46,7 +48,8 @@ impl<T: tokio::io::AsyncReadExt + Unpin + 'static> MyAsyncReadExt for AsyncReade
 }
 
 #[cfg(feature = "tokio")]
-impl<T: tokio::io::AsyncWriteExt + Unpin> MyAsyncWriteExt for AsyncWriter<T> {
+#[async_trait]
+impl<T: tokio::io::AsyncWriteExt + Send + Unpin> MyAsyncWriteExt for AsyncWriter<T> {
     async fn write_u32(&mut self, n: u32) -> crate::Result<(), std::io::Error> {
         self.0.write_u32(n).await
     }
@@ -164,7 +167,8 @@ where
     }
 }
 
-impl<T: MyAsyncReadExt + Unpin> MyAsyncCodecReader for AsyncNormalCodec<T> {
+#[async_trait]
+impl<T: MyAsyncReadExt + Send + Unpin> MyAsyncCodecReader for AsyncNormalCodec<T> {
     type Item<'a> = &'a mut [u8]
     where
         Self: 'a;
@@ -183,7 +187,7 @@ impl<T: MyAsyncReadExt + Unpin> MyAsyncCodecReader for AsyncNormalCodec<T> {
         Ok(&mut self.buffer[0..n])
     }
 
-    async fn codec_and_write<W: MyAsyncWriteExt + Unpin>(
+    async fn codec_and_write<W: MyAsyncWriteExt + Send + Unpin>(
         &mut self,
         writer: &mut W,
     ) -> crate::Result<DataSize> {
@@ -214,7 +218,8 @@ impl<T: MyAsyncReadExt + Unpin, D: Decryptor + Unpin> AsyncDecryptCodec<T, D> {
     }
 }
 
-impl<T: MyAsyncReadExt + Unpin, D: Decryptor + Unpin + 'static> MyAsyncCodecReader
+#[async_trait]
+impl<T: MyAsyncReadExt + Send + Unpin, D: Decryptor + Send + Unpin + 'static> MyAsyncCodecReader
     for AsyncDecryptCodec<T, D>
 {
     type Item<'a> = &'a mut[u8]
@@ -239,7 +244,7 @@ impl<T: MyAsyncReadExt + Unpin, D: Decryptor + Unpin + 'static> MyAsyncCodecRead
             .context(CodecSnafu)
     }
 
-    async fn codec_and_write<W: MyAsyncWriteExt + Unpin>(
+    async fn codec_and_write<W: MyAsyncWriteExt + Send + Unpin>(
         &mut self,
         writer: &mut W,
     ) -> crate::Result<DataSize> {
@@ -269,7 +274,8 @@ impl<T: MyAsyncReadExt + Unpin, E: Encryptor + Unpin> AsyncEncryptCodec<T, E> {
     }
 }
 
-impl<T: MyAsyncReadExt + Unpin, E: Encryptor + Unpin> MyAsyncCodecReader
+#[async_trait]
+impl<T: MyAsyncReadExt + Send + Unpin, E: Encryptor + Send + Unpin> MyAsyncCodecReader
     for AsyncEncryptCodec<T, E>
 {
     type Item<'a> = (&'a[u8],Tag)
@@ -291,7 +297,7 @@ impl<T: MyAsyncReadExt + Unpin, E: Encryptor + Unpin> MyAsyncCodecReader
         Ok((raw_data, tag))
     }
 
-    async fn codec_and_write<W: MyAsyncWriteExt + Unpin>(
+    async fn codec_and_write<W: MyAsyncWriteExt + Send + Unpin>(
         &mut self,
         writer: &mut W,
     ) -> crate::Result<DataSize> {
@@ -317,7 +323,7 @@ impl<T: MyAsyncReadExt + Unpin, E: Encryptor + Unpin> MyAsyncCodecReader
     }
 }
 
-pub async fn copy<R: MyAsyncCodecReader + Unpin, W: MyAsyncWriteExt + Unpin>(
+pub async fn copy<R: MyAsyncCodecReader + Send + Unpin, W: MyAsyncWriteExt + Send + Unpin>(
     mut reader: R,
     mut writer: W,
 ) -> crate::Result<DataSize> {

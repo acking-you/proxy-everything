@@ -1,10 +1,10 @@
 use http_proxy::client::{start_client, CLIENT_PORT, SERVER_HOST};
 use http_proxy::init_tracing;
 
-#[cfg(not(target_env = "msvc"))]
+#[cfg(not(target_os = "android"))]
 use tikv_jemallocator::Jemalloc;
 
-#[cfg(not(target_env = "msvc"))]
+#[cfg(not(target_os = "android"))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 

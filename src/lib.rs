@@ -5,7 +5,9 @@ pub(crate) mod codec;
 pub mod server;
 pub(crate) mod util;
 
+use async_trait::async_trait;
 use codec::{AsyncNormalCodec, CodecError};
+use futures::future;
 use once_cell::sync::Lazy;
 use rand::Rng;
 use ring::aead::{
@@ -219,11 +221,14 @@ type DataSize = u32;
 pub const MAX_DATA_SIZE: DataSize = 30 * 1024 * 1024;
 
 /// Abstraction of intermediate layers for free switching of runtimes (e.g. monoio and tokio)
+#[async_trait]
 pub(crate) trait MyAsyncReadExt: 'static {
     async fn read_u32(&mut self) -> Result<u32, std::io::Error>;
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error>;
     async fn read_exact(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error>;
 }
+
+#[async_trait]
 pub(crate) trait MyAsyncWriteExt {
     async fn write_u32(&mut self, n: u32) -> Result<(), std::io::Error>;
     async fn write(&mut self, src: &[u8]) -> Result<usize, std::io::Error>;
@@ -269,12 +274,13 @@ pub(crate) async fn set_data_size<T: MyAsyncWriteExt + Unpin>(
 }
 
 /// For free choice of unpacking when reading data
+#[async_trait]
 pub(crate) trait MyAsyncCodecReader {
     type Item<'a>
     where
         Self: 'a;
     async fn codec(&mut self) -> Result<Self::Item<'_>>;
-    async fn codec_and_write<W: MyAsyncWriteExt + Unpin>(
+    async fn codec_and_write<W: MyAsyncWriteExt + Send + Unpin>(
         &mut self,
         writer: &mut W,
     ) -> Result<DataSize>;
@@ -344,9 +350,9 @@ fn get_encyptor_codec<R: MyAsyncReadExt + Unpin>(
 }
 
 async fn start_proxy<
-    ClientCodec: MyAsyncCodecReader + Unpin,
-    ServerCodec: MyAsyncCodecReader + Unpin,
-    W: MyAsyncWriteExt + Unpin,
+    ClientCodec: MyAsyncCodecReader + Send + Unpin,
+    ServerCodec: MyAsyncCodecReader + Send + Unpin,
+    W: MyAsyncWriteExt + Send + Unpin,
 >(
     client_codec: ClientCodec,
     server_codec: ServerCodec,
@@ -355,13 +361,13 @@ async fn start_proxy<
 ) -> Result<()> {
     let client_to_server = codec::copy(client_codec, server_writer);
     let server_to_client = codec::copy(server_codec, client_writer);
-    let (r1, r2) = futures::future::join(client_to_server, server_to_client).await;
+    let (r1, r2) = future::join(client_to_server, server_to_client).await;
     proxy_result_handle(r1, r2)
 }
 
 pub(crate) async fn client_proxy_with_cryptor_codec<
-    R: MyAsyncReadExt + Unpin,
-    W: MyAsyncWriteExt + Unpin,
+    R: MyAsyncReadExt + Send + Unpin,
+    W: MyAsyncWriteExt + Send + Unpin,
 >(
     key: &impl AsRef<str>,
     client_reader: R,
@@ -380,8 +386,8 @@ pub(crate) async fn client_proxy_with_cryptor_codec<
 }
 
 pub(crate) async fn server_proxy_with_cryptor_codec<
-    R: MyAsyncReadExt + Unpin,
-    W: MyAsyncWriteExt + Unpin,
+    R: MyAsyncReadExt + Send + Unpin,
+    W: MyAsyncWriteExt + Send + Unpin,
 >(
     key: &impl AsRef<str>,
     client_reader: R,
@@ -400,8 +406,8 @@ pub(crate) async fn server_proxy_with_cryptor_codec<
 }
 
 pub(crate) async fn proxy_with_norlmal_codec<
-    R: MyAsyncReadExt + Unpin,
-    W: MyAsyncWriteExt + Unpin,
+    R: MyAsyncReadExt + Send + Unpin,
+    W: MyAsyncWriteExt + Send + Unpin,
 >(
     client_reader: R,
     server_reader: R,
