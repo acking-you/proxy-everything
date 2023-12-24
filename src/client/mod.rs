@@ -239,6 +239,7 @@ pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext
                     })?;
                 let (server_reader, server_writer) = stream.into_split();
                 proxy_with_norlmal_codec(
+                    host,
                     client_reader,
                     AsyncReader::new(server_reader),
                     client_writer,
@@ -342,6 +343,7 @@ pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext
         tracing::info!(?proxy_header, info = "start to forward");
         if let Some(key) = proxy_header.key.as_ref() {
             client_proxy_with_cryptor_codec(
+                host,
                 key,
                 client_reader,
                 server_reader,
@@ -351,9 +353,15 @@ pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext
             .await
             .with_context(|_| ProxySnafu { uri })?;
         } else {
-            proxy_with_norlmal_codec(client_reader, server_reader, client_writer, server_writer)
-                .await
-                .with_context(|_| ProxySnafu { uri })?;
+            proxy_with_norlmal_codec(
+                host,
+                client_reader,
+                server_reader,
+                client_writer,
+                server_writer,
+            )
+            .await
+            .with_context(|_| ProxySnafu { uri })?;
         }
     }
 

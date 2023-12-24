@@ -82,6 +82,7 @@ pub async fn handle_connect(conn: TcpStream) -> Result<()> {
     // start forward
     if let Some(key) = header.key.as_ref() {
         server_proxy_with_cryptor_codec(
+            header.host.as_str(),
             key,
             client_reader,
             server_reader,
@@ -91,9 +92,15 @@ pub async fn handle_connect(conn: TcpStream) -> Result<()> {
         .await
         .context(ProxySnafu)
     } else {
-        proxy_with_norlmal_codec(client_reader, server_reader, client_writer, server_writer)
-            .await
-            .context(ProxySnafu)
+        proxy_with_norlmal_codec(
+            header.host.as_str(),
+            client_reader,
+            server_reader,
+            client_writer,
+            server_writer,
+        )
+        .await
+        .context(ProxySnafu)
     }
 }
 
