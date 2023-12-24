@@ -1,6 +1,5 @@
 use std::sync::{atomic::AtomicBool, Arc};
 
-use async_trait::async_trait;
 use futures::Future;
 use tokio::{
     signal::unix::{signal, Signal, SignalKind},
@@ -38,7 +37,6 @@ macro_rules! make_task_id {
 make_task_id!(ProxyTaskId);
 make_task_id!(QueryIpTaskId);
 
-#[async_trait]
 pub trait GracefulShutdownManager {
     async fn wait(&self);
 
@@ -92,7 +90,6 @@ impl GracefulShutdownManagerImpl {
     }
 }
 
-#[async_trait]
 impl GracefulShutdownManager for GracefulShutdownManagerImpl {
     async fn wait(&self) {
         self.tracker.wait().await;
@@ -109,7 +106,7 @@ impl GracefulShutdownManager for GracefulShutdownManagerImpl {
                     tracing::info!(task_id, "cancelled ok!");
                 }
                 _ = task =>{
-                    tracing::info!(task_id, "finished ok!");
+                    tracing::debug!(task_id, "finished ok!");
                 }
             }
         })

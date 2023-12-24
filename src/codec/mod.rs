@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use ring::aead::chacha20_poly1305_openssh::TAG_LEN;
 use ring::aead::Tag;
 use snafu::ResultExt;
@@ -32,7 +31,6 @@ impl<T: tokio::io::AsyncWriteExt + Unpin> AsyncWriter<T> {
 }
 
 #[cfg(feature = "tokio")]
-#[async_trait]
 impl<T: tokio::io::AsyncReadExt + Send + Unpin + 'static> MyAsyncReadExt for AsyncReader<T> {
     async fn read_u32(&mut self) -> crate::Result<u32, std::io::Error> {
         self.0.read_u32().await
@@ -48,7 +46,6 @@ impl<T: tokio::io::AsyncReadExt + Send + Unpin + 'static> MyAsyncReadExt for Asy
 }
 
 #[cfg(feature = "tokio")]
-#[async_trait]
 impl<T: tokio::io::AsyncWriteExt + Send + Unpin> MyAsyncWriteExt for AsyncWriter<T> {
     async fn write_u32(&mut self, n: u32) -> crate::Result<(), std::io::Error> {
         self.0.write_u32(n).await
@@ -167,7 +164,6 @@ where
     }
 }
 
-#[async_trait]
 impl<T: MyAsyncReadExt + Send + Unpin> MyAsyncCodecReader for AsyncNormalCodec<T> {
     type Item<'a> = &'a mut [u8]
     where
@@ -218,7 +214,6 @@ impl<T: MyAsyncReadExt + Unpin, D: Decryptor + Unpin> AsyncDecryptCodec<T, D> {
     }
 }
 
-#[async_trait]
 impl<T: MyAsyncReadExt + Send + Unpin, D: Decryptor + Send + Unpin + 'static> MyAsyncCodecReader
     for AsyncDecryptCodec<T, D>
 {
@@ -274,7 +269,6 @@ impl<T: MyAsyncReadExt + Unpin, E: Encryptor + Unpin> AsyncEncryptCodec<T, E> {
     }
 }
 
-#[async_trait]
 impl<T: MyAsyncReadExt + Send + Unpin, E: Encryptor + Send + Unpin> MyAsyncCodecReader
     for AsyncEncryptCodec<T, E>
 {

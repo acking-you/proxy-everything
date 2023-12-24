@@ -5,7 +5,6 @@ pub(crate) mod codec;
 pub mod server;
 pub(crate) mod util;
 
-use async_trait::async_trait;
 use codec::{AsyncNormalCodec, CodecError};
 use futures::future;
 use once_cell::sync::Lazy;
@@ -221,14 +220,12 @@ type DataSize = u32;
 pub const MAX_DATA_SIZE: DataSize = 30 * 1024 * 1024;
 
 /// Abstraction of intermediate layers for free switching of runtimes (e.g. monoio and tokio)
-#[async_trait]
 pub(crate) trait MyAsyncReadExt: 'static {
     async fn read_u32(&mut self) -> Result<u32, std::io::Error>;
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error>;
     async fn read_exact(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error>;
 }
 
-#[async_trait]
 pub(crate) trait MyAsyncWriteExt {
     async fn write_u32(&mut self, n: u32) -> Result<(), std::io::Error>;
     async fn write(&mut self, src: &[u8]) -> Result<usize, std::io::Error>;
@@ -274,7 +271,6 @@ pub(crate) async fn set_data_size<T: MyAsyncWriteExt + Unpin>(
 }
 
 /// For free choice of unpacking when reading data
-#[async_trait]
 pub(crate) trait MyAsyncCodecReader {
     type Item<'a>
     where
@@ -288,30 +284,39 @@ pub(crate) trait MyAsyncCodecReader {
 
 #[tracing::instrument(skip_all)]
 pub(crate) fn proxy_result_handle(
+    host: impl AsRef<str>,
     client_res: Result<DataSize>,
     server_res: Result<DataSize>,
 ) -> Result<()> {
     match (client_res, server_res) {
         (Ok(c), Ok(s)) => {
-            tracing::info!("We send {} bytes to server,send {} bytes to client", c, s);
+            tracing::info!(
+                "We send {} bytes to {},received {} bytes",
+                c,
+                host.as_ref(),
+                s
+            );
         }
         (Ok(n), Err(e)) => {
             tracing::info!(
-                "We send {} bytes to server,ot error when send to client,detail:{}",
+                "We send {} bytes to {},got error when received data,detail:{}",
                 n,
+                host.as_ref(),
                 snafu::Report::from_error(e)
             );
         }
         (Err(e), Ok(n)) => {
             tracing::info!(
-                "We send {} bytes to client,got error when send to server,detail:{}",
+                "We send {} bytes to {},got error when received data,detail:{}",
                 n,
+                host.as_ref(),
                 snafu::Report::from_error(e)
             );
         }
         (Err(e1), Err(e2)) => ProxySnafu {
             msg: format!(
-                "send to server:{},send to client:{}",
+                "send data to {} error: {},and received data error:{}",
+                host.as_ref(),
                 snafu::Report::from_error(e1),
                 snafu::Report::from_error(e2)
             ),
@@ -354,6 +359,7 @@ async fn start_proxy<
     ServerCodec: MyAsyncCodecReader + Send + Unpin,
     W: MyAsyncWriteExt + Send + Unpin,
 >(
+    host: impl AsRef<str>,
     client_codec: ClientCodec,
     server_codec: ServerCodec,
     client_writer: W,
@@ -362,13 +368,14 @@ async fn start_proxy<
     let client_to_server = codec::copy(client_codec, server_writer);
     let server_to_client = codec::copy(server_codec, client_writer);
     let (r1, r2) = future::join(client_to_server, server_to_client).await;
-    proxy_result_handle(r1, r2)
+    proxy_result_handle(host, r1, r2)
 }
 
 pub(crate) async fn client_proxy_with_cryptor_codec<
     R: MyAsyncReadExt + Send + Unpin,
     W: MyAsyncWriteExt + Send + Unpin,
 >(
+    host: impl AsRef<str>,
     key: &impl AsRef<str>,
     client_reader: R,
     server_reader: R,
@@ -377,6 +384,7 @@ pub(crate) async fn client_proxy_with_cryptor_codec<
 ) -> Result<()> {
     tracing::info!("client start forward with random_key:{}", key.as_ref());
     start_proxy(
+        host,
         get_encyptor_codec(key, client_reader)?,
         get_decyptor_codec(key, server_reader)?,
         client_writer,
@@ -389,6 +397,7 @@ pub(crate) async fn server_proxy_with_cryptor_codec<
     R: MyAsyncReadExt + Send + Unpin,
     W: MyAsyncWriteExt + Send + Unpin,
 >(
+    host: impl AsRef<str>,
     key: &impl AsRef<str>,
     client_reader: R,
     server_reader: R,
@@ -397,6 +406,7 @@ pub(crate) async fn server_proxy_with_cryptor_codec<
 ) -> Result<()> {
     tracing::info!("server start forward with random_key:{}", key.as_ref());
     start_proxy(
+        host,
         get_decyptor_codec(key, client_reader)?,
         get_encyptor_codec(key, server_reader)?,
         client_writer,
@@ -409,12 +419,14 @@ pub(crate) async fn proxy_with_norlmal_codec<
     R: MyAsyncReadExt + Send + Unpin,
     W: MyAsyncWriteExt + Send + Unpin,
 >(
+    host: impl AsRef<str>,
     client_reader: R,
     server_reader: R,
     client_writer: W,
     server_writer: W,
 ) -> Result<()> {
     start_proxy(
+        host,
         AsyncNormalCodec::new(client_reader),
         AsyncNormalCodec::new(server_reader),
         client_writer,
