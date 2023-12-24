@@ -17,6 +17,7 @@ use once_cell::sync::Lazy;
 use snafu::{OptionExt, Report, ResultExt, Snafu};
 use std::fmt::Debug;
 use std::str::FromStr;
+use tokio::io::AsyncWriteExt;
 #[cfg(feature = "tokio")]
 use tokio::net::TcpListener;
 #[cfg(feature = "tokio")]
@@ -172,11 +173,58 @@ pub static SERVER_HOST: Lazy<String> = Lazy::new(|| match std::env::var("SERVER_
 
 pub const SERVER_PORT: u16 = 1081;
 pub const CLIENT_PORT: u16 = 1080;
-
+const HTTP_PORT: u16 = 80;
+const HTTP_SCHEMA: &str = "http://";
 pub struct ClientProxyContext {
     msg_key: Option<String>,
     #[cfg(feature = "auto-proxy")]
     sender: SenderChan,
+}
+
+fn extract_host_from_uri(uri: &str) -> Option<&str> {
+    let url = uri.trim().strip_prefix(HTTP_SCHEMA)?;
+    let idx = url.find('/');
+    match idx {
+        Some(i) => Some(&url[..i]),
+        None => Some(url),
+    }
+}
+
+#[tracing::instrument(skip_all, fields(uri, method))]
+async fn do_http_proxy_with_no_ssl(
+    client_reader: AsyncReader<tokio::net::tcp::OwnedReadHalf>,
+    client_writer: AsyncWriter<tokio::net::tcp::OwnedWriteHalf>,
+    uri: &str,
+    method: &str,
+    buf: &[u8],
+) -> Result<()> {
+    let host = match extract_host_from_uri(uri) {
+        Some(host) => host,
+        None => NotSupportedSnafu { uri, method }.fail()?,
+    };
+    tracing::info!(uri, info = "start http proxy with no ssl");
+    let mut stream = TcpStream::connect((host, HTTP_PORT))
+        .await
+        .with_context(|_| IoSnafu {
+            uri: uri.to_string(),
+            detail: "error in start http proxy with no ssl",
+        })?;
+    stream.write_all(buf).await.with_context(|_| IoSnafu {
+        uri: Some(uri.to_string()),
+        detail: "do http proxy first write error",
+    })?;
+    let (server_reader, server_writer) = stream.into_split();
+    proxy_with_norlmal_codec(
+        host,
+        client_reader,
+        AsyncReader::new(server_reader),
+        client_writer,
+        AsyncWriter::new(server_writer),
+    )
+    .await
+    .with_context(|_| ProxySnafu {
+        uri: format!("{host}:{HTTP_PORT}"),
+    })
 }
 
 #[tracing::instrument(skip_all, fields(msg_key))]
@@ -184,7 +232,7 @@ pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext
     let (r, w) = client_socket.into_split();
     let (mut client_reader, mut client_writer) = (AsyncReader::new(r), AsyncWriter::new(w));
     let mut buffer = [0; 4096];
-    client_reader.read(&mut buffer).await.context(IoSnafu {
+    let read_n = client_reader.read(&mut buffer).await.context(IoSnafu {
         uri: None,
         detail: "Read Http Header",
     })?;
@@ -200,8 +248,16 @@ pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext
         let uri = parts.next().context(UriSnafu)?;
         let _version = parts.next().context(VersionSnafu { uri })?;
         let method = method.to_ascii_lowercase();
+        // if not connct do http request and not proxy
         if method != "connect" {
-            NotSupportedSnafu { uri, method }.fail()?
+            return do_http_proxy_with_no_ssl(
+                client_reader,
+                client_writer,
+                uri,
+                &method,
+                &buffer[..read_n],
+            )
+            .await;
         }
 
         let mut parts = uri.split(':');
