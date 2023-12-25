@@ -1,12 +1,13 @@
 #[cfg(feature = "auto-proxy")]
 pub mod auto_proxy;
+pub mod http;
 use crate::codec::{AsyncReader, AsyncWriter};
 use crate::util::{
     GracefulShutdownManager, GracefulShutdownManagerImpl, ProxyTaskId, TaskIdGenerator,
 };
 use crate::{
     client_proxy_with_cryptor_codec, gen_random_key, proxy_with_norlmal_codec, set_data_size,
-    Aes256GcmCryption, MyAsyncReadExt, MyAsyncWriteExt, ProxyHeader,
+    Aes256GcmCryption, MyAsyncWriteExt, ProxyHeader,
 };
 #[cfg(feature = "auto-proxy")]
 use auto_proxy::{run_auto_proxy_by_country, SendItem, SenderChan};
@@ -14,10 +15,11 @@ use auto_proxy::{run_auto_proxy_by_country, SendItem, SenderChan};
 #[cfg(feature = "monoio")]
 use monoio::io::Splitable;
 use once_cell::sync::Lazy;
-use snafu::{OptionExt, Report, ResultExt, Snafu};
-use std::fmt::Debug;
+use snafu::{Report, ResultExt, Snafu};
+use std::fmt::{Debug, Display};
 use std::str::FromStr;
-use tokio::io::AsyncWriteExt;
+use tokio::io::AsyncReadExt;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 #[cfg(feature = "tokio")]
 use tokio::net::TcpListener;
 #[cfg(feature = "tokio")]
@@ -25,6 +27,8 @@ use tokio::net::TcpStream;
 
 #[cfg(feature = "monoio")]
 use monoio::net::TcpStream;
+
+use self::http::HttpProxierProvider;
 
 #[derive(Debug, Snafu)]
 pub enum ClientError {
@@ -77,6 +81,8 @@ pub enum ClientError {
     #[cfg(feature = "auto-proxy")]
     #[snafu(display("Can't proxy localhost!!! Host(`127.0.0.1:{port}`)"))]
     LocalHost { port: u16 },
+    #[snafu(display("Invalid proxy header({proxy})"))]
+    InvliadProxy { proxy: &'static str },
 }
 
 #[cfg(feature = "auto-proxy")]
@@ -161,7 +167,7 @@ pub static PROXY_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
     }
 });
 
-type Result<T> = std::result::Result<T, ClientError>;
+pub type Result<T> = std::result::Result<T, ClientError>;
 
 pub static SERVER_HOST: Lazy<String> = Lazy::new(|| match std::env::var("SERVER_HOST") {
     Ok(s) => s,
@@ -171,188 +177,176 @@ pub static SERVER_HOST: Lazy<String> = Lazy::new(|| match std::env::var("SERVER_
     }
 });
 
-pub const SERVER_PORT: u16 = 1081;
-pub const CLIENT_PORT: u16 = 1080;
-const HTTP_PORT: u16 = 80;
-const HTTP_SCHEMA: &str = "http://";
-pub struct ClientProxyContext {
-    msg_key: Option<String>,
-    #[cfg(feature = "auto-proxy")]
-    sender: SenderChan,
+pub trait Proxier {
+    fn proxy(self) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
-fn extract_host_from_uri(uri: &str) -> Option<&str> {
-    let url = uri.trim().strip_prefix(HTTP_SCHEMA)?;
-    let idx = url.find('/');
-    match idx {
-        Some(i) => Some(&url[..i]),
-        None => Some(url),
+pub struct HeaderContext<'a> {
+    header: &'a [u8],
+    msg_key: Option<&'a str>,
+}
+
+pub struct ProxyContext<'a> {
+    /// header buffer for response [only http proxy use]
+    buffer: &'a [u8],
+    sender: &'a SenderChan,
+    stream: TcpStream,
+}
+
+pub trait ProxierProvider {
+    type Item: Proxier;
+
+    fn try_new_from_header_context(header_context: HeaderContext<'_>) -> Result<Self>
+    where
+        Self: std::marker::Sized;
+
+    fn try_build_from_proxy_context(
+        self,
+        proxy_context: ProxyContext<'_>,
+    ) -> impl std::future::Future<Output = Result<Self::Item>> + Send;
+}
+
+pub trait ProxierProviderType {
+    type Provider: ProxierProvider;
+    const PROXY_TYPE: &'static str;
+}
+pub struct HttpProxierProviderType {}
+
+impl ProxierProviderType for HttpProxierProviderType {
+    type Provider = HttpProxierProvider;
+    const PROXY_TYPE: &'static str = "HTTP/HTTPS";
+}
+
+pub const SERVER_PORT: u16 = 1081;
+pub const CLIENT_PORT: u16 = 1080;
+
+pub type TcpAsyncReader<T = OwnedReadHalf> = AsyncReader<T>;
+pub type TcpAsyncWriter<T = OwnedWriteHalf> = AsyncWriter<T>;
+
+#[derive(Debug)]
+pub struct ForwardContext {
+    host: String,
+    port: u16,
+    need_proxy: bool,
+    msg_key: Option<String>,
+}
+
+impl Display for ForwardContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "addr:({}:{}) need_proxy({})",
+            self.host, self.port, self.need_proxy
+        )
     }
 }
 
-#[tracing::instrument(skip_all, fields(uri, method))]
-async fn do_http_proxy_with_no_ssl(
-    client_reader: AsyncReader<tokio::net::tcp::OwnedReadHalf>,
-    client_writer: AsyncWriter<tokio::net::tcp::OwnedWriteHalf>,
-    uri: &str,
-    method: &str,
-    buf: &[u8],
-) -> Result<()> {
-    let host = match extract_host_from_uri(uri) {
-        Some(host) => host,
-        None => NotSupportedSnafu { uri, method }.fail()?,
-    };
-    tracing::info!(uri, info = "start http proxy with no ssl");
-    let mut stream = TcpStream::connect((host, HTTP_PORT))
-        .await
-        .with_context(|_| IoSnafu {
-            uri: uri.to_string(),
-            detail: "error in start http proxy with no ssl",
-        })?;
-    stream.write_all(buf).await.with_context(|_| IoSnafu {
-        uri: Some(uri.to_string()),
-        detail: "do http proxy first write error",
-    })?;
-    let (server_reader, server_writer) = stream.into_split();
-    proxy_with_norlmal_codec(
-        host,
-        client_reader,
-        AsyncReader::new(server_reader),
-        client_writer,
-        AsyncWriter::new(server_writer),
-    )
-    .await
-    .with_context(|_| ProxySnafu {
-        uri: format!("{host}:{HTTP_PORT}"),
-    })
+pub struct ProxierImpl {
+    context: ForwardContext,
+    client_reader: TcpAsyncReader,
+    client_writer: TcpAsyncWriter,
+    server_reader: TcpAsyncReader,
+    server_writer: TcpAsyncWriter,
 }
 
-#[tracing::instrument(skip_all, fields(msg_key))]
-pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext) -> Result<()> {
-    let (r, w) = client_socket.into_split();
-    let (mut client_reader, mut client_writer) = (AsyncReader::new(r), AsyncWriter::new(w));
-    let mut buffer = [0; 4096];
-    let read_n = client_reader.read(&mut buffer).await.context(IoSnafu {
-        uri: None,
-        detail: "Read Http Header",
-    })?;
+#[inline]
+pub fn get_uri(host: impl AsRef<str>, port: u16) -> String {
+    format!("{}:{}", host.as_ref(), port)
+}
 
-    // Parse http `CONNECT` request
-    let request = String::from_utf8_lossy(&buffer[..]);
-    let mut lines = request.lines();
-    if let Some(first_line) = lines.next() {
-        let mut parts = first_line.split_whitespace();
-        let method = parts.next().context(MethodSnafu {
-            uri: first_line.to_string(),
-        })?;
-        let uri = parts.next().context(UriSnafu)?;
-        let _version = parts.next().context(VersionSnafu { uri })?;
-        let method = method.to_ascii_lowercase();
-        // if not connct do http request and not proxy
-        if method != "connect" {
-            return do_http_proxy_with_no_ssl(
-                client_reader,
-                client_writer,
-                uri,
-                &method,
-                &buffer[..read_n],
-            )
-            .await;
-        }
-
-        let mut parts = uri.split(':');
-        let host = parts.next().context(HostSnafu { uri })?;
-        let port: u16 = parts
-            .next()
-            .context(PortSnafu { uri })?
-            .parse()
-            .context(StrPortSnafu { uri })?;
-
-        // response to 200
-        client_writer
-            .write_all(b"HTTP/1.1 200 OK\r\n\r\n")
+/// we will not proxy when if option is some
+#[cfg(feature = "auto-proxy")]
+pub async fn need_proxy(
+    host: impl AsRef<str>,
+    port: u16,
+    sender: &SenderChan,
+) -> Result<Option<&'static str>> {
+    if host.as_ref() == "127.0.0.1" {
+        LocalHostSnafu { port }.fail()?;
+    }
+    // prehandle when host contain `NONPROXY_KEYWORS` or `PROXY_KEYWORDS`
+    let has_nonproxy_list = NONPROXY_KEYWORDS.iter().any(|v| host.as_ref().contains(v));
+    let has_proxy_list = PROXY_KEYWORDS.iter().any(|v| host.as_ref().contains(v));
+    if has_nonproxy_list && !has_proxy_list {
+        return Ok(Some(
+            "[NOPROXY-RULES] we will start connect server directly",
+        ));
+    }
+    if !has_proxy_list {
+        // start check by ip-api.com
+        let (tx, rx) = flume::bounded(1);
+        sender
+            .send_async((host.as_ref().to_string(), tx))
             .await
-            .with_context(|_| IoSnafu {
-                uri: Some(uri.to_string()),
-                detail: "Write Http Connection Ok",
+            .with_context(|_| SendAutoProxySnafu {
+                uri: get_uri(host.as_ref(), port),
             })?;
-
-        // check auto proxy to prevent proxy to remote server
-        #[cfg(feature = "auto-proxy")]
-        {
-            async fn handle_no_proxy(
-                host: &str,
-                port: u16,
-                client_reader: AsyncReader<tokio::net::tcp::OwnedReadHalf>,
-                client_writer: AsyncWriter<tokio::net::tcp::OwnedWriteHalf>,
-            ) -> Result<()> {
-                tracing::info!(host, port, info = "start no proxy");
-                let stream = TcpStream::connect((host, port))
-                    .await
-                    .with_context(|_| IoSnafu {
-                        uri: Some(format!("{host}:{port}")),
-                        detail: "error in start connect to no proxy",
-                    })?;
-                let (server_reader, server_writer) = stream.into_split();
-                proxy_with_norlmal_codec(
-                    host,
-                    client_reader,
-                    AsyncReader::new(server_reader),
-                    client_writer,
-                    AsyncWriter::new(server_writer),
-                )
-                .await
-                .with_context(|_| ProxySnafu {
-                    uri: format!("{host}:{port}"),
-                })
+        let need_proxy = match rx
+            .recv_async()
+            .await
+            .with_context(|_| ReciveAutoProxySnafu {
+                uri: get_uri(host.as_ref(), port),
+            }) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(received_auto_proxy_error=?e);
+                true
             }
-            if host == "127.0.0.1" {
-                LocalHostSnafu { port }.fail()?;
-            }
-            // prehandle when host contain `NONPROXY_KEYWORS` or `PROXY_KEYWORDS`
-            let has_nonproxy_list = NONPROXY_KEYWORDS.iter().any(|v| host.contains(v));
-            let has_proxy_list = PROXY_KEYWORDS.iter().any(|v| host.contains(v));
-            if has_nonproxy_list && !has_proxy_list {
-                return handle_no_proxy(host, port, client_reader, client_writer).await;
-            }
-            if !has_proxy_list {
-                // start check by ip-api.com
-                let sender = &context.sender;
-
-                let (tx, rx) = flume::bounded(1);
-                sender
-                    .send_async((host.to_string(), tx))
-                    .await
-                    .with_context(|_| SendAutoProxySnafu { uri })?;
-                let need_proxy = match rx
-                    .recv_async()
-                    .await
-                    .with_context(|_| ReciveAutoProxySnafu { uri })
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::error!(received_auto_proxy_error=?e);
-                        true
-                    }
-                };
-                // No need to proxy
-                if !need_proxy {
-                    return handle_no_proxy(host, port, client_reader, client_writer).await;
-                }
-            }
+        };
+        if !need_proxy {
+            return Ok(Some("[NOPROXY-AUTO] we will start connect server by proxy"));
         }
+    }
+    Ok(None)
+}
+
+impl Proxier for ProxierImpl {
+    #[tracing::instrument(skip_all, fields(context))]
+    async fn proxy(self) -> Result<()> {
+        let ProxierImpl {
+            context,
+            client_reader,
+            client_writer,
+            server_reader,
+            mut server_writer,
+        } = self;
+        let ForwardContext {
+            need_proxy,
+            host,
+            port,
+            msg_key,
+        } = context;
+
+        // Start no proxy
+        if !need_proxy {
+            tracing::info!(host, port, "start no proxy");
+            return proxy_with_norlmal_codec(
+                &host,
+                client_reader,
+                server_reader,
+                client_writer,
+                server_writer,
+            )
+            .await
+            .with_context(|_| ProxySnafu {
+                uri: get_uri(host.as_str(), port),
+            });
+        }
+
         // Start to proxy
         let proxy_header = ProxyHeader {
-            host: host.into(),
+            host: host.clone(),
             port,
-            key: context.msg_key.clone(),
+            key: msg_key,
         };
         tracing::info!(host, port, info = "start proxy",);
         let mut header_json =
-            serde_json::to_string(&proxy_header).with_context(|_| SerdeJsonSnafu { uri })?;
+            serde_json::to_string(&proxy_header).with_context(|_| SerdeJsonSnafu {
+                uri: get_uri(host.as_str(), port),
+            })?;
         let mut cryption =
             Aes256GcmCryption::try_new_with_default_key().map_err(|e| ClientError::Encryption {
-                uri: uri.to_string(),
+                uri: get_uri(host.as_str(), port),
                 detail: e.to_string(),
             })?;
 
@@ -361,45 +355,39 @@ pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext
             let tag = cryption
                 .encrypt(addr)
                 .map_err(|e| ClientError::Encryption {
-                    uri: uri.to_string(),
+                    uri: get_uri(host.as_str(), port),
                     detail: e.to_string(),
                 })?;
             let len = addr.len() + tag.as_ref().len();
             (addr, tag, len as u32)
         };
-        let server_socket = TcpStream::connect((SERVER_HOST.as_ref(), SERVER_PORT))
-            .await
-            .with_context(|_| IoSnafu {
-                uri: Some(uri.to_string()),
-                detail: "Connect to proxy server",
-            })?;
-        let (r, w) = server_socket.into_split();
-        let (server_reader, mut server_writer) = (AsyncReader::new(r), AsyncWriter::new(w));
 
         // send msg header
         set_data_size(&mut server_writer, len)
             .await
-            .with_context(|_| SendHeaderSnafu { uri })?;
+            .with_context(|_| SendHeaderSnafu {
+                uri: get_uri(host.as_str(), port),
+            })?;
         server_writer
             .write_all(addr)
             .await
             .with_context(|_| IoSnafu {
-                uri: Some(uri.to_string()),
+                uri: Some(get_uri(host.as_str(), port)),
                 detail: "Send Header(host,ip)",
             })?;
         server_writer
             .write_all(tag.as_ref())
             .await
             .with_context(|_| IoSnafu {
-                uri: Some(uri.to_string()),
+                uri: Some(get_uri(host.as_str(), port)),
                 detail: "Send Header(tag)",
             })?;
 
         // start to forward
-        tracing::info!(?proxy_header, info = "start to forward");
         if let Some(key) = proxy_header.key.as_ref() {
+            tracing::info!(key, info = "start with codec forward");
             client_proxy_with_cryptor_codec(
-                host,
+                &host,
                 key,
                 client_reader,
                 server_reader,
@@ -407,40 +395,73 @@ pub async fn handle_client(client_socket: TcpStream, context: ClientProxyContext
                 server_writer,
             )
             .await
-            .with_context(|_| ProxySnafu { uri })?;
+            .with_context(|_| ProxySnafu {
+                uri: get_uri(host.as_str(), port),
+            })
         } else {
+            tracing::info!(info = "start norlmal forward");
             proxy_with_norlmal_codec(
-                host,
+                &host,
                 client_reader,
                 server_reader,
                 client_writer,
                 server_writer,
             )
             .await
-            .with_context(|_| ProxySnafu { uri })?;
+            .with_context(|_| ProxySnafu {
+                uri: get_uri(host.as_str(), port),
+            })
         }
     }
+}
 
-    Ok(())
+pub struct ClientProxyContext {
+    stream: TcpStream,
+    msg_key: Option<String>,
+    #[cfg(feature = "auto-proxy")]
+    sender: SenderChan,
+}
+
+#[tracing::instrument(skip_all, fields(msg_key))]
+pub async fn handle_client<T: ProxierProviderType>(mut context: ClientProxyContext) -> Result<()> {
+    let mut header_buf = [0; 1024 * 4];
+    let n = context
+        .stream
+        .read(&mut header_buf)
+        .await
+        .context(IoSnafu {
+            uri: None,
+            detail: T::PROXY_TYPE,
+        })?;
+    let header = &header_buf[..n];
+    let provider = T::Provider::try_new_from_header_context(HeaderContext {
+        header,
+        msg_key: context.msg_key.as_deref(),
+    })?;
+    let proxier = provider
+        .try_build_from_proxy_context(ProxyContext {
+            buffer: header,
+            sender: &context.sender,
+            stream: context.stream,
+        })
+        .await?;
+    proxier.proxy().await
 }
 
 #[cfg(feature = "auto-proxy")]
 const DEFAULT_CHAN_CAP: usize = 1024;
 
-async fn client_proxy_background_task<const NEED_CODEC: bool>(
-    client_socket: TcpStream,
-    context: ClientProxyContext,
-) {
+async fn client_proxy_background_task<const NEED_CODEC: bool>(context: ClientProxyContext) {
     if NEED_CODEC {
         let random_key = context
             .msg_key
             .clone()
             .expect("must be Some when it `NEED_CODEC` is true");
-        if let Err(e) = handle_client(client_socket, context).await {
+        if let Err(e) = handle_client::<HttpProxierProviderType>(context).await {
             let report = Report::from_error(e).to_string();
             tracing::error!(random_key, proxy_with_randomkey_handle_error = report);
         }
-    } else if let Err(e) = handle_client(client_socket, context).await {
+    } else if let Err(e) = handle_client::<HttpProxierProviderType>(context).await {
         let report = Report::from_error(e).to_string();
         tracing::error!(proxy_handle_error = report);
     }
@@ -465,21 +486,19 @@ pub async fn start_client<const NEED_CODEC: bool>(host: impl AsRef<str> + Debug,
     };
 
     while !manager.is_cancelled() {
-        let (client_socket, _) = listener.accept().await.unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
         #[cfg(feature = "auto-proxy")]
         let sender = sender.clone();
-        let background_task = client_proxy_background_task::<NEED_CODEC>(
-            client_socket,
-            ClientProxyContext {
-                msg_key: if NEED_CODEC {
-                    Some(gen_random_key())
-                } else {
-                    None
-                },
-                #[cfg(feature = "auto-proxy")]
-                sender,
+        let background_task = client_proxy_background_task::<NEED_CODEC>(ClientProxyContext {
+            stream,
+            msg_key: if NEED_CODEC {
+                Some(gen_random_key())
+            } else {
+                None
             },
-        );
+            #[cfg(feature = "auto-proxy")]
+            sender,
+        });
         manager.spawn(proxy_id.gen(), background_task);
     }
     manager.wait().await;
