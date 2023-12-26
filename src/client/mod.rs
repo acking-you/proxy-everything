@@ -10,6 +10,7 @@ use crate::{
     client_proxy_with_cryptor_codec, gen_random_key, proxy_with_norlmal_codec, set_data_size,
     Aes256GcmCryption, MyAsyncWriteExt, ProxyHeader,
 };
+use async_trait::async_trait;
 #[cfg(feature = "auto-proxy")]
 use auto_proxy::{run_auto_proxy_by_country, SendItem, SenderChan};
 
@@ -181,8 +182,9 @@ pub static SERVER_HOST: Lazy<String> = Lazy::new(|| match std::env::var("SERVER_
     }
 });
 
+#[async_trait]
 pub trait Proxier {
-    fn proxy(self) -> impl std::future::Future<Output = Result<()>> + Send;
+    async fn proxy(self) -> Result<()>;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -198,6 +200,7 @@ pub struct ProxyContext<'a> {
     stream: TcpStream,
 }
 
+#[async_trait]
 pub trait ProxierProvider {
     type Item: Proxier;
 
@@ -205,10 +208,10 @@ pub trait ProxierProvider {
     where
         Self: std::marker::Sized;
 
-    fn try_build_from_proxy_context(
+    async fn try_build_from_proxy_context(
         self,
         proxy_context: ProxyContext<'_>,
-    ) -> impl std::future::Future<Output = Result<Self::Item>> + Send;
+    ) -> Result<Self::Item>;
 }
 
 pub trait ProxierProviderType {
@@ -313,6 +316,7 @@ pub async fn need_proxy(
     Ok(None)
 }
 
+#[async_trait]
 impl Proxier for ProxierImpl {
     #[tracing::instrument(skip_all, fields(context))]
     async fn proxy(self) -> Result<()> {

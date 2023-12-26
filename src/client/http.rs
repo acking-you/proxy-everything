@@ -4,6 +4,7 @@ use crate::{
     client::{HttpProxySnafu, SERVER_HOST, SERVER_PORT},
     codec::{AsyncReader, AsyncWriter},
 };
+use async_trait::async_trait;
 use snafu::{OptionExt, ResultExt, Snafu};
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 
@@ -69,6 +70,7 @@ pub struct HttpProxierProvider {
     msg_key: Option<String>,
 }
 
+#[async_trait]
 impl ProxierProvider for HttpProxierProvider {
     type Item = ProxierImpl;
 

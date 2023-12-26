@@ -1,5 +1,6 @@
 #[cfg(feature = "auto-proxy")]
 use crate::client::need_proxy;
+use async_trait::async_trait;
 use snafu::{ResultExt, Snafu};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -40,6 +41,7 @@ pub struct SocksProxierProvider {
     msg_key: Option<String>,
 }
 
+#[async_trait]
 impl ProxierProvider for SocksProxierProvider {
     type Item = ProxierImpl;
 
