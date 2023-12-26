@@ -1,10 +1,11 @@
-use snafu::{OptionExt, ResultExt, Snafu};
-use tokio::{io::AsyncWriteExt, net::TcpStream};
-
+#[cfg(feature = "auto-proxy")]
+use crate::client::need_proxy;
 use crate::{
-    client::{need_proxy, HttpProxySnafu, SERVER_HOST, SERVER_PORT},
+    client::{HttpProxySnafu, SERVER_HOST, SERVER_PORT},
     codec::{AsyncReader, AsyncWriter},
 };
+use snafu::{OptionExt, ResultExt, Snafu};
+use tokio::{io::AsyncWriteExt, net::TcpStream};
 
 use super::{ForwardContext, HeaderContext, ProxierImpl, ProxierProvider, ProxyContext};
 
