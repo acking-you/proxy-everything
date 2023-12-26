@@ -1,21 +1,44 @@
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, Snafu};
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 
 use crate::{
-    client::{need_proxy, SERVER_HOST, SERVER_PORT},
+    client::{need_proxy, HttpProxySnafu, SERVER_HOST, SERVER_PORT},
     codec::{AsyncReader, AsyncWriter},
 };
 
-use super::{
-    ForwardContext, HeaderContext, HostSnafu, InvliadProxySnafu, IoSnafu, MethodSnafu, ProxierImpl,
-    ProxierProvider, ProxyContext, UriSnafu, VersionSnafu,
-};
+use super::{ForwardContext, HeaderContext, ProxierImpl, ProxierProvider, ProxyContext};
+
+#[derive(Debug, Snafu)]
+pub enum HttpProxyError {
+    #[snafu(display("URI(`{uri}`) Parse host from http request fails"))]
+    Host { uri: String },
+    #[snafu(display("URI(`{uri}`) Parse port from http request fails"))]
+    Port { uri: String },
+    #[snafu(display("URI(`{uri}`) Parse method from http request fails"))]
+    Method { uri: String },
+    #[snafu(display("Parse uri from http request fails"))]
+    Uri,
+    #[snafu(display("URI(`{uri}`) Parse http version from request fails"))]
+    Version { uri: String },
+    #[snafu(display("URI(`{uri}`) Not supported method:{method}"))]
+    NotSupported { uri: String, method: String },
+    #[snafu(display("URI(`{uri:?}`),Io error occur: {detail}"))]
+    Io {
+        uri: Option<String>,
+        detail: &'static str,
+        source: std::io::Error,
+    },
+    #[snafu(display("Invalid proxy header({proxy})"))]
+    InvliadProxy { proxy: &'static str },
+}
+
+type Result<T, E = HttpProxyError> = std::result::Result<T, E>;
 
 const HTTP_PORT: u16 = 80;
 const HTTPS_PORT: u16 = 443;
 const HTTP_SCHEMA: &str = "http://";
 
-fn extract_host_uri(uri: &str, default_port: u16) -> super::Result<(&str, u16)> {
+fn extract_host_uri(uri: &str, default_port: u16) -> Result<(&str, u16)> {
     let mut parts = uri.split(':');
     let host = parts.next().context(HostSnafu { uri })?;
     let port = parts
@@ -25,7 +48,7 @@ fn extract_host_uri(uri: &str, default_port: u16) -> super::Result<(&str, u16)> 
     Ok((host, port))
 }
 
-fn extract_host_from_http_uri(uri: &str) -> super::Result<(&str, u16)> {
+fn extract_host_from_http_uri(uri: &str) -> Result<(&str, u16)> {
     let uri = uri
         .trim()
         .strip_prefix(HTTP_SCHEMA)
@@ -34,7 +57,7 @@ fn extract_host_from_http_uri(uri: &str) -> super::Result<(&str, u16)> {
     extract_host_uri(uri, HTTP_PORT)
 }
 
-fn extract_host_from_https_uri(uri: &str) -> super::Result<(&str, u16)> {
+fn extract_host_from_https_uri(uri: &str) -> Result<(&str, u16)> {
     extract_host_uri(uri, HTTPS_PORT)
 }
 
@@ -57,17 +80,23 @@ impl ProxierProvider for HttpProxierProvider {
         let mut lines = request.lines();
         if let Some(first_line) = lines.next() {
             let mut parts = first_line.split_whitespace();
-            let method = parts.next().context(MethodSnafu {
-                uri: first_line.to_string(),
-            })?;
-            let uri = parts.next().context(UriSnafu)?;
-            let _version = parts.next().context(VersionSnafu { uri })?;
+            let method = parts
+                .next()
+                .context(MethodSnafu {
+                    uri: first_line.to_string(),
+                })
+                .context(HttpProxySnafu)?;
+            let uri = parts.next().context(UriSnafu).context(HttpProxySnafu)?;
+            let _version = parts
+                .next()
+                .context(VersionSnafu { uri })
+                .context(HttpProxySnafu)?;
             let method = method.to_ascii_lowercase();
             let has_ssl = method == "connect";
             let (host, port) = if has_ssl {
-                extract_host_from_https_uri(uri)?
+                extract_host_from_https_uri(uri).context(HttpProxySnafu)?
             } else {
-                extract_host_from_http_uri(uri)?
+                extract_host_from_http_uri(uri).context(HttpProxySnafu)?
             };
             let msg_key = msg_key.map(|s| s.to_string());
             return Ok(Self {
@@ -80,7 +109,8 @@ impl ProxierProvider for HttpProxierProvider {
         InvliadProxySnafu {
             proxy: "http or https",
         }
-        .fail()?
+        .fail()
+        .context(HttpProxySnafu)?
     }
 
     // when it is https proxy we will decide start proxy or not
@@ -128,6 +158,7 @@ impl HttpProxierProvider {
                     uri: Some(format!("{}:{}", host, port)),
                     detail,
                 })
+                .context(HttpProxySnafu)
         }
         if !self.has_ssl {
             let mut server = get_stream(
@@ -142,7 +173,8 @@ impl HttpProxierProvider {
                 .with_context(|_| IoSnafu {
                     uri: Some(self.get_uri()),
                     detail: "http direct proxy first write error",
-                })?;
+                })
+                .context(HttpProxySnafu)?;
             Ok((server, false))
         } else {
             // response to 200
@@ -153,7 +185,8 @@ impl HttpProxierProvider {
                 .with_context(|_| IoSnafu {
                     uri: Some(self.get_uri()),
                     detail: "Write Http Connection Ok",
-                })?;
+                })
+                .context(HttpProxySnafu)?;
 
             // check auto proxy to prevent proxy to remote server
             #[cfg(feature = "auto-proxy")]

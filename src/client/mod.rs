@@ -1,6 +1,7 @@
 #[cfg(feature = "auto-proxy")]
 pub mod auto_proxy;
 pub mod http;
+pub mod socks;
 use crate::codec::{AsyncReader, AsyncWriter};
 use crate::util::{
     GracefulShutdownManager, GracefulShutdownManagerImpl, ProxyTaskId, TaskIdGenerator,
@@ -28,7 +29,8 @@ use tokio::net::TcpStream;
 #[cfg(feature = "monoio")]
 use monoio::net::TcpStream;
 
-use self::http::HttpProxierProvider;
+use self::http::{HttpProxierProvider, HttpProxyError};
+use self::socks::{SocksError, SocksProxierProvider};
 
 #[derive(Debug, Snafu)]
 pub enum ClientError {
@@ -81,8 +83,10 @@ pub enum ClientError {
     #[cfg(feature = "auto-proxy")]
     #[snafu(display("Can't proxy localhost!!! Host(`127.0.0.1:{port}`)"))]
     LocalHost { port: u16 },
-    #[snafu(display("Invalid proxy header({proxy})"))]
-    InvliadProxy { proxy: &'static str },
+    #[snafu(display("Http proxy error"))]
+    HttpProxy { source: HttpProxyError },
+    #[snafu(display("Socks proxy error"))]
+    SocksProxy { source: SocksError },
 }
 
 #[cfg(feature = "auto-proxy")]
@@ -181,6 +185,7 @@ pub trait Proxier {
     fn proxy(self) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct HeaderContext<'a> {
     header: &'a [u8],
     msg_key: Option<&'a str>,
@@ -210,12 +215,20 @@ pub trait ProxierProviderType {
     type Provider: ProxierProvider;
     const PROXY_TYPE: &'static str;
 }
-pub struct HttpProxierProviderType {}
 
-impl ProxierProviderType for HttpProxierProviderType {
-    type Provider = HttpProxierProvider;
-    const PROXY_TYPE: &'static str = "HTTP/HTTPS";
+macro_rules! make_provider_type {
+    ($name:ident,$proxy_type:expr,$provider_name:ty) => {
+        pub struct $name {}
+
+        impl ProxierProviderType for $name {
+            type Provider = $provider_name;
+            const PROXY_TYPE: &'static str = $proxy_type;
+        }
+    };
 }
+
+make_provider_type!(HttpProxierProviderType, "HTTP/HTTPS", HttpProxierProvider);
+make_provider_type!(SocksProxierProviderType, "SOCKS5", SocksProxierProvider);
 
 pub const SERVER_PORT: u16 = 1081;
 pub const CLIENT_PORT: u16 = 1080;
@@ -254,7 +267,7 @@ pub fn get_uri(host: impl AsRef<str>, port: u16) -> String {
     format!("{}:{}", host.as_ref(), port)
 }
 
-/// we will not proxy when if option is some
+/// we will not proxy if option is some
 #[cfg(feature = "auto-proxy")]
 pub async fn need_proxy(
     host: impl AsRef<str>,
@@ -422,8 +435,29 @@ pub struct ClientProxyContext {
     sender: SenderChan,
 }
 
+#[inline]
+fn get_provider<T: ProxierProviderType>(header: HeaderContext<'_>) -> Option<T::Provider> {
+    let result = T::Provider::try_new_from_header_context(header);
+    match result {
+        Ok(o) => Some(o),
+        Err(e) => {
+            tracing::warn!(fails = T::PROXY_TYPE,get_proxy_provider_error = ?Report::from_error(e));
+            None
+        }
+    }
+}
+
+async fn handle_proxy(
+    proxy_context: ProxyContext<'_>,
+    provider: impl ProxierProvider,
+) -> Result<()> {
+    let proxier = provider.try_build_from_proxy_context(proxy_context).await?;
+    proxier.proxy().await
+}
+
 #[tracing::instrument(skip_all, fields(msg_key))]
-pub async fn handle_client<T: ProxierProviderType>(mut context: ClientProxyContext) -> Result<()> {
+pub async fn handle_client(mut context: ClientProxyContext) -> Result<()> {
+    // FIXME Turn header read to every structure
     let mut header_buf = [0; 1024 * 4];
     let n = context
         .stream
@@ -431,21 +465,45 @@ pub async fn handle_client<T: ProxierProviderType>(mut context: ClientProxyConte
         .await
         .context(IoSnafu {
             uri: None,
-            detail: T::PROXY_TYPE,
+            detail: "Read First Header Error",
         })?;
     let header = &header_buf[..n];
-    let provider = T::Provider::try_new_from_header_context(HeaderContext {
+    let header_context = HeaderContext {
         header,
         msg_key: context.msg_key.as_deref(),
-    })?;
-    let proxier = provider
-        .try_build_from_proxy_context(ProxyContext {
-            buffer: header,
-            sender: &context.sender,
-            stream: context.stream,
-        })
-        .await?;
-    proxier.proxy().await
+    };
+    let proxy_context = ProxyContext {
+        buffer: header,
+        #[cfg(feature = "auto-proxy")]
+        sender: &context.sender,
+        stream: context.stream,
+    };
+
+    macro_rules! start_proxy_with_provider {
+        ($header_context:expr,$proxy_context:expr,$provider_type:ty) => {
+            if let Some(p) = get_provider::<$provider_type>($header_context) {
+                return handle_proxy($proxy_context, p).await;
+            }
+        };
+
+        ($header_context:expr,$proxy_context:expr, $($provider_type:ty),*) => {
+            $(start_proxy_with_provider!($header_context, $proxy_context, $provider_type);)*
+        };
+    }
+    // This equal to:
+    // if let Some(p) = get_provider::<HttpProxierProviderType>(header_context) {
+    //     return handle_proxy(proxy_context, p).await;
+    // }
+    // if let Some(p) = get_provider::<SocksProviderType>(header_context) {
+    //     return handle_proxy(proxy_context, p).await;
+    // }
+    start_proxy_with_provider!(
+        header_context,
+        proxy_context,
+        HttpProxierProviderType,
+        SocksProxierProviderType
+    );
+    Ok(())
 }
 
 #[cfg(feature = "auto-proxy")]
@@ -457,11 +515,11 @@ async fn client_proxy_background_task<const NEED_CODEC: bool>(context: ClientPro
             .msg_key
             .clone()
             .expect("must be Some when it `NEED_CODEC` is true");
-        if let Err(e) = handle_client::<HttpProxierProviderType>(context).await {
+        if let Err(e) = handle_client(context).await {
             let report = Report::from_error(e).to_string();
             tracing::error!(random_key, proxy_with_randomkey_handle_error = report);
         }
-    } else if let Err(e) = handle_client::<HttpProxierProviderType>(context).await {
+    } else if let Err(e) = handle_client(context).await {
         let report = Report::from_error(e).to_string();
         tracing::error!(proxy_handle_error = report);
     }
