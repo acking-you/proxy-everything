@@ -19,6 +19,8 @@ pub enum SocksError {
     FirstRequest { detail: &'static str },
     #[snafu(display("Unsupported operate:{detail}"))]
     NotSupported { detail: &'static str },
+    #[snafu(display("Unsupported operate:{detail} with cmd(`{cmd:x}`)"))]
+    NotSupportedTransport { cmd: u8, detail: &'static str },
     #[snafu(display("Sock5 proxy io error occur: {detail}"))]
     Io {
         detail: &'static str,
@@ -120,11 +122,12 @@ async fn auth(stream: &mut TcpStream) -> Result<(String, u16)> {
         }
         .fail()?
     }
-    if stream.read_u8().await.context(IoSnafu {
+    let cmd = stream.read_u8().await.context(IoSnafu {
         detail: "read cmd in auth",
-    })? != TCP_CONN
-    {
-        NotSupportedSnafu {
+    })?;
+    if cmd != TCP_CONN {
+        NotSupportedTransportSnafu {
+            cmd,
             detail: "only support tcp",
         }
         .fail()?
