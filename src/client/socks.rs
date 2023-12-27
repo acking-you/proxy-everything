@@ -1,3 +1,5 @@
+use std::net::Ipv6Addr;
+
 #[cfg(feature = "auto-proxy")]
 use crate::client::need_proxy;
 use snafu::{ResultExt, Snafu};
@@ -19,7 +21,9 @@ pub enum SocksError {
     FirstRequest { detail: &'static str },
     #[snafu(display("Unsupported operate:{detail}"))]
     NotSupported { detail: &'static str },
-    #[snafu(display("Unsupported operate:{detail} with cmd(`{cmd:x}`)"))]
+    #[snafu(display("Unsupported operate:{detail} with atyp(`{atyp:#x}`)"))]
+    NotSupportedHost { atyp: u8, detail: &'static str },
+    #[snafu(display("Unsupported operate:{detail} with cmd(`{cmd:#x}`)"))]
     NotSupportedTransport { cmd: u8, detail: &'static str },
     #[snafu(display("Sock5 proxy io error occur: {detail}"))]
     Io {
@@ -36,6 +40,7 @@ const SOCK5_VER: u8 = 0x05;
 const NO_AUTH: u8 = 0x00;
 const TCP_CONN: u8 = 0x01;
 const IPV4_ADDR: u8 = 0x01;
+const IPV6_ADDR: u8 = 0x04;
 const NAMING_SERVER: u8 = 0x03;
 
 pub struct SocksProxierProvider {
@@ -142,12 +147,22 @@ async fn auth(stream: &mut TcpStream) -> Result<(String, u16)> {
         IPV4_ADDR => {
             let mut buf: [u8; 4] = [0; 4];
             stream.read_exact(&mut buf).await.context(IoSnafu {
-                detail: "read host in auth",
+                detail: "read ipv4 host in auth",
             })?;
             let port = stream.read_u16().await.context(IoSnafu {
                 detail: "read port in ipv4 addr",
             })?;
             Ok((format!("{}.{}.{}.{}", buf[0], buf[1], buf[2], buf[3]), port))
+        }
+        IPV6_ADDR => {
+            let mut buf: [u8; 16] = [0; 16];
+            stream.read_exact(&mut buf).await.context(IoSnafu {
+                detail: "read ipv6 host in auth",
+            })?;
+            let port = stream.read_u16().await.context(IoSnafu {
+                detail: "read port in ipv6 addr",
+            })?;
+            Ok((Ipv6Addr::from(buf).to_string(), port))
         }
         NAMING_SERVER => {
             let host_len = stream.read_u8().await.context(IoSnafu {
@@ -163,7 +178,8 @@ async fn auth(stream: &mut TcpStream) -> Result<(String, u16)> {
             })?;
             Ok((String::from_utf8_lossy(buf).into_owned(), port))
         }
-        _ => NotSupportedSnafu {
+        atyp => NotSupportedHostSnafu {
+            atyp,
             detail: "only support IPV4 and NAME_ADDR",
         }
         .fail()?,
@@ -214,4 +230,22 @@ async fn get_server_stream(
         get_stream(&SERVER_HOST, SERVER_PORT, "[PROXY] we will proxy socks5").await?,
         true,
     ))
+}
+
+#[cfg(test)]
+mod test {
+    use std::net::Ipv6Addr;
+
+    #[test]
+    fn test_ip_display() {
+        let buf: [u8; 16] = [0; 16]; // 假设 buf 包含了长度为 16 的字节数据，表示 IPv6 地址
+
+        // 将 buf 中的字节数据转换为 Ipv6Addr 对象
+        let ipv6_addr = Ipv6Addr::from(buf);
+
+        // 将 Ipv6Addr 对象转换为字符串表示
+        let ipv6_str = ipv6_addr.to_string();
+
+        println!("IPv6 address: {}", ipv6_str);
+    }
 }
