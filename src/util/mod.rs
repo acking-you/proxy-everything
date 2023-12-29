@@ -1,10 +1,10 @@
 use std::sync::{atomic::AtomicBool, Arc};
 
 use futures::Future;
-use tokio::{
-    signal::unix::{signal, Signal, SignalKind},
-    task::JoinHandle,
-};
+#[cfg(not(target_env = "msvc"))]
+use tokio::signal::unix::{signal, Signal, SignalKind};
+
+use tokio::task::JoinHandle;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 pub type TaskId = i64;
@@ -44,6 +44,7 @@ pub trait GracefulShutdownManager {
     where
         F: Future + Send + 'static;
 
+    #[cfg(not(target_env = "msvc"))]
     fn spawn_signal_task(&mut self, signal: Signal);
 
     fn is_cancelled(&self) -> bool;
@@ -55,6 +56,7 @@ pub struct GracefulShutdownManagerImpl {
     is_cancel: Arc<AtomicBool>,
 }
 
+#[cfg(not(target_env = "msvc"))]
 fn get_signal(kind: SignalKind) -> Option<Signal> {
     match signal(kind) {
         Ok(s) => Some(s),
@@ -74,6 +76,7 @@ impl GracefulShutdownManagerImpl {
         }
     }
 
+    #[cfg(not(target_env = "msvc"))]
     fn register_signal(&mut self, kind: SignalKind) -> bool {
         if let Some(signal) = get_signal(kind) {
             self.spawn_signal_task(signal);
@@ -83,10 +86,34 @@ impl GracefulShutdownManagerImpl {
         }
     }
 
+    #[cfg(not(target_env = "msvc"))]
     pub fn spawn_graceful_signals(&mut self) -> bool {
         self.register_signal(SignalKind::interrupt())
             && self.register_signal(SignalKind::terminate())
             && self.register_signal(SignalKind::quit())
+    }
+
+    #[cfg(target_env = "msvc")]
+    pub fn spawn_graceful_signals(&mut self) -> bool {
+        use tokio::signal;
+
+        let tracker = self.tracker.clone();
+        let token = self.token.clone();
+        let is_cancle = self.is_cancel.clone();
+        self.spawn(SIGNAL_TASK_ID, async move {
+            signal::ctrl_c()
+                .await
+                .expect("await ctrl-c signal nerver fails");
+            if is_cancle.load(std::sync::atomic::Ordering::Acquire) {
+                tracing::info!("Windows platform only support ctrl-c signal!");
+                return;
+            }
+            tracing::info!("Start to cancle tasks");
+            is_cancle.store(true, std::sync::atomic::Ordering::Release);
+            tracker.close();
+            token.cancel();
+        });
+        true
     }
 }
 
@@ -112,6 +139,7 @@ impl GracefulShutdownManager for GracefulShutdownManagerImpl {
         })
     }
 
+    #[cfg(not(target_env = "msvc"))]
     fn spawn_signal_task(&mut self, mut signal: Signal) {
         let tracker = self.tracker.clone();
         let token = self.token.clone();
