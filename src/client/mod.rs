@@ -74,6 +74,7 @@ pub enum ClientError {
 #[cfg(feature = "auto-proxy")]
 pub static NONPROXY_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
     let mut default_keywords = vec![
+        "chaoxing".to_string(),
         "bilibili".to_string(),
         "bili".to_string(),
         "xigua".to_string(),
@@ -82,6 +83,7 @@ pub static NONPROXY_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
         "cnblogs".to_string(),
         "qq.com".to_string(),
         "jd.com".to_string(),
+        "retiehe".to_string(),
         "meituan".to_string(),
         "jianguoyun".to_string(),
         "taobao.com".to_string(),
