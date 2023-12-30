@@ -38,6 +38,7 @@ type Result<T, E = HttpProxyError> = std::result::Result<T, E>;
 const HTTP_PORT: u16 = 80;
 const HTTPS_PORT: u16 = 443;
 const HTTP_SCHEMA: &str = "http://";
+const HTTPS_SCHEMA: &str = "https://";
 
 fn extract_host_uri(uri: &str, default_port: u16) -> Result<(&str, u16)> {
     let mut parts = uri.split(':');
@@ -49,16 +50,30 @@ fn extract_host_uri(uri: &str, default_port: u16) -> Result<(&str, u16)> {
     Ok((host, port))
 }
 
-fn extract_host_from_http_uri(uri: &str) -> Result<(&str, u16)> {
-    let uri = uri
-        .trim()
-        .strip_prefix(HTTP_SCHEMA)
-        .context(HostSnafu { uri })?;
-    let uri = uri.find('/').map(|i| &uri[..i]).unwrap_or(uri);
-    extract_host_uri(uri, HTTP_PORT)
+/// may http/https
+fn extract_host_from_raw_uri(uri: &str) -> Result<(&str, u16)> {
+    let url = uri.trim().strip_prefix(HTTP_SCHEMA);
+    let (url, port) = match url {
+        Some(v) => (v, HTTP_PORT),
+        None => {
+            // try https parse
+            tracing::warn!(
+                "Uri(`{}`) not use proxy and not a http request,we try to parsing with https",
+                uri
+            );
+            (
+                uri.trim()
+                    .strip_prefix(HTTPS_SCHEMA)
+                    .context(HostSnafu { uri })?,
+                HTTPS_PORT,
+            )
+        }
+    };
+    let url = url.find('/').map(|i| &url[..i]).unwrap_or(url);
+    extract_host_uri(url, port)
 }
 
-fn extract_host_from_https_uri(uri: &str) -> Result<(&str, u16)> {
+fn extract_host_from_connect_uri(uri: &str) -> Result<(&str, u16)> {
     extract_host_uri(uri, HTTPS_PORT)
 }
 
@@ -93,17 +108,17 @@ impl ProxierProvider for HttpProxierProvider {
                 .context(VersionSnafu { uri })
                 .context(HttpProxySnafu)?;
             let method = method.to_ascii_lowercase();
-            let has_ssl = method == "connect";
-            let (host, port) = if has_ssl {
-                extract_host_from_https_uri(uri).context(HttpProxySnafu)?
+            let need_proxy = method == "connect";
+            let (host, port) = if need_proxy {
+                extract_host_from_connect_uri(uri).context(HttpProxySnafu)?
             } else {
-                extract_host_from_http_uri(uri).context(HttpProxySnafu)?
+                extract_host_from_raw_uri(uri).context(HttpProxySnafu)?
             };
             let msg_key = msg_key.map(|s| s.to_string());
             return Ok(Self {
                 host: host.to_string(),
                 port,
-                has_ssl,
+                has_ssl: need_proxy,
                 msg_key,
             });
         }

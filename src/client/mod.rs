@@ -18,7 +18,6 @@ use monoio::io::Splitable;
 use once_cell::sync::Lazy;
 use snafu::{Report, ResultExt, Snafu};
 use std::fmt::{Debug, Display};
-use std::str::FromStr;
 use tokio::io::AsyncReadExt;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 #[cfg(feature = "tokio")]
@@ -34,23 +33,6 @@ use self::socks::{SocksError, SocksProxierProvider};
 
 #[derive(Debug, Snafu)]
 pub enum ClientError {
-    #[snafu(display("URI(`{uri}`) Parse host from http request fails"))]
-    Host { uri: String },
-    #[snafu(display("URI(`{uri}`) Parse port from http request fails"))]
-    Port { uri: String },
-    #[snafu(display("URI(`{uri}`) Parse port from string fails"))]
-    StrPort {
-        uri: String,
-        source: <u16 as FromStr>::Err,
-    },
-    #[snafu(display("URI(`{uri}`) Parse method from http request fails"))]
-    Method { uri: String },
-    #[snafu(display("Parse uri from http request fails"))]
-    Uri,
-    #[snafu(display("URI(`{uri}`) Parse http version from request fails"))]
-    Version { uri: String },
-    #[snafu(display("URI(`{uri}`) Not supported method:{method}"))]
-    NotSupported { uri: String, method: String },
     #[snafu(display("URI(`{uri}`) Serde json failed"))]
     SerdeJson {
         uri: String,
