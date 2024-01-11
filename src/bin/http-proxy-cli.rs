@@ -1,13 +1,6 @@
 use http_proxy::client::{start_client, CLIENT_PORT, SERVER_HOST};
 use http_proxy::{init_tracing, DEFAULT_KEY};
 
-#[cfg(not(target_env = "msvc"))]
-use tikv_jemallocator::Jemalloc;
-
-#[cfg(not(target_env = "msvc"))]
-#[global_allocator]
-static GLOBAL: Jemalloc = Jemalloc;
-
 use clap::Parser;
 
 #[derive(Parser)]
