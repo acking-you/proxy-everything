@@ -1,13 +1,18 @@
+use std::borrow::Cow;
+
 #[cfg(feature = "auto-proxy")]
 use crate::client::need_proxy;
 use crate::{
-    client::{HttpProxySnafu, SERVER_HOST, SERVER_PORT},
+    client::{HttpProxySnafu, PROXY_KEYWORDS},
     codec::{AsyncReader, AsyncWriter},
 };
 use snafu::{OptionExt, ResultExt, Snafu};
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 
-use super::{ForwardContext, HeaderContext, ProxierImpl, ProxierProvider, ProxyContext};
+use super::{
+    get_tcp_proxy_stream, get_tcp_stream, ForwardContext, ForwarderProvider, HeaderContext,
+    ProxyContext, TcpForwardImpl,
+};
 
 #[derive(Debug, Snafu)]
 pub enum HttpProxyError {
@@ -81,11 +86,11 @@ pub struct HttpProxierProvider {
     host: String,
     port: u16,
     has_ssl: bool,
-    msg_key: Option<String>,
+    msg_key: Option<Cow<'static, str>>,
 }
 
-impl ProxierProvider for HttpProxierProvider {
-    type Item = ProxierImpl;
+impl ForwarderProvider for HttpProxierProvider {
+    type Item = TcpForwardImpl;
 
     fn try_new_from_header_context(header: HeaderContext) -> super::Result<Self>
     where
@@ -108,17 +113,17 @@ impl ProxierProvider for HttpProxierProvider {
                 .context(VersionSnafu { uri })
                 .context(HttpProxySnafu)?;
             let method = method.to_ascii_lowercase();
-            let need_proxy = method == "connect";
-            let (host, port) = if need_proxy {
+            let has_ssl = method == "connect";
+            let (host, port) = if has_ssl {
                 extract_host_from_connect_uri(uri).context(HttpProxySnafu)?
             } else {
                 extract_host_from_raw_uri(uri).context(HttpProxySnafu)?
             };
-            let msg_key = msg_key.map(|s| s.to_string());
+            let msg_key = msg_key.map(|s| Cow::Owned(s.to_owned()));
             return Ok(Self {
                 host: host.to_string(),
                 port,
-                has_ssl: need_proxy,
+                has_ssl,
                 msg_key,
             });
         }
@@ -138,7 +143,7 @@ impl ProxierProvider for HttpProxierProvider {
         let ProxyContext { stream, .. } = context;
         let (r, w) = stream.into_split();
         let (s_r, s_w) = server_stream.into_split();
-        Ok(ProxierImpl {
+        Ok(TcpForwardImpl {
             context: ForwardContext {
                 need_proxy,
                 host: self.host,
@@ -162,28 +167,26 @@ impl HttpProxierProvider {
         &self,
         context: &mut ProxyContext<'_>,
     ) -> super::Result<(TcpStream, bool)> {
-        #[inline]
-        async fn get_stream(
-            host: &str,
-            port: u16,
-            detail: &'static str,
-        ) -> super::Result<TcpStream> {
-            TcpStream::connect((host, port))
-                .await
-                .with_context(|_| IoSnafu {
-                    uri: Some(format!("{}:{}", host, port)),
-                    detail,
-                })
-                .context(HttpProxySnafu)
-        }
+        // if we don't have ssl,only use proxy when host is part of `PROXY_KEYWORDS`
         if !self.has_ssl {
-            let mut server = get_stream(
-                &self.host,
-                self.port,
-                "[NOPROXY-HTTP] we will start connect http server directly",
-            )
-            .await?;
-            server
+            let need_proxy = PROXY_KEYWORDS.iter().any(|e| e == &self.host);
+            let mut server_stream = if need_proxy {
+                get_tcp_proxy_stream(
+                    self.host.as_str(),
+                    self.port,
+                    self.msg_key.clone(),
+                    "[PROXY] we will proxy http",
+                )
+                .await?
+            } else {
+                get_tcp_stream(
+                    &self.host,
+                    self.port,
+                    "[NOPROXY-HTTP] we will start connect http server directly",
+                )
+                .await?
+            };
+            server_stream
                 .write_all(context.buffer)
                 .await
                 .with_context(|_| IoSnafu {
@@ -191,7 +194,7 @@ impl HttpProxierProvider {
                     detail: "http direct proxy first write error",
                 })
                 .context(HttpProxySnafu)?;
-            Ok((server, false))
+            Ok((server_stream, need_proxy))
         } else {
             // response to 200
             context
@@ -210,11 +213,17 @@ impl HttpProxierProvider {
                 if let Some(detail) =
                     need_proxy(self.host.as_str(), self.port, context.sender).await?
                 {
-                    return Ok((get_stream(&self.host, self.port, detail).await?, false));
+                    return Ok((get_tcp_stream(&self.host, self.port, detail).await?, false));
                 }
             }
             Ok((
-                get_stream(&SERVER_HOST, SERVER_PORT, "[PROXY] we will proxy https").await?,
+                get_tcp_proxy_stream(
+                    self.host.as_str(),
+                    self.port,
+                    self.msg_key.clone(),
+                    "[PROXY] we will proxy https",
+                )
+                .await?,
                 true,
             ))
         }

@@ -2,7 +2,7 @@
 pub mod auto_proxy;
 pub mod http;
 pub mod socks;
-use crate::codec::{AsyncReader, AsyncWriter};
+use crate::codec::{AsyncReader, AsyncReaderWriterRef, AsyncWriter};
 use crate::util::{
     GracefulShutdownManager, GracefulShutdownManagerImpl, ProxyTaskId, TaskIdGenerator,
 };
@@ -17,6 +17,7 @@ use auto_proxy::{run_auto_proxy_by_country, SendItem, SenderChan};
 use monoio::io::Splitable;
 use once_cell::sync::Lazy;
 use snafu::{Report, ResultExt, Snafu};
+use std::borrow::Cow;
 use std::fmt::{Debug, Display};
 use tokio::io::AsyncReadExt;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -165,8 +166,8 @@ pub static SERVER_HOST: Lazy<String> = Lazy::new(|| match std::env::var("SERVER_
     }
 });
 
-pub trait Proxier {
-    fn proxy(self) -> impl std::future::Future<Output = Result<()>> + Send;
+pub trait Forwarder {
+    fn forward(self) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -179,11 +180,12 @@ pub struct ProxyContext<'a> {
     /// header buffer for response [only http proxy use]
     buffer: &'a [u8],
     sender: &'a SenderChan,
+    /// TODO: let this stream abstract
     stream: TcpStream,
 }
 
-pub trait ProxierProvider {
-    type Item: Proxier;
+pub trait ForwarderProvider {
+    type Item: Forwarder;
 
     fn try_new_from_header_context(header_context: HeaderContext<'_>) -> Result<Self>
     where
@@ -196,7 +198,7 @@ pub trait ProxierProvider {
 }
 
 pub trait ProxierProviderType {
-    type Provider: ProxierProvider;
+    type Provider: ForwarderProvider;
     const PROXY_TYPE: &'static str;
 }
 
@@ -225,7 +227,7 @@ pub struct ForwardContext {
     host: String,
     port: u16,
     need_proxy: bool,
-    msg_key: Option<String>,
+    msg_key: Option<Cow<'static, str>>,
 }
 
 impl Display for ForwardContext {
@@ -238,7 +240,7 @@ impl Display for ForwardContext {
     }
 }
 
-pub struct ProxierImpl {
+pub struct TcpForwardImpl {
     context: ForwardContext,
     client_reader: TcpAsyncReader,
     client_writer: TcpAsyncWriter,
@@ -297,15 +299,87 @@ pub async fn need_proxy(
     Ok(None)
 }
 
-impl Proxier for ProxierImpl {
+#[inline]
+pub async fn get_tcp_stream(host: &str, port: u16, detail: &'static str) -> Result<TcpStream> {
+    TcpStream::connect((host, port))
+        .await
+        .with_context(|_| IoSnafu {
+            uri: Some(format!("TcpStream({}:{})", host, port)),
+            detail,
+        })
+}
+
+pub async fn get_tcp_proxy_stream(
+    host: &str,
+    port: u16,
+    msg_key: Option<Cow<'static, str>>,
+    detail: &'static str,
+) -> Result<TcpStream> {
+    // 1. get proxy server stream
+    let mut proxy_server_stream = get_tcp_stream(&SERVER_HOST, SERVER_PORT, detail).await?;
+
+    // 2. prepare proxy header
+    let proxy_header = ProxyHeader {
+        host: host.into(),
+        port,
+        key: msg_key,
+    };
+    let mut header_json =
+        serde_json::to_string(&proxy_header).with_context(|_| SerdeJsonSnafu {
+            uri: get_uri(host, port),
+        })?;
+    let mut cryption =
+        Aes256GcmCryption::try_new_with_default_key().map_err(|e| ClientError::Encryption {
+            uri: get_uri(host, port),
+            detail: e.to_string(),
+        })?;
+
+    let (addr, tag, len) = unsafe {
+        let addr = header_json.as_bytes_mut();
+        let tag = cryption
+            .encrypt(addr)
+            .map_err(|e| ClientError::Encryption {
+                uri: get_uri(host, port),
+                detail: e.to_string(),
+            })?;
+        let len = addr.len() + tag.as_ref().len();
+        (addr, tag, len as u32)
+    };
+
+    let mut proxy_server_stream_ref = AsyncReaderWriterRef::new(&mut proxy_server_stream);
+
+    // 3. send proxy header
+    set_data_size(&mut proxy_server_stream_ref, len)
+        .await
+        .with_context(|_| SendHeaderSnafu {
+            uri: get_uri(host, port),
+        })?;
+    proxy_server_stream_ref
+        .write_all(addr)
+        .await
+        .with_context(|_| IoSnafu {
+            uri: Some(get_uri(host, port)),
+            detail: "Send Header(host,ip)",
+        })?;
+    proxy_server_stream_ref
+        .write_all(tag.as_ref())
+        .await
+        .with_context(|_| IoSnafu {
+            uri: Some(get_uri(host, port)),
+            detail: "Send Header(tag)",
+        })?;
+    Ok(proxy_server_stream)
+}
+
+impl Forwarder for TcpForwardImpl {
     #[tracing::instrument(skip_all, fields(context))]
-    async fn proxy(self) -> Result<()> {
-        let ProxierImpl {
+    async fn forward(self) -> Result<()> {
+        let TcpForwardImpl {
             context,
             client_reader,
             client_writer,
             server_reader,
-            mut server_writer,
+            server_writer,
         } = self;
         let ForwardContext {
             need_proxy,
@@ -314,75 +388,11 @@ impl Proxier for ProxierImpl {
             msg_key,
         } = context;
 
-        // Start no proxy
-        if !need_proxy {
-            tracing::info!(host, port, "start no proxy");
-            return proxy_with_norlmal_codec(
-                &host,
-                client_reader,
-                server_reader,
-                client_writer,
-                server_writer,
-            )
-            .await
-            .with_context(|_| ProxySnafu {
-                uri: get_uri(host.as_str(), port),
-            });
-        }
-
-        // Start to proxy
-        let proxy_header = ProxyHeader {
-            host: host.clone(),
-            port,
-            key: msg_key,
-        };
-        tracing::info!(host, port, info = "start proxy",);
-        let mut header_json =
-            serde_json::to_string(&proxy_header).with_context(|_| SerdeJsonSnafu {
-                uri: get_uri(host.as_str(), port),
-            })?;
-        let mut cryption =
-            Aes256GcmCryption::try_new_with_default_key().map_err(|e| ClientError::Encryption {
-                uri: get_uri(host.as_str(), port),
-                detail: e.to_string(),
-            })?;
-
-        let (addr, tag, len) = unsafe {
-            let addr = header_json.as_bytes_mut();
-            let tag = cryption
-                .encrypt(addr)
-                .map_err(|e| ClientError::Encryption {
-                    uri: get_uri(host.as_str(), port),
-                    detail: e.to_string(),
-                })?;
-            let len = addr.len() + tag.as_ref().len();
-            (addr, tag, len as u32)
-        };
-
-        // send msg header
-        set_data_size(&mut server_writer, len)
-            .await
-            .with_context(|_| SendHeaderSnafu {
-                uri: get_uri(host.as_str(), port),
-            })?;
-        server_writer
-            .write_all(addr)
-            .await
-            .with_context(|_| IoSnafu {
-                uri: Some(get_uri(host.as_str(), port)),
-                detail: "Send Header(host,ip)",
-            })?;
-        server_writer
-            .write_all(tag.as_ref())
-            .await
-            .with_context(|_| IoSnafu {
-                uri: Some(get_uri(host.as_str(), port)),
-                detail: "Send Header(tag)",
-            })?;
+        tracing::info!(host, port, need_proxy, ?msg_key);
 
         // start to forward
-        if let Some(key) = proxy_header.key.as_ref() {
-            tracing::info!(key, info = "start with codec forward");
+        if let Some(key) = msg_key.as_ref() {
+            tracing::info!(?key, info = "start with codec forward");
             client_proxy_with_cryptor_codec(
                 &host,
                 key,
@@ -433,10 +443,10 @@ fn get_provider<T: ProxierProviderType>(header: HeaderContext<'_>) -> Option<T::
 
 async fn handle_proxy(
     proxy_context: ProxyContext<'_>,
-    provider: impl ProxierProvider,
+    provider: impl ForwarderProvider,
 ) -> Result<()> {
     let proxier = provider.try_build_from_proxy_context(proxy_context).await?;
-    proxier.proxy().await
+    proxier.forward().await
 }
 
 #[tracing::instrument(skip_all, fields(msg_key))]
