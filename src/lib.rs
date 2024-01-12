@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::{borrow::Cow, fmt::Display};
 
 pub mod client;
 pub(crate) mod codec;
@@ -75,7 +75,7 @@ pub fn gen_random_key() -> String {
 pub struct ProxyHeader {
     pub host: String,
     pub port: u16,
-    pub key: Option<String>,
+    pub key: Option<Cow<'static, str>>,
 }
 
 impl Display for ProxyHeader {
@@ -220,7 +220,7 @@ type DataSize = u32;
 pub const MAX_DATA_SIZE: DataSize = 30 * 1024 * 1024;
 
 /// Abstraction of intermediate layers for free switching of runtimes (e.g. monoio and tokio)
-pub(crate) trait MyAsyncReadExt: 'static {
+pub(crate) trait MyAsyncReadExt {
     async fn read_u32(&mut self) -> Result<u32, std::io::Error>;
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error>;
     async fn read_exact(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error>;

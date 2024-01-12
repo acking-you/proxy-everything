@@ -1,4 +1,4 @@
-use std::net::Ipv6Addr;
+use std::{borrow::Cow, net::Ipv6Addr};
 
 #[cfg(feature = "auto-proxy")]
 use crate::client::need_proxy;
@@ -9,11 +9,14 @@ use tokio::{
 };
 
 use crate::{
-    client::{SERVER_HOST, SERVER_PORT},
+    client::get_tcp_stream,
     codec::{AsyncReader, AsyncWriter},
 };
 
-use super::{auto_proxy::SenderChan, ProxierImpl, ProxierProvider, SocksProxySnafu};
+use super::{
+    auto_proxy::SenderChan, get_tcp_proxy_stream, ForwarderProvider, SocksProxySnafu,
+    TcpForwardImpl,
+};
 
 #[derive(Debug, Snafu)]
 pub enum SocksError {
@@ -44,11 +47,11 @@ const IPV6_ADDR: u8 = 0x04;
 const NAMING_SERVER: u8 = 0x03;
 
 pub struct SocksProxierProvider {
-    msg_key: Option<String>,
+    msg_key: Option<Cow<'static, str>>,
 }
 
-impl ProxierProvider for SocksProxierProvider {
-    type Item = ProxierImpl;
+impl ForwarderProvider for SocksProxierProvider {
+    type Item = TcpForwardImpl;
 
     fn try_new_from_header_context(header_context: super::HeaderContext<'_>) -> super::Result<Self>
     where
@@ -78,7 +81,7 @@ impl ProxierProvider for SocksProxierProvider {
             .context(SocksProxySnafu)?;
         }
         Ok(Self {
-            msg_key: header_context.msg_key.map(|s| s.to_string()),
+            msg_key: header_context.msg_key.map(|s| Cow::Owned(s.to_owned())),
         })
     }
 
@@ -92,8 +95,13 @@ impl ProxierProvider for SocksProxierProvider {
         response(&mut proxy_context.stream)
             .await
             .context(SocksProxySnafu)?;
-        let (server_stream, need_proxy) =
-            get_server_stream(host.as_str(), port, proxy_context.sender).await?;
+        let (server_stream, need_proxy) = get_server_stream(
+            host.as_str(),
+            port,
+            proxy_context.sender,
+            self.msg_key.clone(),
+        )
+        .await?;
         let (r, w) = proxy_context.stream.into_split();
         let (s_r, s_w) = server_stream.into_split();
         Ok(Self::Item {
@@ -210,24 +218,17 @@ async fn get_server_stream(
     host: impl AsRef<str>,
     port: u16,
     sender: &SenderChan,
+    msg_key: Option<Cow<'static, str>>,
 ) -> super::Result<(TcpStream, bool)> {
-    #[inline]
-    async fn get_stream(host: &str, port: u16, detail: &'static str) -> super::Result<TcpStream> {
-        TcpStream::connect((host, port))
-            .await
-            .with_context(|_| IoSnafu { detail })
-            .context(SocksProxySnafu)
-    }
-
     // check auto proxy to prevent proxy to remote server
     #[cfg(feature = "auto-proxy")]
     {
         if let Some(detail) = need_proxy(host.as_ref(), port, sender).await? {
-            return Ok((get_stream(host.as_ref(), port, detail).await?, false));
+            return Ok((get_tcp_stream(host.as_ref(), port, detail).await?, false));
         }
     }
     Ok((
-        get_stream(&SERVER_HOST, SERVER_PORT, "[PROXY] we will proxy socks5").await?,
+        get_tcp_proxy_stream(host.as_ref(), port, msg_key, "[PROXY] we will proxy socks5").await?,
         true,
     ))
 }

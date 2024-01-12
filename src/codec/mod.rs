@@ -16,6 +16,8 @@ use crate::{MyAsyncReadExt, MyAsyncWriteExt};
 pub struct AsyncReader<T>(T);
 pub struct AsyncWriter<T>(T);
 
+pub struct AsyncReaderWriterRef<'a, T>(&'a mut T);
+
 /// For tokio
 #[cfg(feature = "tokio")]
 impl<T: tokio::io::AsyncReadExt + Unpin> AsyncReader<T> {
@@ -27,6 +29,14 @@ impl<T: tokio::io::AsyncReadExt + Unpin> AsyncReader<T> {
 impl<T: tokio::io::AsyncWriteExt + Unpin> AsyncWriter<T> {
     pub fn new(writer: T) -> Self {
         Self(writer)
+    }
+}
+#[cfg(feature = "tokio")]
+impl<'a, T: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin>
+    AsyncReaderWriterRef<'a, T>
+{
+    pub fn new(stream: &'a mut T) -> Self {
+        Self(stream)
     }
 }
 
@@ -47,6 +57,40 @@ impl<T: tokio::io::AsyncReadExt + Send + Unpin + 'static> MyAsyncReadExt for Asy
 
 #[cfg(feature = "tokio")]
 impl<T: tokio::io::AsyncWriteExt + Send + Unpin> MyAsyncWriteExt for AsyncWriter<T> {
+    async fn write_u32(&mut self, n: u32) -> crate::Result<(), std::io::Error> {
+        self.0.write_u32(n).await
+    }
+
+    async fn write(&mut self, src: &[u8]) -> crate::Result<usize, std::io::Error> {
+        self.0.write(src).await
+    }
+
+    async fn write_all(&mut self, src: &[u8]) -> crate::Result<(), std::io::Error> {
+        self.0.write_all(src).await
+    }
+}
+
+#[cfg(feature = "tokio")]
+impl<'a, T: tokio::io::AsyncWriteExt + tokio::io::AsyncReadExt + Send + Unpin> MyAsyncReadExt
+    for AsyncReaderWriterRef<'a, T>
+{
+    async fn read_u32(&mut self) -> crate::Result<u32, std::io::Error> {
+        self.0.read_u32().await
+    }
+
+    async fn read(&mut self, buf: &mut [u8]) -> crate::Result<usize, std::io::Error> {
+        self.0.read(buf).await
+    }
+
+    async fn read_exact(&mut self, buf: &mut [u8]) -> crate::Result<usize, std::io::Error> {
+        self.0.read_exact(buf).await
+    }
+}
+
+#[cfg(feature = "tokio")]
+impl<'a, T: tokio::io::AsyncWriteExt + tokio::io::AsyncReadExt + Send + Unpin> MyAsyncWriteExt
+    for AsyncReaderWriterRef<'a, T>
+{
     async fn write_u32(&mut self, n: u32) -> crate::Result<(), std::io::Error> {
         self.0.write_u32(n).await
     }
