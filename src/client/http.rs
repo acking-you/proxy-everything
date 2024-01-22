@@ -11,7 +11,7 @@ use tokio::{io::AsyncWriteExt, net::TcpStream};
 
 use super::{
     get_tcp_proxy_stream, get_tcp_stream, ForwardContext, ForwarderProvider, HeaderContext,
-    ProxyContext, TcpForwardImpl,
+    ProxyContext, TcpForwardImpl, SERVER_HOST, SERVER_PORT,
 };
 
 #[derive(Debug, Snafu)]
@@ -169,22 +169,29 @@ impl HttpProxierProvider {
     ) -> super::Result<(TcpStream, bool)> {
         // if we don't have ssl,only use proxy when host is part of `PROXY_KEYWORDS`
         if !self.has_ssl {
-            let need_proxy = PROXY_KEYWORDS.iter().any(|e| e == &self.host);
-            let mut server_stream = if need_proxy {
-                get_tcp_proxy_stream(
-                    self.host.as_str(),
-                    self.port,
-                    self.msg_key.clone(),
-                    "[PROXY] we will proxy http",
-                )
-                .await?
-            } else {
-                get_tcp_stream(
-                    &self.host,
-                    self.port,
-                    "[NOPROXY-HTTP] we will start connect http server directly",
-                )
-                .await?
+            let has_proxy_status = PROXY_KEYWORDS
+                .iter()
+                .find(|e| self.host.contains(&e.name_server));
+            let mut server_stream = match has_proxy_status {
+                Some(proxy_status) => {
+                    get_tcp_proxy_stream(
+                        self.host.as_str(),
+                        self.port,
+                        proxy_status.proxy_server.as_ref().unwrap_or(&SERVER_HOST),
+                        SERVER_PORT,
+                        self.msg_key.clone(),
+                        "[PROXY] we will proxy http",
+                    )
+                    .await?
+                }
+                None => {
+                    get_tcp_stream(
+                        &self.host,
+                        self.port,
+                        "[NOPROXY-HTTP] we will start connect http server directly",
+                    )
+                    .await?
+                }
             };
             server_stream
                 .write_all(context.buffer)
@@ -194,7 +201,7 @@ impl HttpProxierProvider {
                     detail: "http direct proxy first write error",
                 })
                 .context(HttpProxySnafu)?;
-            Ok((server_stream, need_proxy))
+            Ok((server_stream, has_proxy_status.is_some()))
         } else {
             // response to 200
             context
@@ -210,16 +217,33 @@ impl HttpProxierProvider {
             // check auto proxy to prevent proxy to remote server
             #[cfg(feature = "auto-proxy")]
             {
-                if let Some(detail) =
-                    need_proxy(self.host.as_str(), self.port, context.sender).await?
-                {
-                    return Ok((get_tcp_stream(&self.host, self.port, detail).await?, false));
+                match need_proxy(self.host.as_str(), self.port, context.sender).await? {
+                    crate::client::ProxyStatus::NorlmalProxy => {}
+                    crate::client::ProxyStatus::NoProxy(detail) => {
+                        return Ok((get_tcp_stream(&self.host, self.port, detail).await?, false))
+                    }
+                    crate::client::ProxyStatus::NeedSpecialProxy(proxy_host) => {
+                        return Ok((
+                            get_tcp_proxy_stream(
+                                self.host.as_str(),
+                                self.port,
+                                &proxy_host,
+                                SERVER_PORT,
+                                self.msg_key.clone(),
+                                "[PROXY] we will proxy https",
+                            )
+                            .await?,
+                            true,
+                        ))
+                    }
                 }
             }
             Ok((
                 get_tcp_proxy_stream(
                     self.host.as_str(),
                     self.port,
+                    &SERVER_HOST,
+                    SERVER_PORT,
                     self.msg_key.clone(),
                     "[PROXY] we will proxy https",
                 )
