@@ -15,7 +15,7 @@ use ring::aead::{
 };
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
-use tracing_subscriber::{fmt, layer::SubscriberExt};
+use tracing_subscriber::{fmt, layer::SubscriberExt, Layer};
 
 use codec::{AsyncDecryptCodec, AsyncEncryptCodec};
 
@@ -52,8 +52,16 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 type RingResult<T> = Result<T, ring::error::Unspecified>;
 
 pub fn init_tracing() {
-    let subcriber = tracing_subscriber::registry()
-        .with(fmt::Layer::new().pretty().with_writer(std::io::stdout));
+    let subcriber = tracing_subscriber::registry().with(
+        fmt::layer()
+            .pretty()
+            .with_writer(std::io::stdout)
+            .with_filter(
+                tracing_subscriber::EnvFilter::builder()
+                    .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
+                    .from_env_lossy(),
+            ),
+    );
     tracing::subscriber::set_global_default(subcriber).expect("setting tracing default failed");
 }
 
