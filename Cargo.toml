@@ -36,8 +36,6 @@ flume = { version = "0.11.0", default-features = false, features = [
     "async",
 ], optional = true }
 futures = "0.3"
-[target.armv7-unknown-linux-musleabi]
-rustflags = ["-C", "target-feature=+crt-static"]
 
 [[bin]]
 name = "http-proxy-client"
