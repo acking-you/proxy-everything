@@ -72,6 +72,28 @@ pub enum ClientError {
     SocksProxy { source: SocksError },
 }
 
+#[derive(Debug)]
+pub struct ParsedProxyKeyWord {
+    pub name_server: String,
+    pub proxy_server: Option<String>,
+}
+
+fn parse_keywords(keywords: Vec<String>) -> Vec<ParsedProxyKeyWord> {
+    keywords
+        .into_iter()
+        .map(|v| match v.find(':') {
+            Some(i) => ParsedProxyKeyWord {
+                name_server: v[..i].trim().to_string(),
+                proxy_server: Some(v[i + 1..].trim().to_string()),
+            },
+            None => ParsedProxyKeyWord {
+                name_server: v,
+                proxy_server: None,
+            },
+        })
+        .collect()
+}
+
 #[cfg(feature = "auto-proxy")]
 pub static NONPROXY_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
     let mut default_keywords = vec![
@@ -121,10 +143,11 @@ pub static NONPROXY_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
 });
 
 #[cfg(feature = "auto-proxy")]
-pub static PROXY_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
+pub static PROXY_KEYWORDS: Lazy<Vec<ParsedProxyKeyWord>> = Lazy::new(|| {
     let mut default_keywords = vec![
         "tiktok".to_string(),
         "youtube".to_string(),
+        "scholar.google:202.81.229.9".to_string(),
         "google".to_string(),
         "chatgpt".to_string(),
         "twitter".to_string(),
@@ -145,13 +168,13 @@ pub static PROXY_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
                 keywords.append(&mut default_keywords);
             }
             tracing::info!("`PROXY_KEYWORDS` is `{keywords:?}`");
-            keywords
+            parse_keywords(keywords)
         }
         Err(_) => {
             tracing::info!(
                 "No ENV:`PROXY_KEYWORDS` provided,we use default keywords:{default_keywords:?}"
             );
-            default_keywords
+            parse_keywords(default_keywords)
         }
     }
 });
@@ -253,50 +276,74 @@ pub fn get_uri(host: impl AsRef<str>, port: u16) -> String {
     format!("{}:{}", host.as_ref(), port)
 }
 
+pub enum ProxyStatus {
+    NorlmalProxy,
+    NoProxy(&'static str),
+    NeedSpecialProxy(String),
+}
+
 /// we will not proxy if option is some
 #[cfg(feature = "auto-proxy")]
 pub async fn need_proxy(
     host: impl AsRef<str>,
     port: u16,
     sender: &SenderChan,
-) -> Result<Option<&'static str>> {
+) -> Result<ProxyStatus> {
     if host.as_ref() == "127.0.0.1" {
         LocalHostSnafu { port }.fail()?;
     }
     // prehandle when host contain `NONPROXY_KEYWORS` or `PROXY_KEYWORDS`
     let has_nonproxy_list = NONPROXY_KEYWORDS.iter().any(|v| host.as_ref().contains(v));
-    let has_proxy_list = PROXY_KEYWORDS.iter().any(|v| host.as_ref().contains(v));
-    if has_nonproxy_list && !has_proxy_list {
-        return Ok(Some(
+    let has_proxy_status = PROXY_KEYWORDS
+        .iter()
+        .find(|v| host.as_ref().contains(&v.name_server))
+        .map(|v| match v.proxy_server.as_ref() {
+            Some(proxy_server) => ProxyStatus::NeedSpecialProxy(proxy_server.clone()),
+            None => ProxyStatus::NorlmalProxy,
+        });
+    if has_nonproxy_list && has_proxy_status.is_none() {
+        return Ok(ProxyStatus::NoProxy(
             "[NOPROXY-RULES] we will start connect server directly",
         ));
     }
-    if !has_proxy_list {
-        // start check by ip-api.com
-        let (tx, rx) = flume::bounded(1);
-        sender
-            .send_async((host.as_ref().to_string(), tx))
-            .await
-            .with_context(|_| SendAutoProxySnafu {
-                uri: get_uri(host.as_ref(), port),
-            })?;
-        let need_proxy = match rx
-            .recv_async()
-            .await
-            .with_context(|_| ReciveAutoProxySnafu {
-                uri: get_uri(host.as_ref(), port),
-            }) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::error!(received_auto_proxy_error=?e);
-                true
+    match has_proxy_status {
+        None => {
+            // start check by ip-api.com
+            let (tx, rx) = flume::bounded(1);
+            sender
+                .send_async((host.as_ref().to_string(), tx))
+                .await
+                .with_context(|_| SendAutoProxySnafu {
+                    uri: get_uri(host.as_ref(), port),
+                })?;
+            match rx
+                .recv_async()
+                .await
+                .with_context(|_| ReciveAutoProxySnafu {
+                    uri: get_uri(host.as_ref(), port),
+                }) {
+                Ok(v) => {
+                    if v {
+                        Ok(ProxyStatus::NorlmalProxy)
+                    } else {
+                        Ok(ProxyStatus::NoProxy(
+                            "[NOPROXY-AUTO] we will start connect server by proxy",
+                        ))
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "{}:{} check ip error:{},we will use normal proxy by default",
+                        host.as_ref(),
+                        port,
+                        e
+                    );
+                    Ok(ProxyStatus::NorlmalProxy)
+                }
             }
-        };
-        if !need_proxy {
-            return Ok(Some("[NOPROXY-AUTO] we will start connect server by proxy"));
         }
+        Some(proxy_status) => Ok(proxy_status),
     }
-    Ok(None)
 }
 
 #[inline]
@@ -312,11 +359,13 @@ pub async fn get_tcp_stream(host: &str, port: u16, detail: &'static str) -> Resu
 pub async fn get_tcp_proxy_stream(
     host: &str,
     port: u16,
+    proxy_server: &str,
+    proxy_server_port: u16,
     msg_key: Option<Cow<'static, str>>,
     detail: &'static str,
 ) -> Result<TcpStream> {
     // 1. get proxy server stream
-    let mut proxy_server_stream = get_tcp_stream(&SERVER_HOST, SERVER_PORT, detail).await?;
+    let mut proxy_server_stream = get_tcp_stream(proxy_server, proxy_server_port, detail).await?;
 
     // 2. prepare proxy header
     let proxy_header = ProxyHeader {

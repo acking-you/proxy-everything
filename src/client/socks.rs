@@ -15,7 +15,7 @@ use crate::{
 
 use super::{
     auto_proxy::SenderChan, get_tcp_proxy_stream, ForwarderProvider, SocksProxySnafu,
-    TcpForwardImpl,
+    TcpForwardImpl, SERVER_HOST, SERVER_PORT,
 };
 
 #[derive(Debug, Snafu)]
@@ -223,12 +223,37 @@ async fn get_server_stream(
     // check auto proxy to prevent proxy to remote server
     #[cfg(feature = "auto-proxy")]
     {
-        if let Some(detail) = need_proxy(host.as_ref(), port, sender).await? {
-            return Ok((get_tcp_stream(host.as_ref(), port, detail).await?, false));
+        match need_proxy(host.as_ref(), port, sender).await? {
+            crate::client::ProxyStatus::NorlmalProxy => {}
+            crate::client::ProxyStatus::NoProxy(detail) => {
+                return Ok((get_tcp_stream(host.as_ref(), port, detail).await?, false))
+            }
+            crate::client::ProxyStatus::NeedSpecialProxy(proxy_server) => {
+                return Ok((
+                    get_tcp_proxy_stream(
+                        host.as_ref(),
+                        port,
+                        &proxy_server,
+                        SERVER_PORT,
+                        msg_key,
+                        "[PROXY] we will proxy socks5",
+                    )
+                    .await?,
+                    true,
+                ))
+            }
         }
     }
     Ok((
-        get_tcp_proxy_stream(host.as_ref(), port, msg_key, "[PROXY] we will proxy socks5").await?,
+        get_tcp_proxy_stream(
+            host.as_ref(),
+            port,
+            &SERVER_HOST,
+            SERVER_PORT,
+            msg_key,
+            "[PROXY] we will proxy socks5",
+        )
+        .await?,
         true,
     ))
 }
