@@ -1,0 +1,1 @@
+cross build --bin http-proxy-cli --features="cli-dep" --target armv7-unknown-linux-musleabi --release 

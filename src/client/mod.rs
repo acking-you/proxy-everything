@@ -83,10 +83,14 @@ pub static NONPROXY_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
         "douyin".to_string(),
         "cnblogs".to_string(),
         "qq.com".to_string(),
+        "jd".to_string(),
+        "jingdong".to_string(),
         "jd.com".to_string(),
         "retiehe".to_string(),
         "meituan".to_string(),
         "jianguoyun".to_string(),
+        "tb".to_string(),
+        "taobao".to_string(),
         "taobao.com".to_string(),
         "csdn".to_string(),
         "juejin".to_string(),
@@ -126,6 +130,7 @@ pub static PROXY_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
         "tiktok".to_string(),
         "youtube".to_string(),
         "google".to_string(),
+        "openai".to_string(),
         "chatgpt".to_string(),
         "twitter".to_string(),
         "facebook".to_string(),
@@ -538,6 +543,7 @@ pub async fn start_client<const NEED_CODEC: bool>(host: impl AsRef<str> + Debug,
     };
 
     while !manager.is_cancelled() {
+        // TODO let this normal handle when fd is full
         let (stream, _) = listener.accept().await.unwrap();
         #[cfg(feature = "auto-proxy")]
         let sender = sender.clone();
