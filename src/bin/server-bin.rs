@@ -1,15 +1,9 @@
-use http_proxy::{
-    init_tracing,
-    server::{start_server, SERVER_PORT},
-};
+use http_proxy::init_tracing;
+use http_proxy::server::{start_server, SERVER_PORT};
+use mimalloc_rust::GlobalMiMalloc;
 
-#[cfg(not(target_env = "msvc"))]
-use tikv_jemallocator::Jemalloc;
-
-#[cfg(not(target_env = "msvc"))]
 #[global_allocator]
-static GLOBAL: Jemalloc = Jemalloc;
-
+static GLOBAL_MIMALLOC: GlobalMiMalloc = GlobalMiMalloc;
 #[tokio::main]
 async fn main() {
     init_tracing();

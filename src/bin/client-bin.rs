@@ -1,5 +1,9 @@
 use http_proxy::client::{start_client, CLIENT_PORT, SERVER_HOST};
 use http_proxy::init_tracing;
+use mimalloc_rust::GlobalMiMalloc;
+
+#[global_allocator]
+static GLOBAL_MIMALLOC: GlobalMiMalloc = GlobalMiMalloc;
 
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;

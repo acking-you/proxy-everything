@@ -1,14 +1,10 @@
+use clap::Parser;
 use http_proxy::client::{start_client, CLIENT_PORT, SERVER_HOST};
 use http_proxy::{init_tracing, DEFAULT_KEY};
+use mimalloc_rust::GlobalMiMalloc;
 
-#[cfg(not(target_env = "msvc"))]
-use tikv_jemallocator::Jemalloc;
-
-#[cfg(not(target_env = "msvc"))]
 #[global_allocator]
-static GLOBAL: Jemalloc = Jemalloc;
-
-use clap::Parser;
+static GLOBAL_MIMALLOC: GlobalMiMalloc = GlobalMiMalloc;
 
 #[derive(Parser)]
 #[command(author = "L_B__", version, about, long_about = None)]
@@ -19,7 +15,8 @@ struct Cli {
     /// [optional] Port number exposed by the local client agent (uses port 1080 by default)
     #[arg(short, long, value_name = "CLIENT_PORT")]
     port: Option<u16>,
-    /// [optional] Keys for symmetric encryption (must be 32 bytes in length, default value is `my-secret-key123my-secret-key123`)
+    /// [optional] Keys for symmetric encryption (must be 32 bytes in length, default value is
+    /// `my-secret-key123my-secret-key123`)
     #[arg(short, long, value_name = "SECRET_KEY")]
     key: Option<String>,
     /// [optional] Keywords-set for identify no proxy
@@ -28,7 +25,7 @@ struct Cli {
     /// [optional] Keywords-set for identify proxy
     #[arg(long, value_name = "PROXY_KEYWORDS")]
     proxy_keywords: Option<String>,
-    ///[optional] Enable random key for sending message, default is false
+    /// [optional] Enable random key for sending message, default is false
     #[arg(short, long, value_name = "MSG_KEY")]
     msg_key: bool,
 }

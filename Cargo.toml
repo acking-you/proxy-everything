@@ -36,8 +36,12 @@ flume = { version = "0.11.0", default-features = false, features = [
     "async",
 ], optional = true }
 futures = "0.3"
+<<<<<<< HEAD
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.5"
+=======
+mimalloc-rust = "0.2"
+>>>>>>> a21b7cd (feat: mimalloc as allocator)
 
 [[bin]]
 name = "http-proxy-client"
