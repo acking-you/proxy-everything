@@ -1,0 +1,1 @@
+cross build --bin http-proxy-server --target x86_64-unknown-linux-musl --release 

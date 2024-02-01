@@ -1,0 +1,1 @@
+cross build --bin http-proxy-cli --features="cli-dep" --target s390x-unknown-linux-gnu --release 
