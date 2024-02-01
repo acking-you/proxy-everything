@@ -72,7 +72,7 @@ jobs:
         with:
           use-cross: true
           command: build
-          args: --bin http-proxy-cli --features="cli-dep" --verbose --release --target ${{ matrix.target }}
+          args: --bin http-proxy-cli --features cli-dep --verbose --release --target ${{ matrix.target }}
 
       - name: Archive http-proxy-cli
         shell: bash
@@ -118,7 +118,7 @@ jobs:
             echo "CLIENT_ASSET=$dirname.tar.gz" >> $GITHUB_ENV
           fi
 
-      - name: Build http-proxy-server archive
+      - name: Archive http-proxy-server
         shell: bash
         run: |
           # Replace with the name of your binary
