@@ -31,16 +31,17 @@ pub enum ServerError {
     Proxy { source: super::Error },
 }
 
+use crate::codec::{AsyncReader, AsyncWriter};
+use crate::util::{
+    GracefulShutdownManager, GracefulShutdownManagerImpl, ProxyTaskId, TaskIdGenerator,
+};
 use crate::{
-    codec::{AsyncReader, AsyncWriter},
-    get_data_size, proxy_with_norlmal_codec, server_proxy_with_cryptor_codec,
-    util::{GracefulShutdownManager, GracefulShutdownManagerImpl, ProxyTaskId, TaskIdGenerator},
-    Aes256GcmCryption, DataSize, MyAsyncReadExt, ProxyHeader,
+    get_data_size, proxy_with_norlmal_codec, server_proxy_with_cryptor_codec, Aes256GcmCryption,
+    DataSize, MyAsyncReadExt, ProxyHeader,
 };
 
 type Result<T> = std::result::Result<T, ServerError>;
 
-pub const SERVER_PORT: u16 = 1081;
 pub const MAX_HEADER_SIZE: DataSize = 8 * 128;
 
 pub async fn handle_connect(conn: TcpStream) -> Result<()> {

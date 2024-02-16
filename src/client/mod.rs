@@ -2,6 +2,26 @@
 pub mod auto_proxy;
 pub mod http;
 pub mod socks;
+use std::borrow::Cow;
+use std::fmt::{Debug, Display};
+
+#[cfg(feature = "auto-proxy")]
+use auto_proxy::{run_auto_proxy_by_country, SendItem, SenderChan};
+#[cfg(feature = "monoio")]
+use monoio::io::Splitable;
+#[cfg(feature = "monoio")]
+use monoio::net::TcpStream;
+use once_cell::sync::Lazy;
+use snafu::{Report, ResultExt, Snafu};
+use tokio::io::AsyncReadExt;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+#[cfg(feature = "tokio")]
+use tokio::net::TcpListener;
+#[cfg(feature = "tokio")]
+use tokio::net::TcpStream;
+
+use self::http::{HttpProxierProvider, HttpProxyError};
+use self::socks::{SocksError, SocksProxierProvider};
 use crate::codec::{AsyncReader, AsyncReaderWriterRef, AsyncWriter};
 use crate::util::{
     GracefulShutdownManager, GracefulShutdownManagerImpl, ProxyTaskId, TaskIdGenerator,
@@ -10,27 +30,6 @@ use crate::{
     client_proxy_with_cryptor_codec, gen_random_key, proxy_with_norlmal_codec, set_data_size,
     Aes256GcmCryption, MyAsyncWriteExt, ProxyHeader,
 };
-#[cfg(feature = "auto-proxy")]
-use auto_proxy::{run_auto_proxy_by_country, SendItem, SenderChan};
-
-#[cfg(feature = "monoio")]
-use monoio::io::Splitable;
-use once_cell::sync::Lazy;
-use snafu::{Report, ResultExt, Snafu};
-use std::borrow::Cow;
-use std::fmt::{Debug, Display};
-use tokio::io::AsyncReadExt;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-#[cfg(feature = "tokio")]
-use tokio::net::TcpListener;
-#[cfg(feature = "tokio")]
-use tokio::net::TcpStream;
-
-#[cfg(feature = "monoio")]
-use monoio::net::TcpStream;
-
-use self::http::{HttpProxierProvider, HttpProxyError};
-use self::socks::{SocksError, SocksProxierProvider};
 
 #[derive(Debug, Snafu)]
 pub enum ClientError {
@@ -147,7 +146,7 @@ pub static PROXY_KEYWORDS: Lazy<Vec<ParsedProxyKeyWord>> = Lazy::new(|| {
     let mut default_keywords = vec![
         "tiktok".to_string(),
         "youtube".to_string(),
-        "scholar.google:202.81.229.9".to_string(),
+        "scholar.google:154.21.207.157".to_string(),
         "google".to_string(),
         "chatgpt".to_string(),
         "twitter".to_string(),
@@ -180,14 +179,6 @@ pub static PROXY_KEYWORDS: Lazy<Vec<ParsedProxyKeyWord>> = Lazy::new(|| {
 });
 
 pub type Result<T> = std::result::Result<T, ClientError>;
-
-pub static SERVER_HOST: Lazy<String> = Lazy::new(|| match std::env::var("SERVER_HOST") {
-    Ok(s) => s,
-    Err(_) => {
-        tracing::error!("You are not set `ENV:SERVER_HOST`. we will use `localhost` as default!");
-        "127.0.0.1".to_string()
-    }
-});
 
 pub trait Forwarder {
     fn forward(self) -> impl std::future::Future<Output = Result<()>> + Send;
@@ -226,11 +217,12 @@ pub trait ProxierProviderType {
 }
 
 macro_rules! make_provider_type {
-    ($name:ident,$proxy_type:expr,$provider_name:ty) => {
+    ($name:ident, $proxy_type:expr, $provider_name:ty) => {
         pub struct $name {}
 
         impl ProxierProviderType for $name {
             type Provider = $provider_name;
+
             const PROXY_TYPE: &'static str = $proxy_type;
         }
     };
@@ -238,9 +230,6 @@ macro_rules! make_provider_type {
 
 make_provider_type!(HttpProxierProviderType, "HTTP/HTTPS", HttpProxierProvider);
 make_provider_type!(SocksProxierProviderType, "SOCKS5", SocksProxierProvider);
-
-pub const SERVER_PORT: u16 = 1081;
-pub const CLIENT_PORT: u16 = 1080;
 
 pub type TcpAsyncReader<T = OwnedReadHalf> = AsyncReader<T>;
 pub type TcpAsyncWriter<T = OwnedWriteHalf> = AsyncWriter<T>;

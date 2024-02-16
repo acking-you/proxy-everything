@@ -1,11 +1,12 @@
-use std::{borrow::Cow, fmt::Display};
+use std::borrow::Cow;
+use std::fmt::Display;
 
 pub mod client;
 pub(crate) mod codec;
 pub mod server;
 pub(crate) mod util;
 
-use codec::{AsyncNormalCodec, CodecError};
+use codec::{AsyncDecryptCodec, AsyncEncryptCodec, AsyncNormalCodec, CodecError};
 use futures::future;
 use once_cell::sync::Lazy;
 use rand::Rng;
@@ -15,9 +16,8 @@ use ring::aead::{
 };
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
-use tracing_subscriber::{fmt, layer::SubscriberExt, Layer};
-
-use codec::{AsyncDecryptCodec, AsyncEncryptCodec};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::{fmt, Layer};
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -91,6 +91,55 @@ impl Display for ProxyHeader {
         write!(f, "{}:{}", self.host, self.port)
     }
 }
+
+/// Port for connect to proxy server
+pub static SERVER_PORT: Lazy<u16> = Lazy::new(|| {
+    let default_port = 1081;
+    match std::env::var("SERVER_PORT") {
+        Ok(port) => match port.parse::<u16>() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("`SERVER_PORT` is invalid port! error:{e}");
+                default_port
+            }
+        },
+        Err(_) => {
+            tracing::warn!(
+                "No ENV:`SERVER_PORT` provided,we use default server port:{default_port}"
+            );
+            default_port
+        }
+    }
+});
+
+/// Port for provide to local proxy server
+pub static CLIENT_PORT: Lazy<u16> = Lazy::new(|| {
+    let default_port = 1080;
+    match std::env::var("CLIENT_PORT") {
+        Ok(port) => match port.parse::<u16>() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("`CLIENT_PORT` is invalid port! error:{e}");
+                default_port
+            }
+        },
+        Err(_) => {
+            tracing::warn!(
+                "No ENV:`CLIENT_PORT` provided,we use default client port:{default_port}"
+            );
+            default_port
+        }
+    }
+});
+
+/// Ip or URL to connect server
+pub static SERVER_HOST: Lazy<String> = Lazy::new(|| match std::env::var("SERVER_HOST") {
+    Ok(s) => s,
+    Err(_) => {
+        tracing::error!("You are not set `ENV:SERVER_HOST`. we will use `localhost` as default!");
+        "127.0.0.1".to_string()
+    }
+});
 
 // 256-bit key,must be 256/8 = 32 byte key and hashcode
 pub static DEFAULT_KEY: Lazy<(Vec<u8>, u32)> = Lazy::new(|| {

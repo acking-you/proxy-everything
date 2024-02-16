@@ -1,22 +1,17 @@
-use std::{borrow::Cow, net::Ipv6Addr};
+use std::borrow::Cow;
+use std::net::Ipv6Addr;
 
+use snafu::{ResultExt, Snafu};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+
+use super::auto_proxy::SenderChan;
+use super::{get_tcp_proxy_stream, ForwarderProvider, SocksProxySnafu, TcpForwardImpl};
+use crate::client::get_tcp_stream;
 #[cfg(feature = "auto-proxy")]
 use crate::client::need_proxy;
-use snafu::{ResultExt, Snafu};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-};
-
-use crate::{
-    client::get_tcp_stream,
-    codec::{AsyncReader, AsyncWriter},
-};
-
-use super::{
-    auto_proxy::SenderChan, get_tcp_proxy_stream, ForwarderProvider, SocksProxySnafu,
-    TcpForwardImpl, SERVER_HOST, SERVER_PORT,
-};
+use crate::codec::{AsyncReader, AsyncWriter};
+use crate::{SERVER_HOST, SERVER_PORT};
 
 #[derive(Debug, Snafu)]
 pub enum SocksError {
@@ -234,7 +229,7 @@ async fn get_server_stream(
                         host.as_ref(),
                         port,
                         &proxy_server,
-                        SERVER_PORT,
+                        *SERVER_PORT,
                         msg_key,
                         "[PROXY] we will proxy socks5",
                     )
@@ -249,7 +244,7 @@ async fn get_server_stream(
             host.as_ref(),
             port,
             &SERVER_HOST,
-            SERVER_PORT,
+            *SERVER_PORT,
             msg_key,
             "[PROXY] we will proxy socks5",
         )

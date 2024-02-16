@@ -1,18 +1,18 @@
 use std::borrow::Cow;
 
-#[cfg(feature = "auto-proxy")]
-use crate::client::need_proxy;
-use crate::{
-    client::{HttpProxySnafu, PROXY_KEYWORDS},
-    codec::{AsyncReader, AsyncWriter},
-};
 use snafu::{OptionExt, ResultExt, Snafu};
-use tokio::{io::AsyncWriteExt, net::TcpStream};
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
 
 use super::{
     get_tcp_proxy_stream, get_tcp_stream, ForwardContext, ForwarderProvider, HeaderContext,
-    ProxyContext, TcpForwardImpl, SERVER_HOST, SERVER_PORT,
+    ProxyContext, TcpForwardImpl,
 };
+#[cfg(feature = "auto-proxy")]
+use crate::client::need_proxy;
+use crate::client::{HttpProxySnafu, PROXY_KEYWORDS};
+use crate::codec::{AsyncReader, AsyncWriter};
+use crate::{SERVER_HOST, SERVER_PORT};
 
 #[derive(Debug, Snafu)]
 pub enum HttpProxyError {
@@ -178,7 +178,7 @@ impl HttpProxierProvider {
                         self.host.as_str(),
                         self.port,
                         proxy_status.proxy_server.as_ref().unwrap_or(&SERVER_HOST),
-                        SERVER_PORT,
+                        *SERVER_PORT,
                         self.msg_key.clone(),
                         "[PROXY] we will proxy http",
                     )
@@ -228,7 +228,7 @@ impl HttpProxierProvider {
                                 self.host.as_str(),
                                 self.port,
                                 &proxy_host,
-                                SERVER_PORT,
+                                *SERVER_PORT,
                                 self.msg_key.clone(),
                                 "[PROXY] we will proxy https",
                             )
@@ -243,7 +243,7 @@ impl HttpProxierProvider {
                     self.host.as_str(),
                     self.port,
                     &SERVER_HOST,
-                    SERVER_PORT,
+                    *SERVER_PORT,
                     self.msg_key.clone(),
                     "[PROXY] we will proxy https",
                 )
