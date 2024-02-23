@@ -151,6 +151,7 @@ pub static PROXY_KEYWORDS: Lazy<Vec<ParsedProxyKeyWord>> = Lazy::new(|| {
         "chatgpt".to_string(),
         "twitter".to_string(),
         "facebook".to_string(),
+        "bilibili.tv".to_string(),
         "github".to_string(),
         "docker".to_string(),
     ];
