@@ -7,9 +7,9 @@ use tokio::net::TcpStream;
 
 use super::auto_proxy::SenderChan;
 use super::{get_tcp_proxy_stream, ForwarderProvider, SocksProxySnafu, TcpForwardImpl};
-use crate::client::get_tcp_stream;
 #[cfg(feature = "auto-proxy")]
 use crate::client::need_proxy;
+use crate::client::{change_msg_key, get_tcp_stream};
 use crate::codec::{AsyncReader, AsyncWriter};
 use crate::{SERVER_HOST, SERVER_PORT};
 
@@ -90,7 +90,7 @@ impl ForwarderProvider for SocksProxierProvider {
         response(&mut proxy_context.stream)
             .await
             .context(SocksProxySnafu)?;
-        let (server_stream, need_proxy) = get_server_stream(
+        let (server_stream, need_proxy, msg_key) = get_server_stream(
             host.as_str(),
             port,
             proxy_context.sender,
@@ -104,7 +104,7 @@ impl ForwarderProvider for SocksProxierProvider {
                 host,
                 port,
                 need_proxy,
-                msg_key: self.msg_key,
+                msg_key,
             },
             client_reader: AsyncReader::new(r),
             client_writer: AsyncWriter::new(w),
@@ -214,42 +214,50 @@ async fn get_server_stream(
     port: u16,
     sender: &SenderChan,
     msg_key: Option<Cow<'static, str>>,
-) -> super::Result<(TcpStream, bool)> {
+) -> super::Result<(TcpStream, bool, Option<Cow<'static, str>>)> {
     // check auto proxy to prevent proxy to remote server
     #[cfg(feature = "auto-proxy")]
     {
         match need_proxy(host.as_ref(), port, sender).await? {
             crate::client::ProxyStatus::NorlmalProxy => {}
             crate::client::ProxyStatus::NoProxy(detail) => {
-                return Ok((get_tcp_stream(host.as_ref(), port, detail).await?, false))
+                return Ok((
+                    get_tcp_stream(host.as_ref(), port, detail).await?,
+                    false,
+                    msg_key,
+                ))
             }
             crate::client::ProxyStatus::NeedSpecialProxy(proxy_server) => {
+                let msg_key = change_msg_key(proxy_server.as_str(), msg_key);
                 return Ok((
                     get_tcp_proxy_stream(
                         host.as_ref(),
                         port,
                         &proxy_server,
                         *SERVER_PORT,
-                        msg_key,
+                        msg_key.clone(),
                         "[PROXY] we will proxy socks5",
                     )
                     .await?,
                     true,
-                ))
+                    msg_key,
+                ));
             }
         }
     }
+    let msg_key = change_msg_key(SERVER_HOST.as_str(), msg_key);
     Ok((
         get_tcp_proxy_stream(
             host.as_ref(),
             port,
             &SERVER_HOST,
             *SERVER_PORT,
-            msg_key,
+            msg_key.clone(),
             "[PROXY] we will proxy socks5",
         )
         .await?,
         true,
+        msg_key,
     ))
 }
 

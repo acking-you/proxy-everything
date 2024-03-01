@@ -28,6 +28,9 @@ struct Cli {
     /// [optional] Keywords-set for identify proxy
     #[arg(long, value_name = "PROXY_KEYWORDS")]
     proxy_keywords: Option<String>,
+    /// [optional] Keywords-set for identify proxy
+    #[arg(long, value_name = "NEED_CODEC_IP")]
+    need_codec_ip: Option<String>,
     /// [optional] Enable random key for sending message, default is false
     #[arg(short, long, value_name = "MSG_KEY")]
     msg_key: bool,
@@ -45,6 +48,9 @@ async fn main() {
     }
     if let Some(key) = &cli.proxy_keywords {
         std::env::set_var("PROXY_KEYWORDS", key);
+    }
+    if let Some(key) = &cli.need_codec_ip {
+        std::env::set_var("NEED_CODEC_IP", key)
     }
     if let Some(key) = cli.client_port {
         std::env::set_var("CLIENT_PORT", key.to_string());

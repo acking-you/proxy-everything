@@ -93,6 +93,8 @@ fn parse_keywords(keywords: Vec<String>) -> Vec<ParsedProxyKeyWord> {
         .collect()
 }
 
+const DEFAULT_WORD: &str = "%DEFAULT%";
+
 #[cfg(feature = "auto-proxy")]
 pub static NONPROXY_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
     let mut default_keywords = vec![
@@ -113,7 +115,6 @@ pub static NONPROXY_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
         "juejin".to_string(),
         "baidu".to_string(),
         "zhihu".to_string(),
-        "bytedance".to_string(),
         "ximalaya".to_string(),
         "cn".to_string(),
     ];
@@ -121,7 +122,7 @@ pub static NONPROXY_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
         Ok(k) => {
             let mut keywords = k.trim().split(',').map(|s| s.to_string());
             let is_insert_default = if let Some(keyword) = keywords.next() {
-                keyword == "%DEFAULT%"
+                keyword == DEFAULT_WORD
             } else {
                 false
             };
@@ -146,7 +147,7 @@ pub static PROXY_KEYWORDS: Lazy<Vec<ParsedProxyKeyWord>> = Lazy::new(|| {
     let mut default_keywords = vec![
         "tiktok".to_string(),
         "youtube".to_string(),
-        "scholar.google:154.21.207.157".to_string(),
+        "scholar.google:64.23.159.180".to_string(),
         "google".to_string(),
         "chatgpt".to_string(),
         "twitter".to_string(),
@@ -159,7 +160,7 @@ pub static PROXY_KEYWORDS: Lazy<Vec<ParsedProxyKeyWord>> = Lazy::new(|| {
         Ok(k) => {
             let mut keywords = k.trim().split(',').map(|s| s.to_string());
             let insert_default = if let Some(keyword) = keywords.next() {
-                keyword == "%DEFAULT%"
+                keyword == DEFAULT_WORD
             } else {
                 false
             };
@@ -178,6 +179,53 @@ pub static PROXY_KEYWORDS: Lazy<Vec<ParsedProxyKeyWord>> = Lazy::new(|| {
         }
     }
 });
+
+pub static NEED_CODEC_IP: Lazy<Vec<String>> = Lazy::new(|| {
+    let mut default_codec_ip = vec!["64.23.159.180".to_string()];
+    match std::env::var("NEED_CODEC_IP") {
+        Ok(v) => {
+            let mut codec_ip = v.trim().split(',').map(|s| s.to_string());
+            let need_default = if let Some(key) = codec_ip.next() {
+                key == DEFAULT_WORD
+            } else {
+                false
+            };
+            let mut res = codec_ip.collect::<Vec<_>>();
+            if need_default {
+                res.append(&mut default_codec_ip);
+            }
+            tracing::info!("`NEED_CODEC_IP` is `{res:?}`");
+            res
+        }
+        Err(_) => {
+            tracing::info!(
+                "No ENV:`NEED_CODEC_IP` provided,we use default need codec ip:{default_codec_ip:?}"
+            );
+            default_codec_ip
+        }
+    }
+});
+
+#[inline]
+pub fn get_msg_key_from_codec_ip(ip: impl AsRef<str>) -> Option<String> {
+    NEED_CODEC_IP
+        .iter()
+        .find(|codec_ip| codec_ip.as_str() == ip.as_ref())
+        .map(|_| gen_random_key())
+}
+
+/// Change `msg_key` when it is none
+#[inline]
+pub fn change_msg_key(
+    ip: impl AsRef<str>,
+    msg_key: Option<Cow<'static, str>>,
+) -> Option<Cow<'static, str>> {
+    if msg_key.is_none() {
+        get_msg_key_from_codec_ip(ip).map(Cow::Owned)
+    } else {
+        msg_key
+    }
+}
 
 pub type Result<T> = std::result::Result<T, ClientError>;
 
@@ -430,7 +478,10 @@ impl Forwarder for TcpForwardImpl {
         tracing::info!(host, port, need_proxy, ?msg_key);
 
         // start to forward
-        if let Some(key) = msg_key.as_ref() {
+        if need_proxy && msg_key.is_some() {
+            let key = msg_key.as_ref().expect(
+                "the `msg_key` has been checked earlier with `is_some`, getting it will never fail",
+            );
             tracing::info!(?key, info = "start with codec forward");
             client_proxy_with_cryptor_codec(
                 &host,

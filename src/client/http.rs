@@ -5,8 +5,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
 use super::{
-    get_tcp_proxy_stream, get_tcp_stream, ForwardContext, ForwarderProvider, HeaderContext,
-    ProxyContext, TcpForwardImpl,
+    change_msg_key, get_tcp_proxy_stream, get_tcp_stream, ForwardContext, ForwarderProvider,
+    HeaderContext, ProxyContext, TcpForwardImpl,
 };
 #[cfg(feature = "auto-proxy")]
 use crate::client::need_proxy;
@@ -139,7 +139,7 @@ impl ForwarderProvider for HttpProxierProvider {
         self,
         mut context: ProxyContext<'_>,
     ) -> super::Result<Self::Item> {
-        let (server_stream, need_proxy) = self.get_server_stream(&mut context).await?;
+        let (server_stream, need_proxy, msg_key) = self.get_server_stream(&mut context).await?;
         let ProxyContext { stream, .. } = context;
         let (r, w) = stream.into_split();
         let (s_r, s_w) = server_stream.into_split();
@@ -148,7 +148,7 @@ impl ForwarderProvider for HttpProxierProvider {
                 need_proxy,
                 host: self.host,
                 port: self.port,
-                msg_key: self.msg_key,
+                msg_key,
             },
             client_reader: AsyncReader::new(r),
             client_writer: AsyncWriter::new(w),
@@ -166,32 +166,38 @@ impl HttpProxierProvider {
     async fn get_server_stream(
         &self,
         context: &mut ProxyContext<'_>,
-    ) -> super::Result<(TcpStream, bool)> {
+    ) -> super::Result<(TcpStream, bool, Option<Cow<'static, str>>)> {
         // if we don't have ssl,only use proxy when host is part of `PROXY_KEYWORDS`
         if !self.has_ssl {
             let has_proxy_status = PROXY_KEYWORDS
                 .iter()
                 .find(|e| self.host.contains(&e.name_server));
-            let mut server_stream = match has_proxy_status {
+            let (mut server_stream, msg_key) = match has_proxy_status {
                 Some(proxy_status) => {
-                    get_tcp_proxy_stream(
-                        self.host.as_str(),
-                        self.port,
-                        proxy_status.proxy_server.as_ref().unwrap_or(&SERVER_HOST),
-                        *SERVER_PORT,
-                        self.msg_key.clone(),
-                        "[PROXY] we will proxy http",
+                    let server_ip = proxy_status.proxy_server.as_ref().unwrap_or(&SERVER_HOST);
+                    let msg_key = change_msg_key(server_ip.as_str(), self.msg_key.clone());
+                    (
+                        get_tcp_proxy_stream(
+                            self.host.as_str(),
+                            self.port,
+                            server_ip,
+                            *SERVER_PORT,
+                            msg_key.clone(),
+                            "[PROXY] we will proxy http",
+                        )
+                        .await?,
+                        msg_key,
                     )
-                    .await?
                 }
-                None => {
+                None => (
                     get_tcp_stream(
                         &self.host,
                         self.port,
                         "[NOPROXY-HTTP] we will start connect http server directly",
                     )
-                    .await?
-                }
+                    .await?,
+                    self.msg_key.clone(),
+                ),
             };
             server_stream
                 .write_all(context.buffer)
@@ -201,7 +207,8 @@ impl HttpProxierProvider {
                     detail: "http direct proxy first write error",
                 })
                 .context(HttpProxySnafu)?;
-            Ok((server_stream, has_proxy_status.is_some()))
+
+            Ok((server_stream, has_proxy_status.is_some(), msg_key))
         } else {
             // response to 200
             context
@@ -220,35 +227,43 @@ impl HttpProxierProvider {
                 match need_proxy(self.host.as_str(), self.port, context.sender).await? {
                     crate::client::ProxyStatus::NorlmalProxy => {}
                     crate::client::ProxyStatus::NoProxy(detail) => {
-                        return Ok((get_tcp_stream(&self.host, self.port, detail).await?, false))
+                        return Ok((
+                            get_tcp_stream(&self.host, self.port, detail).await?,
+                            false,
+                            self.msg_key.clone(),
+                        ))
                     }
                     crate::client::ProxyStatus::NeedSpecialProxy(proxy_host) => {
+                        let msg_key = change_msg_key(proxy_host.as_str(), self.msg_key.clone());
                         return Ok((
                             get_tcp_proxy_stream(
                                 self.host.as_str(),
                                 self.port,
                                 &proxy_host,
                                 *SERVER_PORT,
-                                self.msg_key.clone(),
+                                msg_key.clone(),
                                 "[PROXY] we will proxy https",
                             )
                             .await?,
                             true,
-                        ))
+                            msg_key,
+                        ));
                     }
                 }
             }
+            let msg_key = change_msg_key(SERVER_HOST.as_str(), self.msg_key.clone());
             Ok((
                 get_tcp_proxy_stream(
                     self.host.as_str(),
                     self.port,
                     &SERVER_HOST,
                     *SERVER_PORT,
-                    self.msg_key.clone(),
+                    msg_key.clone(),
                     "[PROXY] we will proxy https",
                 )
                 .await?,
                 true,
+                msg_key,
             ))
         }
     }
