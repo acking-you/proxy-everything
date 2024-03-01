@@ -148,6 +148,10 @@ pub static PROXY_KEYWORDS: Lazy<Vec<ParsedProxyKeyWord>> = Lazy::new(|| {
         "tiktok".to_string(),
         "youtube".to_string(),
         "scholar.google:64.23.159.180".to_string(),
+        // for tw anime
+        "tw:166.0.199.126".to_string(),
+        // for reddit
+        "reddit:64.23.159.180".to_string(),
         "google".to_string(),
         "chatgpt".to_string(),
         "twitter".to_string(),
@@ -181,7 +185,12 @@ pub static PROXY_KEYWORDS: Lazy<Vec<ParsedProxyKeyWord>> = Lazy::new(|| {
 });
 
 pub static NEED_CODEC_IP: Lazy<Vec<String>> = Lazy::new(|| {
-    let mut default_codec_ip = vec!["64.23.159.180".to_string()];
+    let mut default_codec_ip = vec![
+        // US node
+        "64.23.159.180".to_string(),
+        // tw node
+        "166.0.199.126".to_string(),
+    ];
     match std::env::var("NEED_CODEC_IP") {
         Ok(v) => {
             let mut codec_ip = v.trim().split(',').map(|s| s.to_string());
