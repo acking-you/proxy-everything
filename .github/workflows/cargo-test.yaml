@@ -23,7 +23,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2023-11-17
+          toolchain: nightly
           components: clippy
       - name: cargo clippy
         run: cargo clippy
