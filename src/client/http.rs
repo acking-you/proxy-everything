@@ -92,7 +92,7 @@ pub struct HttpProxierProvider {
 impl ForwarderProvider for HttpProxierProvider {
     type Item = TcpForwardImpl;
 
-    fn try_new_from_header_context(header: HeaderContext) -> super::Result<Self>
+    fn try_new(header: HeaderContext) -> super::Result<Self>
     where
         Self: std::marker::Sized,
     {
@@ -135,10 +135,7 @@ impl ForwarderProvider for HttpProxierProvider {
     }
 
     // when it is https proxy we will decide start proxy or not
-    async fn try_build_from_proxy_context(
-        self,
-        mut context: ProxyContext<'_>,
-    ) -> super::Result<Self::Item> {
+    async fn try_build_forwarder(self, mut context: ProxyContext<'_>) -> super::Result<Self::Item> {
         let (server_stream, need_proxy, msg_key) = self.get_server_stream(&mut context).await?;
         let ProxyContext { stream, .. } = context;
         let (r, w) = stream.into_split();

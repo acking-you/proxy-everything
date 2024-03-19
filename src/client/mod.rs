@@ -7,10 +7,6 @@ use std::fmt::{Debug, Display};
 
 #[cfg(feature = "auto-proxy")]
 use auto_proxy::{run_auto_proxy_by_country, SendItem, SenderChan};
-#[cfg(feature = "monoio")]
-use monoio::io::Splitable;
-#[cfg(feature = "monoio")]
-use monoio::net::TcpStream;
 use once_cell::sync::Lazy;
 use snafu::{Report, ResultExt, Snafu};
 use tokio::io::AsyncReadExt;
@@ -255,11 +251,11 @@ pub struct ProxyContext<'a> {
 pub trait ForwarderProvider {
     type Item: Forwarder;
 
-    fn try_new_from_header_context(header_context: HeaderContext<'_>) -> Result<Self>
+    fn try_new(header_context: HeaderContext<'_>) -> Result<Self>
     where
         Self: std::marker::Sized;
 
-    fn try_build_from_proxy_context(
+    fn try_build_forwarder(
         self,
         proxy_context: ProxyContext<'_>,
     ) -> impl std::future::Future<Output = Result<Self::Item>> + Send;
@@ -526,7 +522,7 @@ pub struct ClientProxyContext {
 
 #[inline]
 fn get_provider<T: ProxierProviderType>(header: HeaderContext<'_>) -> Option<T::Provider> {
-    let result = T::Provider::try_new_from_header_context(header);
+    let result = T::Provider::try_new(header);
     match result {
         Ok(o) => Some(o),
         Err(e) => {
@@ -540,7 +536,7 @@ async fn handle_proxy(
     proxy_context: ProxyContext<'_>,
     provider: impl ForwarderProvider,
 ) -> Result<()> {
-    let proxier = provider.try_build_from_proxy_context(proxy_context).await?;
+    let proxier = provider.try_build_forwarder(proxy_context).await?;
     proxier.forward().await
 }
 

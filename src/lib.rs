@@ -7,7 +7,6 @@ pub mod server;
 pub(crate) mod util;
 
 use codec::{AsyncDecryptCodec, AsyncEncryptCodec, AsyncNormalCodec, CodecError};
-use futures::future;
 use once_cell::sync::Lazy;
 use rand::Rng;
 use ring::aead::{
@@ -339,48 +338,15 @@ pub(crate) trait MyAsyncCodecReader {
     ) -> Result<DataSize>;
 }
 
-#[tracing::instrument(skip_all)]
 pub(crate) fn proxy_result_handle(
     host: impl AsRef<str>,
-    client_res: Result<DataSize>,
-    server_res: Result<DataSize>,
-) -> Result<()> {
-    match (client_res, server_res) {
-        (Ok(c), Ok(s)) => {
-            tracing::info!(
-                "We send {} bytes to {},received {} bytes",
-                c,
-                host.as_ref(),
-                s
-            );
-        }
-        (Ok(n), Err(e)) => {
-            tracing::info!(
-                "We send {} bytes to {},got error when received data,detail:{}",
-                n,
-                host.as_ref(),
-                snafu::Report::from_error(e)
-            );
-        }
-        (Err(e), Ok(n)) => {
-            tracing::info!(
-                "We send {} bytes to {},got error when received data,detail:{}",
-                n,
-                host.as_ref(),
-                snafu::Report::from_error(e)
-            );
-        }
-        (Err(e1), Err(e2)) => ProxySnafu {
-            msg: format!(
-                "send data to {} error: {},and received data error:{}",
-                host.as_ref(),
-                snafu::Report::from_error(e1),
-                snafu::Report::from_error(e2)
-            ),
-        }
-        .fail()?,
+    ret: Result<DataSize>,
+    detail: &'static str,
+) {
+    match ret {
+        Ok(n) => tracing::info!("We got {n} bytes,detail:{detail} host:{}", host.as_ref()),
+        Err(e) => tracing::error!("We got error:{e}, detail:{detail} host:{}", host.as_ref()),
     }
-    Ok(())
 }
 
 fn get_decyptor_codec<R: MyAsyncReadExt + Unpin>(
@@ -424,8 +390,15 @@ async fn start_proxy<
 ) -> Result<()> {
     let client_to_server = codec::copy(client_codec, server_writer);
     let server_to_client = codec::copy(server_codec, client_writer);
-    let (r1, r2) = future::join(client_to_server, server_to_client).await;
-    proxy_result_handle(host, r1, r2)
+    tokio::select! {
+        ret = client_to_server=> {
+            proxy_result_handle(host,ret,"client->server");
+        }
+        ret = server_to_client=> {
+            proxy_result_handle(host,ret,"server->client");
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn client_proxy_with_cryptor_codec<

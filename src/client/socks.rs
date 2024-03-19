@@ -48,7 +48,7 @@ pub struct SocksProxierProvider {
 impl ForwarderProvider for SocksProxierProvider {
     type Item = TcpForwardImpl;
 
-    fn try_new_from_header_context(header_context: super::HeaderContext<'_>) -> super::Result<Self>
+    fn try_new(header_context: super::HeaderContext<'_>) -> super::Result<Self>
     where
         Self: std::marker::Sized,
     {
@@ -80,7 +80,7 @@ impl ForwarderProvider for SocksProxierProvider {
         })
     }
 
-    async fn try_build_from_proxy_context(
+    async fn try_build_forwarder(
         self,
         mut proxy_context: super::ProxyContext<'_>,
     ) -> super::Result<Self::Item> {
