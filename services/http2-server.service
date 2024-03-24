@@ -5,8 +5,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/root
-ExecStartPre=/bin/sh -c 'ulimit -n 65536'
-ExecStart=/bin/sh -c 'export RUST_LOG=error && exec /root/http-proxy-server > /root/proxy.log 2>&1'
+ExecStart=/bin/sh -c 'ulimit -n 65535 && export RUST_LOG=error && exec /root/http-proxy-server'
 Restart=on-failure
 RestartSec=5s
 [Install]
