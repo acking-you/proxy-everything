@@ -2,6 +2,7 @@
 pub mod auto_proxy;
 pub mod http;
 pub mod socks;
+
 use std::borrow::Cow;
 use std::fmt::{Debug, Display};
 
@@ -65,6 +66,8 @@ pub enum ClientError {
     HttpProxy { source: HttpProxyError },
     #[snafu(display("Socks proxy error"))]
     SocksProxy { source: SocksError },
+    #[snafu(display("Signals register error"))]
+    RegisterSignal,
 }
 
 #[derive(Debug)]
@@ -611,13 +614,21 @@ async fn client_proxy_background_task<const NEED_CODEC: bool>(context: ClientPro
 }
 
 #[tracing::instrument]
-pub async fn start_client<const NEED_CODEC: bool>(host: impl AsRef<str> + Debug, port: u16) {
-    let listener = TcpListener::bind((host.as_ref(), port)).await.unwrap();
+pub async fn start_client<const NEED_CODEC: bool>(
+    host: impl AsRef<str> + Debug,
+    port: u16,
+) -> Result<()> {
+    let listener = TcpListener::bind((host.as_ref(), port))
+        .await
+        .context(IoSnafu {
+            uri: None,
+            detail: "Client listener error",
+        })?;
     let mut manager = GracefulShutdownManagerImpl::new();
     let mut proxy_id = ProxyTaskId::new();
     // Register SIGINT & SIGTERM & SIGQUIT
     if !manager.spawn_graceful_signals() {
-        return;
+        RegisterSignalSnafu {}.fail()?
     }
     #[cfg(feature = "auto-proxy")]
     let sender = {
@@ -629,20 +640,32 @@ pub async fn start_client<const NEED_CODEC: bool>(host: impl AsRef<str> + Debug,
     };
 
     while !manager.is_cancelled() {
-        let (stream, _) = listener.accept().await.unwrap();
-        #[cfg(feature = "auto-proxy")]
-        let sender = sender.clone();
-        let background_task = client_proxy_background_task::<NEED_CODEC>(ClientProxyContext {
-            stream,
-            msg_key: if NEED_CODEC {
-                Some(gen_random_key())
-            } else {
-                None
-            },
-            #[cfg(feature = "auto-proxy")]
-            sender,
-        });
-        manager.spawn(proxy_id.gen(), background_task);
+        tokio::select! {
+            ret = listener.accept() => {
+                let (stream, _) = ret.context(IoSnafu {
+                    uri: None,
+                    detail: "Listener accept",
+                })?;
+                #[cfg(feature = "auto-proxy")]
+                let sender = sender.clone();
+                let background_task = client_proxy_background_task::<NEED_CODEC>(ClientProxyContext {
+                    stream,
+                    msg_key: if NEED_CODEC {
+                        Some(gen_random_key())
+                    } else {
+                        None
+                    },
+                    #[cfg(feature = "auto-proxy")]
+                    sender,
+                });
+                manager.spawn(proxy_id.gen(), background_task);
+            }
+            _ = tokio::signal::ctrl_c()=>{
+                tracing::info!("ctrl-c trigger");
+                return Ok(());
+            }
+        }
     }
     manager.wait().await;
+    Ok(())
 }

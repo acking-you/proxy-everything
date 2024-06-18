@@ -12,9 +12,9 @@ async fn main() {
     let msg_key = std::env::var("MSG_KEY").is_ok();
     if msg_key {
         tracing::info!("`MSG_KEY=ON`, message encryption is used");
-        start_client::<true>("0.0.0.0", *CLIENT_PORT).await;
+        start_client::<true>("0.0.0.0", *CLIENT_PORT).await.unwrap();
     } else {
         tracing::info!("MSG_KEY not set, message will send raw data");
-        start_client::<false>("0.0.0.0", *CLIENT_PORT).await;
+        start_client::<false>("0.0.0.0", *CLIENT_PORT).await.unwrap();
     }
 }

@@ -64,8 +64,8 @@ async fn main() {
     tracing::info!("CLIENT_PORT:{}", *CLIENT_PORT);
     tracing::info!("SERVER_PORT:{}", *SERVER_PORT);
     if cli.msg_key {
-        start_client::<true>("0.0.0.0", *CLIENT_PORT).await;
+        start_client::<true>("0.0.0.0", *CLIENT_PORT).await.unwrap();
     } else {
-        start_client::<false>("0.0.0.0", *CLIENT_PORT).await;
+        start_client::<false>("0.0.0.0", *CLIENT_PORT).await.unwrap();
     }
 }

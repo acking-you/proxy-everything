@@ -244,7 +244,7 @@ pub async fn run_auto_proxy_by_country(receiver: ReceiverChan) {
             Ok(v) => v,
             Err(e) => {
                 tracing::error!(channel_msg_error = ?e);
-                continue;
+                return;
             }
         };
         // FIXME Maybe add regex handle?
@@ -263,7 +263,8 @@ pub async fn run_auto_proxy_by_country(receiver: ReceiverChan) {
                 continue;
             }
         }
-        // A [`host`] will only correspond to one task to execute the HTTP request, and the rest will wait for the task to complete.
+        // A [`host`] will only correspond to one task to execute the HTTP request, and the rest
+        // will wait for the task to complete.
         tokio::spawn(check_proxy(TaskContext {
             task_id: query_task_id.gen(),
             proxy_set: proxy_set.clone(),
@@ -391,7 +392,8 @@ mod tests {
 
     use async_broadcast::broadcast;
     use tokio::time::{self};
-    use tokio_util::{sync::CancellationToken, task::TaskTracker};
+    use tokio_util::sync::CancellationToken;
+    use tokio_util::task::TaskTracker;
 
     use super::*;
 
