@@ -1,11 +1,12 @@
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use futures::Future;
 #[cfg(not(target_env = "msvc"))]
 use tokio::signal::unix::{signal, Signal, SignalKind};
-
 use tokio::task::JoinHandle;
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 pub type TaskId = i64;
 const SIGNAL_TASK_ID: TaskId = -1;
@@ -44,9 +45,6 @@ pub trait GracefulShutdownManager {
     where
         F: Future + Send + 'static;
 
-    #[cfg(not(target_env = "msvc"))]
-    fn spawn_signal_task(&mut self, signal: Signal);
-
     fn is_cancelled(&self) -> bool;
 }
 
@@ -77,20 +75,49 @@ impl GracefulShutdownManagerImpl {
     }
 
     #[cfg(not(target_env = "msvc"))]
-    fn register_signal(&mut self, kind: SignalKind) -> bool {
-        if let Some(signal) = get_signal(kind) {
-            self.spawn_signal_task(signal);
-            true
-        } else {
-            false
-        }
-    }
-
-    #[cfg(not(target_env = "msvc"))]
     pub fn spawn_graceful_signals(&mut self) -> bool {
-        self.register_signal(SignalKind::interrupt())
-            && self.register_signal(SignalKind::terminate())
-            && self.register_signal(SignalKind::quit())
+        macro_rules! fetch_signal {
+            ($signal:expr) => {
+                if let Some(sig) = get_signal(SignalKind::interrupt()) {
+                    sig
+                } else {
+                    return false;
+                }
+            };
+        }
+        let tracker = self.tracker.clone();
+        let token = self.token.clone();
+        let is_cancle = self.is_cancel.clone();
+        let handle_signal = move |name: &'static str| {
+            tracing::info!("Signal trigger:{name}");
+            if is_cancle.load(std::sync::atomic::Ordering::Acquire) {
+                tracing::warn!("Already cancled!");
+            }
+            tracing::info!("Start to cancle tasks");
+            is_cancle.store(true, std::sync::atomic::Ordering::Release);
+            tracker.close();
+            token.cancel();
+        };
+
+        let mut interrupt = fetch_signal!(SignalKind::interrupt());
+        let mut terminate = fetch_signal!(SignalKind::terminate());
+        let mut quit = fetch_signal!(SignalKind::quit());
+
+        self.spawn(SIGNAL_TASK_ID, async move {
+            tokio::select! {
+                _ = interrupt.recv()=>{
+                    handle_signal("interrupt");
+                }
+                _ = terminate.recv()=>{
+                    handle_signal("terminate");
+                }
+                _ = quit.recv()=>{
+                    handle_signal("quit");
+                }
+            }
+        });
+
+        true
     }
 
     #[cfg(target_env = "msvc")]
@@ -137,28 +164,6 @@ impl GracefulShutdownManager for GracefulShutdownManagerImpl {
                 }
             }
         })
-    }
-
-    #[cfg(not(target_env = "msvc"))]
-    fn spawn_signal_task(&mut self, mut signal: Signal) {
-        let tracker = self.tracker.clone();
-        let token = self.token.clone();
-        let is_cancle = self.is_cancel.clone();
-        self.spawn(SIGNAL_TASK_ID, async move {
-            let fmt_sig = format!("{signal:?}");
-            signal
-                .recv()
-                .await
-                .expect("Received signal must nerver fails!");
-            if is_cancle.load(std::sync::atomic::Ordering::Acquire) {
-                tracing::info!(signal = fmt_sig, "Tasks already cancle",);
-                return;
-            }
-            tracing::info!(signal = fmt_sig, "Start to cancle tasks");
-            is_cancle.store(true, std::sync::atomic::Ordering::Release);
-            tracker.close();
-            token.cancel();
-        });
     }
 
     fn is_cancelled(&self) -> bool {

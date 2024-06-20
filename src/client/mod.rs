@@ -16,6 +16,8 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpListener;
 #[cfg(feature = "tokio")]
 use tokio::net::TcpStream;
+#[cfg(not(target_os = "windows"))]
+use tokio::signal::unix::{signal, Signal, SignalKind};
 
 use self::http::{HttpProxierProvider, HttpProxyError};
 use self::socks::{SocksError, SocksProxierProvider};
@@ -639,6 +641,50 @@ pub async fn start_client<const NEED_CODEC: bool>(
         tx
     };
 
+    #[cfg(not(target_os = "windows"))]
+    let (mut quit, mut terminate, mut interrupt) = {
+        (
+            signal(SignalKind::quit()).expect("quit signal nerver fails"),
+            signal(SignalKind::terminate()).expect("terminate signal never fails"),
+            signal(SignalKind::interrupt()).expect("interrupt signal never fails"),
+        )
+    };
+
+    #[cfg(target_os = "windows")]
+    async fn wait_signal() {
+        tokio::signal::ctrl_c().await;
+        tracing::info!("ctrl-c trigger");
+    }
+
+    #[cfg(target_os = "windows")]
+    macro_rules! make_signal {
+        () => {
+            wait_signal()
+        };
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    async fn wait_signal(quit: &mut Signal, terminate: &mut Signal, interrupt: &mut Signal) {
+        tokio::select! {
+            _ = quit.recv()=>{
+                tracing::info!("quit trigger");
+            }
+            _ = terminate.recv()=>{
+                tracing::info!("terminate trigger");
+            }
+            _ = interrupt.recv()=>{
+                tracing::info!("interrupt trigger");
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    macro_rules! make_signal {
+        () => {
+            wait_signal(&mut quit, &mut terminate, &mut interrupt)
+        };
+    }
+
     while !manager.is_cancelled() {
         tokio::select! {
             ret = listener.accept() => {
@@ -660,8 +706,8 @@ pub async fn start_client<const NEED_CODEC: bool>(
                 });
                 manager.spawn(proxy_id.gen(), background_task);
             }
-            _ = tokio::signal::ctrl_c()=>{
-                tracing::info!("ctrl-c trigger");
+            _ = make_signal!() =>{
+                tracing::info!("graceful shutdown!");
                 return Ok(());
             }
         }
