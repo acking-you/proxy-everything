@@ -1,5 +1,5 @@
+use http_proxy::config::{init_tracing, SERVER_PORT};
 use http_proxy::server::start_server;
-use http_proxy::{init_tracing, SERVER_PORT};
 use mimalloc_rust::GlobalMiMalloc;
 
 #[global_allocator]

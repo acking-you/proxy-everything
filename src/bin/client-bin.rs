@@ -1,5 +1,5 @@
 use http_proxy::client::start_client;
-use http_proxy::{init_tracing, CLIENT_PORT, SERVER_HOST};
+use http_proxy::config::{init_tracing, CLIENT_PORT, SERVER_HOST};
 use mimalloc_rust::GlobalMiMalloc;
 
 #[global_allocator]
@@ -15,6 +15,8 @@ async fn main() {
         start_client::<true>("0.0.0.0", *CLIENT_PORT).await.unwrap();
     } else {
         tracing::info!("MSG_KEY not set, message will send raw data");
-        start_client::<false>("0.0.0.0", *CLIENT_PORT).await.unwrap();
+        start_client::<false>("0.0.0.0", *CLIENT_PORT)
+            .await
+            .unwrap();
     }
 }

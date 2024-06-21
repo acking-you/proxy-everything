@@ -11,7 +11,7 @@ use super::{get_tcp_proxy_stream, ForwarderProvider, SocksProxySnafu, TcpForward
 use crate::client::need_proxy;
 use crate::client::{change_msg_key, get_tcp_stream};
 use crate::codec::{AsyncReader, AsyncWriter};
-use crate::{SERVER_HOST, SERVER_PORT};
+use crate::config::{SERVER_HOST, SERVER_PORT};
 
 #[derive(Debug, Snafu)]
 pub enum SocksError {

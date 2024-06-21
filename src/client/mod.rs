@@ -8,7 +8,6 @@ use std::fmt::{Debug, Display};
 
 #[cfg(feature = "auto-proxy")]
 use auto_proxy::{run_auto_proxy_by_country, SendItem, SenderChan};
-use once_cell::sync::Lazy;
 use snafu::{Report, ResultExt, Snafu};
 use tokio::io::AsyncReadExt;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -22,12 +21,13 @@ use tokio::signal::unix::{signal, Signal, SignalKind};
 use self::http::{HttpProxierProvider, HttpProxyError};
 use self::socks::{SocksError, SocksProxierProvider};
 use crate::codec::{AsyncReader, AsyncReaderWriterRef, AsyncWriter};
+use crate::config::{gen_random_key, NEED_CODEC_IP};
 use crate::util::{
     GracefulShutdownManager, GracefulShutdownManagerImpl, ProxyTaskId, TaskIdGenerator,
 };
 use crate::{
-    client_proxy_with_cryptor_codec, gen_random_key, proxy_with_norlmal_codec, set_data_size,
-    Aes256GcmCryption, MyAsyncWriteExt, ProxyHeader,
+    client_proxy_with_cryptor_codec, proxy_with_norlmal_codec, set_data_size, Aes256GcmCryption,
+    MyAsyncWriteExt, ProxyHeader,
 };
 
 #[derive(Debug, Snafu)]
@@ -71,146 +71,6 @@ pub enum ClientError {
     #[snafu(display("Signals register error"))]
     RegisterSignal,
 }
-
-#[derive(Debug)]
-pub struct ParsedProxyKeyWord {
-    pub name_server: String,
-    pub proxy_server: Option<String>,
-}
-
-fn parse_keywords(keywords: Vec<String>) -> Vec<ParsedProxyKeyWord> {
-    keywords
-        .into_iter()
-        .map(|v| match v.find(':') {
-            Some(i) => ParsedProxyKeyWord {
-                name_server: v[..i].trim().to_string(),
-                proxy_server: Some(v[i + 1..].trim().to_string()),
-            },
-            None => ParsedProxyKeyWord {
-                name_server: v,
-                proxy_server: None,
-            },
-        })
-        .collect()
-}
-
-const DEFAULT_WORD: &str = "%DEFAULT%";
-
-#[cfg(feature = "auto-proxy")]
-pub static NONPROXY_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
-    let mut default_keywords = vec![
-        "chaoxing".to_string(),
-        "bilibili".to_string(),
-        "bili".to_string(),
-        "xigua".to_string(),
-        "byte".to_string(),
-        "douyin".to_string(),
-        "cnblogs".to_string(),
-        "qq.com".to_string(),
-        "jd.com".to_string(),
-        "retiehe".to_string(),
-        "meituan".to_string(),
-        "jianguoyun".to_string(),
-        "taobao.com".to_string(),
-        "csdn".to_string(),
-        "juejin".to_string(),
-        "baidu".to_string(),
-        "zhihu".to_string(),
-        "ximalaya".to_string(),
-        "cn".to_string(),
-    ];
-    match std::env::var("NONPROXY_KEYWORDS") {
-        Ok(k) => {
-            let mut keywords = k.trim().split(',').map(|s| s.to_string());
-            let is_insert_default = if let Some(keyword) = keywords.next() {
-                keyword == DEFAULT_WORD
-            } else {
-                false
-            };
-            let mut keywords = keywords.collect::<Vec<_>>();
-            if is_insert_default {
-                keywords.append(&mut default_keywords);
-            }
-            tracing::info!("`NONPROXY_KEYWORDS` is `{keywords:?}`");
-            keywords
-        }
-        Err(_) => {
-            tracing::info!(
-                "No ENV:`NONPROXY_KEYWORDS` provided,we use default keywords:{default_keywords:?}"
-            );
-            default_keywords
-        }
-    }
-});
-
-#[cfg(feature = "auto-proxy")]
-pub static PROXY_KEYWORDS: Lazy<Vec<ParsedProxyKeyWord>> = Lazy::new(|| {
-    let mut default_keywords = vec![
-        "tiktok".to_string(),
-        "youtube".to_string(),
-        "scholar.google:64.23.159.180".to_string(),
-        // for reddit
-        "reddit:64.23.159.180".to_string(),
-        "google".to_string(),
-        "chatgpt".to_string(),
-        "twitter".to_string(),
-        "facebook".to_string(),
-        "bilibili.tv".to_string(),
-        "github".to_string(),
-        "docker".to_string(),
-    ];
-    match std::env::var("PROXY_KEYWORDS") {
-        Ok(k) => {
-            let mut keywords = k.trim().split(',').map(|s| s.to_string());
-            let insert_default = if let Some(keyword) = keywords.next() {
-                keyword == DEFAULT_WORD
-            } else {
-                false
-            };
-            let mut keywords = keywords.collect::<Vec<_>>();
-            if insert_default {
-                keywords.append(&mut default_keywords);
-            }
-            tracing::info!("`PROXY_KEYWORDS` is `{keywords:?}`");
-            parse_keywords(keywords)
-        }
-        Err(_) => {
-            tracing::info!(
-                "No ENV:`PROXY_KEYWORDS` provided,we use default keywords:{default_keywords:?}"
-            );
-            parse_keywords(default_keywords)
-        }
-    }
-});
-
-pub static NEED_CODEC_IP: Lazy<Vec<String>> = Lazy::new(|| {
-    let mut default_codec_ip = vec![
-        // US node
-        "64.23.159.180".to_string(),
-    ];
-    match std::env::var("NEED_CODEC_IP") {
-        Ok(v) => {
-            let mut codec_ip = v.trim().split(',').map(|s| s.to_string());
-            let need_default = if let Some(key) = codec_ip.next() {
-                key == DEFAULT_WORD
-            } else {
-                false
-            };
-            let mut res = codec_ip.collect::<Vec<_>>();
-            if need_default {
-                res.append(&mut default_codec_ip);
-            }
-            tracing::info!("`NEED_CODEC_IP` is `{res:?}`");
-            res
-        }
-        Err(_) => {
-            tracing::info!(
-                "No ENV:`NEED_CODEC_IP` provided,we use default need codec ip:{default_codec_ip:?}"
-            );
-            default_codec_ip
-        }
-    }
-});
 
 #[inline]
 pub fn get_msg_key_from_codec_ip(ip: impl AsRef<str>) -> Option<String> {
@@ -333,6 +193,8 @@ pub async fn need_proxy(
     port: u16,
     sender: &SenderChan,
 ) -> Result<ProxyStatus> {
+    use crate::config::{NONPROXY_KEYWORDS, PROXY_KEYWORDS};
+
     if host.as_ref() == "127.0.0.1" {
         LocalHostSnafu { port }.fail()?;
     }
@@ -652,7 +514,7 @@ pub async fn start_client<const NEED_CODEC: bool>(
 
     #[cfg(target_os = "windows")]
     async fn wait_signal() {
-        tokio::signal::ctrl_c().await;
+        let _ = tokio::signal::ctrl_c().await;
         tracing::info!("ctrl-c trigger");
     }
 

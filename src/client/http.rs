@@ -10,9 +10,9 @@ use super::{
 };
 #[cfg(feature = "auto-proxy")]
 use crate::client::need_proxy;
-use crate::client::{HttpProxySnafu, PROXY_KEYWORDS};
+use crate::client::HttpProxySnafu;
 use crate::codec::{AsyncReader, AsyncWriter};
-use crate::{SERVER_HOST, SERVER_PORT};
+use crate::config::{PROXY_KEYWORDS, SERVER_HOST, SERVER_PORT};
 
 #[derive(Debug, Snafu)]
 pub enum HttpProxyError {

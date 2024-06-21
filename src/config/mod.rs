@@ -1,0 +1,244 @@
+use once_cell::sync::Lazy;
+use rand::Rng;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::{fmt, Layer};
+
+pub fn init_tracing() {
+    let subcriber = tracing_subscriber::registry().with(
+        fmt::layer()
+            .pretty()
+            .with_writer(std::io::stdout)
+            .with_filter(
+                tracing_subscriber::EnvFilter::builder()
+                    .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
+                    .from_env_lossy(),
+            ),
+    );
+    tracing::subscriber::set_global_default(subcriber).expect("setting tracing default failed");
+}
+
+pub fn gen_random_key() -> String {
+    const CHARSET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
+
+    let mut rng = rand::thread_rng();
+    let random_string: String = (0..32)
+        .map(|_| {
+            let idx = rng.gen_range(0..CHARSET.len());
+            CHARSET[idx] as char
+        })
+        .collect();
+
+    random_string
+}
+
+/// Port for connect to proxy server
+pub static SERVER_PORT: Lazy<u16> = Lazy::new(|| {
+    let default_port = 1081;
+    match std::env::var("SERVER_PORT") {
+        Ok(port) => match port.parse::<u16>() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("`SERVER_PORT` is invalid port! error:{e}");
+                default_port
+            }
+        },
+        Err(_) => {
+            tracing::warn!(
+                "No ENV:`SERVER_PORT` provided,we use default server port:{default_port}"
+            );
+            default_port
+        }
+    }
+});
+
+/// Port for provide to local proxy server
+pub static CLIENT_PORT: Lazy<u16> = Lazy::new(|| {
+    let default_port = 1080;
+    match std::env::var("CLIENT_PORT") {
+        Ok(port) => match port.parse::<u16>() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("`CLIENT_PORT` is invalid port! error:{e}");
+                default_port
+            }
+        },
+        Err(_) => {
+            tracing::warn!(
+                "No ENV:`CLIENT_PORT` provided,we use default client port:{default_port}"
+            );
+            default_port
+        }
+    }
+});
+
+/// Ip or URL to connect server
+pub static SERVER_HOST: Lazy<String> = Lazy::new(|| match std::env::var("SERVER_HOST") {
+    Ok(s) => s,
+    Err(_) => {
+        tracing::error!("You are not set `ENV:SERVER_HOST`. we will use `localhost` as default!");
+        "127.0.0.1".to_string()
+    }
+});
+
+// 256-bit key,must be 256/8 = 32 byte key and hashcode
+pub static DEFAULT_KEY: Lazy<(Vec<u8>, u32)> = Lazy::new(|| {
+    let default_key = "my-secret-key123my-secret-key123";
+    let key = match std::env::var("SECRET_KEY") {
+        Ok(k) => {
+            let key = k.as_bytes();
+            if key.len() != 32 {
+                tracing::warn!("`SECRET_KEY` must have 256 bit(32 byte)!. current input key:{k}");
+                std::process::exit(1);
+            }
+            key.to_vec()
+        }
+        Err(_) => {
+            tracing::warn!("No ENV:`SECRET_KEY` provided,we use default key:{default_key}");
+            default_key.as_bytes().to_vec()
+        }
+    };
+    let hash = key.iter().fold(0u32, |hash, &byte| {
+        hash.wrapping_mul(31).wrapping_add(byte as u32)
+    });
+    (key, hash)
+});
+
+const DEFAULT_WORD: &str = "%DEFAULT%";
+
+#[cfg(feature = "auto-proxy")]
+pub static NONPROXY_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
+    let mut default_keywords = vec![
+        "chaoxing".to_string(),
+        "bilibili".to_string(),
+        "bili".to_string(),
+        "xigua".to_string(),
+        "byte".to_string(),
+        "douyin".to_string(),
+        "cnblogs".to_string(),
+        "qq.com".to_string(),
+        "jd.com".to_string(),
+        "retiehe".to_string(),
+        "meituan".to_string(),
+        "jianguoyun".to_string(),
+        "taobao.com".to_string(),
+        "csdn".to_string(),
+        "juejin".to_string(),
+        "baidu".to_string(),
+        "zhihu".to_string(),
+        "ximalaya".to_string(),
+        "cn".to_string(),
+    ];
+    match std::env::var("NONPROXY_KEYWORDS") {
+        Ok(k) => {
+            let mut keywords = k.trim().split(',').map(|s| s.to_string());
+            let is_insert_default = if let Some(keyword) = keywords.next() {
+                keyword == DEFAULT_WORD
+            } else {
+                false
+            };
+            let mut keywords = keywords.collect::<Vec<_>>();
+            if is_insert_default {
+                keywords.append(&mut default_keywords);
+            }
+            tracing::info!("`NONPROXY_KEYWORDS` is `{keywords:?}`");
+            keywords
+        }
+        Err(_) => {
+            tracing::info!(
+                "No ENV:`NONPROXY_KEYWORDS` provided,we use default keywords:{default_keywords:?}"
+            );
+            default_keywords
+        }
+    }
+});
+
+#[derive(Debug)]
+pub struct ParsedProxyKeyWord {
+    pub name_server: String,
+    pub proxy_server: Option<String>,
+}
+
+fn parse_keywords(keywords: Vec<String>) -> Vec<ParsedProxyKeyWord> {
+    keywords
+        .into_iter()
+        .map(|v| match v.find(':') {
+            Some(i) => ParsedProxyKeyWord {
+                name_server: v[..i].trim().to_string(),
+                proxy_server: Some(v[i + 1..].trim().to_string()),
+            },
+            None => ParsedProxyKeyWord {
+                name_server: v,
+                proxy_server: None,
+            },
+        })
+        .collect()
+}
+
+#[cfg(feature = "auto-proxy")]
+pub static PROXY_KEYWORDS: Lazy<Vec<ParsedProxyKeyWord>> = Lazy::new(|| {
+    let mut default_keywords = vec![
+        "tiktok".to_string(),
+        "youtube".to_string(),
+        "scholar.google:64.23.159.180".to_string(),
+        // for reddit
+        "reddit:64.23.159.180".to_string(),
+        "google".to_string(),
+        "chatgpt".to_string(),
+        "twitter".to_string(),
+        "facebook".to_string(),
+        "bilibili.tv".to_string(),
+        "github".to_string(),
+        "docker".to_string(),
+    ];
+    match std::env::var("PROXY_KEYWORDS") {
+        Ok(k) => {
+            let mut keywords = k.trim().split(',').map(|s| s.to_string());
+            let insert_default = if let Some(keyword) = keywords.next() {
+                keyword == DEFAULT_WORD
+            } else {
+                false
+            };
+            let mut keywords = keywords.collect::<Vec<_>>();
+            if insert_default {
+                keywords.append(&mut default_keywords);
+            }
+            tracing::info!("`PROXY_KEYWORDS` is `{keywords:?}`");
+            parse_keywords(keywords)
+        }
+        Err(_) => {
+            tracing::info!(
+                "No ENV:`PROXY_KEYWORDS` provided,we use default keywords:{default_keywords:?}"
+            );
+            parse_keywords(default_keywords)
+        }
+    }
+});
+
+pub static NEED_CODEC_IP: Lazy<Vec<String>> = Lazy::new(|| {
+    let mut default_codec_ip = vec![
+        // US node
+        "64.23.159.180".to_string(),
+    ];
+    match std::env::var("NEED_CODEC_IP") {
+        Ok(v) => {
+            let mut codec_ip = v.trim().split(',').map(|s| s.to_string());
+            let need_default = if let Some(key) = codec_ip.next() {
+                key == DEFAULT_WORD
+            } else {
+                false
+            };
+            let mut res = codec_ip.collect::<Vec<_>>();
+            if need_default {
+                res.append(&mut default_codec_ip);
+            }
+            tracing::info!("`NEED_CODEC_IP` is `{res:?}`");
+            res
+        }
+        Err(_) => {
+            tracing::info!(
+                "No ENV:`NEED_CODEC_IP` provided,we use default need codec ip:{default_codec_ip:?}"
+            );
+            default_codec_ip
+        }
+    }
+});

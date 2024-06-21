@@ -3,20 +3,18 @@ use std::fmt::Display;
 
 pub mod client;
 pub(crate) mod codec;
+pub mod config;
 pub mod server;
 pub(crate) mod util;
 
 use codec::{AsyncDecryptCodec, AsyncEncryptCodec, AsyncNormalCodec, CodecError};
-use once_cell::sync::Lazy;
-use rand::Rng;
+use config::DEFAULT_KEY;
 use ring::aead::{
     Aad, BoundKey, Nonce, NonceSequence, OpeningKey, SealingKey, Tag, UnboundKey, AES_256_GCM,
     NONCE_LEN,
 };
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::{fmt, Layer};
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -50,34 +48,6 @@ pub enum Error {
 type Result<T, E = Error> = std::result::Result<T, E>;
 type RingResult<T> = Result<T, ring::error::Unspecified>;
 
-pub fn init_tracing() {
-    let subcriber = tracing_subscriber::registry().with(
-        fmt::layer()
-            .pretty()
-            .with_writer(std::io::stdout)
-            .with_filter(
-                tracing_subscriber::EnvFilter::builder()
-                    .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
-                    .from_env_lossy(),
-            ),
-    );
-    tracing::subscriber::set_global_default(subcriber).expect("setting tracing default failed");
-}
-
-pub fn gen_random_key() -> String {
-    const CHARSET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
-
-    let mut rng = rand::thread_rng();
-    let random_string: String = (0..32)
-        .map(|_| {
-            let idx = rng.gen_range(0..CHARSET.len());
-            CHARSET[idx] as char
-        })
-        .collect();
-
-    random_string
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProxyHeader {
     pub host: String,
@@ -90,78 +60,6 @@ impl Display for ProxyHeader {
         write!(f, "{}:{}", self.host, self.port)
     }
 }
-
-/// Port for connect to proxy server
-pub static SERVER_PORT: Lazy<u16> = Lazy::new(|| {
-    let default_port = 1081;
-    match std::env::var("SERVER_PORT") {
-        Ok(port) => match port.parse::<u16>() {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::error!("`SERVER_PORT` is invalid port! error:{e}");
-                default_port
-            }
-        },
-        Err(_) => {
-            tracing::warn!(
-                "No ENV:`SERVER_PORT` provided,we use default server port:{default_port}"
-            );
-            default_port
-        }
-    }
-});
-
-/// Port for provide to local proxy server
-pub static CLIENT_PORT: Lazy<u16> = Lazy::new(|| {
-    let default_port = 1080;
-    match std::env::var("CLIENT_PORT") {
-        Ok(port) => match port.parse::<u16>() {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::error!("`CLIENT_PORT` is invalid port! error:{e}");
-                default_port
-            }
-        },
-        Err(_) => {
-            tracing::warn!(
-                "No ENV:`CLIENT_PORT` provided,we use default client port:{default_port}"
-            );
-            default_port
-        }
-    }
-});
-
-/// Ip or URL to connect server
-pub static SERVER_HOST: Lazy<String> = Lazy::new(|| match std::env::var("SERVER_HOST") {
-    Ok(s) => s,
-    Err(_) => {
-        tracing::error!("You are not set `ENV:SERVER_HOST`. we will use `localhost` as default!");
-        "127.0.0.1".to_string()
-    }
-});
-
-// 256-bit key,must be 256/8 = 32 byte key and hashcode
-pub static DEFAULT_KEY: Lazy<(Vec<u8>, u32)> = Lazy::new(|| {
-    let default_key = "my-secret-key123my-secret-key123";
-    let key = match std::env::var("SECRET_KEY") {
-        Ok(k) => {
-            let key = k.as_bytes();
-            if key.len() != 32 {
-                tracing::warn!("`SECRET_KEY` must have 256 bit(32 byte)!. current input key:{k}");
-                std::process::exit(1);
-            }
-            key.to_vec()
-        }
-        Err(_) => {
-            tracing::warn!("No ENV:`SECRET_KEY` provided,we use default key:{default_key}");
-            default_key.as_bytes().to_vec()
-        }
-    };
-    let hash = key.iter().fold(0u32, |hash, &byte| {
-        hash.wrapping_mul(31).wrapping_add(byte as u32)
-    });
-    (key, hash)
-});
 
 #[derive(Clone, Copy)]
 struct CounterNonceSequence(u32);
