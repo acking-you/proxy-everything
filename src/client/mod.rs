@@ -5,10 +5,11 @@ pub mod socks;
 
 use std::borrow::Cow;
 use std::fmt::{Debug, Display};
+use std::net::IpAddr;
 
 #[cfg(feature = "auto-proxy")]
 use auto_proxy::{run_auto_proxy_by_country, SendItem, SenderChan};
-use snafu::{Report, ResultExt, Snafu};
+use snafu::{OptionExt, Report, ResultExt, Snafu};
 use tokio::io::AsyncReadExt;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 #[cfg(feature = "tokio")]
@@ -70,6 +71,8 @@ pub enum ClientError {
     SocksProxy { source: SocksError },
     #[snafu(display("Signals register error"))]
     RegisterSignal,
+    #[snafu(display("Empty dns record"))]
+    EmptyDNSRecord,
 }
 
 #[inline]
@@ -254,7 +257,25 @@ pub async fn need_proxy(
 
 #[inline]
 pub async fn get_tcp_stream(host: &str, port: u16, detail: &'static str) -> Result<TcpStream> {
-    TcpStream::connect((host, port))
+    // The input might be an IP address represented as a string, in which case DNS resolution is not
+    // required
+    let ipaddr = match host.parse::<IpAddr>() {
+        Ok(ip) => ip,
+        Err(e) => {
+            tracing::warn!(" parsing IpAddr error:{e} with host:`{host}`");
+            uni_stream::addr::get_ip_addrs(host)
+                .await
+                .context(IoSnafu {
+                    uri: Some(host.into()),
+                    detail,
+                })?
+                .into_iter()
+                .next()
+                .context(EmptyDNSRecordSnafu)?
+        }
+    };
+
+    TcpStream::connect((ipaddr, port))
         .await
         .with_context(|_| IoSnafu {
             uri: Some(format!("TcpStream({}:{})", host, port)),

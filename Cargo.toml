@@ -38,6 +38,7 @@ flume = { version = "0.11.0", default-features = false, features = [
 futures = "0.3"
 mimalloc-rust = "0.2"
 anyhow = "1.0.86"
+uni-stream = "0.1.0"
 
 [[bin]]
 name = "http-proxy-client"
@@ -51,7 +52,7 @@ path = "src/bin/http-proxy-cli.rs"
 required-features = ["cli-dep"]
 
 [features]
-default = ["tokio", "auto-proxy"]
+default = ["tokio", "auto-proxy", "cli-dep"]
 tokio = ["dep:tokio", "dep:tokio-util"]
 monoio = ["dep:monoio"]
 cli-dep = ["dep:clap"]

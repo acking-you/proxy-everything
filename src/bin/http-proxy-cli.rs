@@ -1,6 +1,6 @@
 use clap::Parser;
 use http_proxy::client::start_client;
-use http_proxy::{init_tracing, CLIENT_PORT, DEFAULT_KEY, SERVER_HOST, SERVER_PORT};
+use http_proxy::config::{init_tracing, CLIENT_PORT, DEFAULT_KEY, SERVER_HOST, SERVER_PORT};
 use mimalloc_rust::GlobalMiMalloc;
 
 #[global_allocator]
@@ -66,6 +66,8 @@ async fn main() {
     if cli.msg_key {
         start_client::<true>("0.0.0.0", *CLIENT_PORT).await.unwrap();
     } else {
-        start_client::<false>("0.0.0.0", *CLIENT_PORT).await.unwrap();
+        start_client::<false>("0.0.0.0", *CLIENT_PORT)
+            .await
+            .unwrap();
     }
 }

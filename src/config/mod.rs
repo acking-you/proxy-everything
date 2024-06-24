@@ -242,3 +242,26 @@ pub static NEED_CODEC_IP: Lazy<Vec<String>> = Lazy::new(|| {
         }
     }
 });
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use tokio::time::Instant;
+    use uni_stream::addr::get_ip_addrs;
+
+    #[test]
+    fn test_ipaddr_parse() {
+        let ipaddr = "127.0.0.1".parse::<IpAddr>().unwrap();
+        assert_eq!(ipaddr, IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+    }
+
+    #[tokio::test]
+    async fn test_dns_resolver() {
+        for _ in 1..10 {
+            let ins = Instant::now();
+            println!("{:?}", get_ip_addrs("google.com").await.unwrap());
+            println!("{:?}", ins.elapsed());
+        }
+    }
+}
