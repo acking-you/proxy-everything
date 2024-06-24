@@ -262,7 +262,7 @@ pub async fn get_tcp_stream(host: &str, port: u16, detail: &'static str) -> Resu
     let ipaddr = match host.parse::<IpAddr>() {
         Ok(ip) => ip,
         Err(e) => {
-            tracing::warn!(" parsing IpAddr error:{e} with host:`{host}`");
+            tracing::warn!("parsing IpAddr error:{e} with host:`{host}`");
             uni_stream::addr::get_ip_addrs(host)
                 .await
                 .context(IoSnafu {
