@@ -43,6 +43,10 @@ pub enum Error {
     ContentLength { source: ParseIntError },
     #[snafu(display("Write ahead log not successful!"))]
     WAL { source: std::io::Error },
+    #[snafu(display("DNS Resolver fails!"))]
+    DNSResolver { source: std::io::Error },
+    #[snafu(display("DNS Record is empty!"))]
+    EmptyDNSRecord,
 }
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -131,10 +135,13 @@ pub async fn get_country_code(host: impl AsRef<str>) -> Result<CountryCode> {
     let mut stream = TcpStream::connect(("ip-api.com", 80))
         .await
         .context(ConnectIpAPISnafu)?;
-    let req = format!(
-        "GET /line/{} HTTP/1.1\r\nHost: ip-api.com\r\n\r\n",
-        host.as_ref()
-    );
+    let ipaddr = uni_stream::addr::get_ip_addrs(host.as_ref())
+        .await
+        .context(DNSResolverSnafu)?
+        .into_iter()
+        .next()
+        .context(EmptyDNSRecordSnafu)?;
+    let req = format!("GET /line/{} HTTP/1.1\r\nHost: ip-api.com\r\n\r\n", ipaddr);
     stream
         .write_all(req.as_bytes())
         .await
