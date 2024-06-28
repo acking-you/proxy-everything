@@ -52,11 +52,9 @@ pub enum Error {
 type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CountryCode {
-    Cn,
-    Us,
-    Sg,
-    Other,
+pub enum ProxyStrategy {
+    Proxy,
+    Direct,
 }
 
 use tokio::fs::OpenOptions;
@@ -131,7 +129,7 @@ async fn get_http_body(stream: TcpStream) -> Result<String> {
     Ok(unsafe { String::from_utf8_unchecked(buf) })
 }
 
-pub async fn get_country_code(host: impl AsRef<str>) -> Result<CountryCode> {
+pub async fn get_country_code(host: impl AsRef<str>) -> Result<ProxyStrategy> {
     let mut stream = TcpStream::connect(("ip-api.com", 80))
         .await
         .context(ConnectIpAPISnafu)?;
@@ -149,7 +147,7 @@ pub async fn get_country_code(host: impl AsRef<str>) -> Result<CountryCode> {
     let text = get_http_body(stream).await?;
     tracing::info!("Host({}) ipapi body info:{}", host.as_ref(), text);
     if text.contains("China") {
-        return Ok(CountryCode::Cn);
+        return Ok(ProxyStrategy::Direct);
     }
     let mut lines = text.lines();
     if !lines.any(|line| line == "success") {
@@ -157,13 +155,12 @@ pub async fn get_country_code(host: impl AsRef<str>) -> Result<CountryCode> {
     }
     for line in lines {
         match line {
-            "CN" | "HK" | "TW" => return Ok(CountryCode::Cn),
-            "SG" => return Ok(CountryCode::Sg),
-            "US" => return Ok(CountryCode::Us),
+            "CN" => return Ok(ProxyStrategy::Direct),
+            "SG" | "US" | "TW" | "HK" | "Macau" | "JP" | "IN" => return Ok(ProxyStrategy::Proxy),
             _ => {}
         }
     }
-    Ok(CountryCode::Other)
+    Ok(ProxyStrategy::Proxy)
 }
 
 pub type IpAddress = String;
@@ -354,7 +351,7 @@ async fn check_proxy(context: TaskContext) {
 
     tracing::info!(task_id, host, info = "start to query ip-api");
     let need_proxy = match get_country_code(host.as_str()).await {
-        Ok(c) => c != CountryCode::Cn,
+        Ok(c) => c == ProxyStrategy::Proxy,
         Err(e) => {
             tracing::error!(task_id,host,get_country_code_error = ?snafu::Report::from_error(e));
             true

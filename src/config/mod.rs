@@ -260,7 +260,7 @@ mod tests {
     async fn test_dns_resolver() {
         for _ in 1..10 {
             let ins = Instant::now();
-            println!("{:?}", get_ip_addrs("google.com").await.unwrap());
+            println!("{:?}", get_ip_addrs("yt3.ggpht.com").await.unwrap());
             println!("{:?}", ins.elapsed());
         }
     }
