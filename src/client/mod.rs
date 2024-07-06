@@ -367,36 +367,36 @@ impl Forwarder for TcpForwardImpl {
         tracing::info!(host, port, need_proxy, ?msg_key);
 
         // start to forward
-        if need_proxy && msg_key.is_some() {
-            let key = msg_key.as_ref().expect(
-                "the `msg_key` has been checked earlier with `is_some`, getting it will never fail",
-            );
-            tracing::info!(?key, info = "start with codec forward");
-            client_proxy_with_cryptor_codec(
-                &host,
-                key,
-                client_reader,
-                server_reader,
-                client_writer,
-                server_writer,
-            )
-            .await
-            .with_context(|_| ProxySnafu {
-                uri: get_uri(host.as_str(), port),
-            })
-        } else {
-            tracing::info!(info = "start norlmal forward");
-            proxy_with_norlmal_codec(
-                &host,
-                client_reader,
-                server_reader,
-                client_writer,
-                server_writer,
-            )
-            .await
-            .with_context(|_| ProxySnafu {
-                uri: get_uri(host.as_str(), port),
-            })
+        match (need_proxy, msg_key) {
+            (true, Some(key)) => {
+                tracing::info!(?key, info = "start with codec forward");
+                client_proxy_with_cryptor_codec(
+                    &host,
+                    &key,
+                    client_reader,
+                    server_reader,
+                    client_writer,
+                    server_writer,
+                )
+                .await
+                .with_context(|_| ProxySnafu {
+                    uri: get_uri(host.as_str(), port),
+                })
+            }
+            _ => {
+                tracing::info!(info = "start norlmal forward");
+                proxy_with_norlmal_codec(
+                    &host,
+                    client_reader,
+                    server_reader,
+                    client_writer,
+                    server_writer,
+                )
+                .await
+                .with_context(|_| ProxySnafu {
+                    uri: get_uri(host.as_str(), port),
+                })
+            }
         }
     }
 }
