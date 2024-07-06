@@ -105,9 +105,26 @@ pub static DEFAULT_KEY: Lazy<(Vec<u8>, u32)> = Lazy::new(|| {
 
 const DEFAULT_WORD: &str = "%DEFAULT%";
 
+fn split_concat_with_default(data: String, mut default: Vec<String>) -> Vec<String> {
+    let keyowrds_iter = data.trim().split(',').map(|v| v.to_string());
+    let mut keywords = Vec::with_capacity(default.len());
+    let mut need_default = false;
+    keyowrds_iter.for_each(|k| {
+        if k == DEFAULT_WORD {
+            need_default = true;
+        } else {
+            keywords.push(k);
+        }
+    });
+    if need_default {
+        keywords.append(&mut default);
+    }
+    keywords
+}
+
 #[cfg(feature = "auto-proxy")]
 pub static NONPROXY_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
-    let mut default_keywords = vec![
+    let default_keywords = vec![
         "chaoxing".to_string(),
         "bilibili".to_string(),
         "bili".to_string(),
@@ -130,16 +147,7 @@ pub static NONPROXY_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
     ];
     match std::env::var("NONPROXY_KEYWORDS") {
         Ok(k) => {
-            let mut keywords = k.trim().split(',').map(|s| s.to_string());
-            let is_insert_default = if let Some(keyword) = keywords.next() {
-                keyword == DEFAULT_WORD
-            } else {
-                false
-            };
-            let mut keywords = keywords.collect::<Vec<_>>();
-            if is_insert_default {
-                keywords.append(&mut default_keywords);
-            }
+            let keywords = split_concat_with_default(k, default_keywords);
             tracing::info!("`NONPROXY_KEYWORDS` is `{keywords:?}`");
             keywords
         }
@@ -176,12 +184,12 @@ fn parse_keywords(keywords: Vec<String>) -> Vec<ParsedProxyKeyWord> {
 
 #[cfg(feature = "auto-proxy")]
 pub static PROXY_KEYWORDS: Lazy<Vec<ParsedProxyKeyWord>> = Lazy::new(|| {
-    let mut default_keywords = vec![
+    let default_keywords = vec![
         "tiktok".to_string(),
         "youtube".to_string(),
-        "scholar.google:64.23.159.180".to_string(),
+        "scholar.google".to_string(),
         // for reddit
-        "reddit:64.23.159.180".to_string(),
+        "reddit".to_string(),
         "google".to_string(),
         "chatgpt".to_string(),
         "twitter".to_string(),
@@ -192,16 +200,7 @@ pub static PROXY_KEYWORDS: Lazy<Vec<ParsedProxyKeyWord>> = Lazy::new(|| {
     ];
     match std::env::var("PROXY_KEYWORDS") {
         Ok(k) => {
-            let mut keywords = k.trim().split(',').map(|s| s.to_string());
-            let insert_default = if let Some(keyword) = keywords.next() {
-                keyword == DEFAULT_WORD
-            } else {
-                false
-            };
-            let mut keywords = keywords.collect::<Vec<_>>();
-            if insert_default {
-                keywords.append(&mut default_keywords);
-            }
+            let keywords = split_concat_with_default(k, default_keywords);
             tracing::info!("`PROXY_KEYWORDS` is `{keywords:?}`");
             parse_keywords(keywords)
         }
@@ -215,24 +214,17 @@ pub static PROXY_KEYWORDS: Lazy<Vec<ParsedProxyKeyWord>> = Lazy::new(|| {
 });
 
 pub static NEED_CODEC_IP: Lazy<Vec<String>> = Lazy::new(|| {
-    let mut default_codec_ip = vec![
+    let default_codec_ip = vec![
         // US node
         "64.23.159.180".to_string(),
+        // Your default proxy server
+        SERVER_HOST.clone(),
     ];
     match std::env::var("NEED_CODEC_IP") {
         Ok(v) => {
-            let mut codec_ip = v.trim().split(',').map(|s| s.to_string());
-            let need_default = if let Some(key) = codec_ip.next() {
-                key == DEFAULT_WORD
-            } else {
-                false
-            };
-            let mut res = codec_ip.collect::<Vec<_>>();
-            if need_default {
-                res.append(&mut default_codec_ip);
-            }
-            tracing::info!("`NEED_CODEC_IP` is `{res:?}`");
-            res
+            let keywords = split_concat_with_default(v, default_codec_ip);
+            tracing::info!("`NEED_CODEC_IP` is `{keywords:?}`");
+            keywords
         }
         Err(_) => {
             tracing::info!(

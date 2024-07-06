@@ -17,8 +17,8 @@ pub enum Error {
     ReadIpAPI { source: std::io::Error },
     #[snafu(display("Serde ip info response to utf8 fails"))]
     SerdeUtf8 { source: std::string::FromUtf8Error },
-    #[snafu(display("Ip api return fails!"))]
-    IpAPINotWork,
+    #[snafu(display("Ip api return fails! detail:{detail}"))]
+    IpAPINotWork { detail: String },
     #[snafu(display("Cannot find user home! You must set `{var}` to your home path"))]
     NotFindHome { var: &'static str },
     #[snafu(display("Open proxy or non proxy file to `read|append|create` error!"))]
@@ -43,8 +43,11 @@ pub enum Error {
     ContentLength { source: ParseIntError },
     #[snafu(display("Write ahead log not successful!"))]
     WAL { source: std::io::Error },
-    #[snafu(display("DNS Resolver fails!"))]
-    DNSResolver { source: std::io::Error },
+    #[snafu(display("DNS Resolver fails with host:{host}!"))]
+    DNSResolver {
+        source: std::io::Error,
+        host: String,
+    },
     #[snafu(display("DNS Record is empty!"))]
     EmptyDNSRecord,
 }
@@ -62,6 +65,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock};
 use tracing::info;
+use uni_stream::addr::get_ip_addrs;
 
 use crate::util::{QueryIpTaskId, TaskId, TaskIdGenerator};
 
@@ -130,16 +134,26 @@ async fn get_http_body(stream: TcpStream) -> Result<String> {
 }
 
 pub async fn get_country_code(host: impl AsRef<str>) -> Result<ProxyStrategy> {
-    let mut stream = TcpStream::connect(("ip-api.com", 80))
+    let ip_api_addr = get_ip_addrs("ip-api.com")
+        .await
+        .with_context(|_| DNSResolverSnafu {
+            host: host.as_ref().to_string(),
+        })?
+        .first()
+        .context(EmptyDNSRecordSnafu)?
+        .to_owned();
+    let mut stream = TcpStream::connect((ip_api_addr, 80))
         .await
         .context(ConnectIpAPISnafu)?;
     let ipaddr = uni_stream::addr::get_ip_addrs(host.as_ref())
         .await
-        .context(DNSResolverSnafu)?
+        .with_context(|_| DNSResolverSnafu {
+            host: host.as_ref().to_string(),
+        })?
         .into_iter()
         .next()
         .context(EmptyDNSRecordSnafu)?;
-    let req = format!("GET /line/{} HTTP/1.1\r\nHost: ip-api.com\r\n\r\n", ipaddr);
+    let req = format!("GET /line/{} HTTP/1.1\r\nHost: qq.com\r\n\r\n", ipaddr);
     stream
         .write_all(req.as_bytes())
         .await
@@ -151,7 +165,7 @@ pub async fn get_country_code(host: impl AsRef<str>) -> Result<ProxyStrategy> {
     }
     let mut lines = text.lines();
     if !lines.any(|line| line == "success") {
-        IpAPINotWorkSnafu {}.fail()?;
+        return Err(Error::IpAPINotWork { detail: text });
     }
     for line in lines {
         match line {
@@ -403,7 +417,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_country_code() {
-        println!("{:?}", get_country_code("v.qq.com").await.unwrap());
+        println!("{:?}", get_country_code("google.com").await.unwrap());
     }
 
     #[tokio::test]
