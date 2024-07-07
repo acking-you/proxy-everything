@@ -61,19 +61,19 @@ impl Display for ProxyHeader {
     }
 }
 
-#[derive(Clone, Copy)]
-struct CounterNonceSequence(u32);
+#[derive(Clone, Copy, Default)]
+struct CounterNonceSequence(u32, [u8; NONCE_LEN]);
 
 impl NonceSequence for CounterNonceSequence {
     // called once for each seal operation
     fn advance(&mut self) -> RingResult<Nonce> {
-        let mut nonce_bytes = vec![0; NONCE_LEN];
+        let nonce_bytes = &mut self.1;
 
         let bytes = self.0.to_be_bytes();
         nonce_bytes[8..].copy_from_slice(&bytes);
 
         self.0 += 1; // advance the counter
-        Nonce::try_assume_unique_for_key(&nonce_bytes)
+        Ok(Nonce::assume_unique_for_key(*nonce_bytes))
     }
 }
 
@@ -114,7 +114,7 @@ pub struct Aes256GcmEncryptor {
 
 impl Aes256GcmEncryptor {
     pub fn try_new(key: &[u8]) -> RingResult<Self> {
-        let counter = CounterNonceSequence(0);
+        let counter = CounterNonceSequence::default();
         Ok(Self {
             seal: SealingKey::new(UnboundKey::new(&AES_256_GCM, key)?, counter),
         })
@@ -134,7 +134,7 @@ pub struct Aes256GcmDecryptor {
 
 impl Aes256GcmDecryptor {
     pub fn try_new(key: &[u8]) -> RingResult<Self> {
-        let counter = CounterNonceSequence(0);
+        let counter = CounterNonceSequence::default();
         Ok(Self {
             open: OpeningKey::new(UnboundKey::new(&AES_256_GCM, key)?, counter),
         })
