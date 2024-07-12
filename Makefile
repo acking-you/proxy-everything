@@ -21,3 +21,4 @@ build-client-podman-image: build-client-release
 build-server-podman-image: build-server-release
 	bash ./scripts/release/build-server-podman-image.sh ${TAG}
 .PHONY:
+
