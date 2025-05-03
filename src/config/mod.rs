@@ -80,6 +80,19 @@ pub static SERVER_HOST: Lazy<String> = Lazy::new(|| match std::env::var("SERVER_
     }
 });
 
+/// Turly proxy server (ip/addr:port)
+pub static TURELY_PROXY_SERVER: Lazy<Option<String>> =
+    Lazy::new(|| match std::env::var("TURELY_PROXY_SERVER") {
+        Ok(s) => Some(s),
+        Err(_) => {
+            tracing::error!(
+                "You are not set `ENV:TURELY_PROXY_SERVER`. You will be used as a real proxy \
+                 server, please be careful about security!"
+            );
+            None
+        }
+    });
+
 // 256-bit key,must be 256/8 = 32 byte key and hashcode
 pub static DEFAULT_KEY: Lazy<(Vec<u8>, u32)> = Lazy::new(|| {
     let default_key = "my-secret-key123my-secret-key123";

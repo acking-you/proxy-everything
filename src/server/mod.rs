@@ -10,6 +10,9 @@ use tokio::net::TcpListener;
 #[cfg(feature = "tokio")]
 use tokio::net::TcpStream;
 
+use crate::config::TURELY_PROXY_SERVER;
+use crate::MyAsyncWriteExt;
+
 #[derive(Debug, Snafu)]
 pub enum ServerError {
     #[snafu(display("Io Error occur: {detail}"))]
@@ -36,8 +39,8 @@ use crate::util::{
     GracefulShutdownManager, GracefulShutdownManagerImpl, ProxyTaskId, TaskIdGenerator,
 };
 use crate::{
-    get_data_size, proxy_with_norlmal_codec, server_proxy_with_cryptor_codec, Aes256GcmCryption,
-    DataSize, MyAsyncReadExt, ProxyHeader,
+    get_data_size, proxy_with_norlmal_codec, server_proxy_with_cryptor_codec, set_data_size,
+    Aes256GcmCryption, DataSize, MyAsyncReadExt, ProxyHeader,
 };
 
 type Result<T> = std::result::Result<T, ServerError>;
@@ -59,6 +62,34 @@ pub async fn handle_connect(conn: TcpStream) -> Result<()> {
     client_reader.read_exact(real_buf).await.context(IoSnafu {
         detail: "Read Header(addr,tag)",
     })?;
+
+    if let Some(truely_proxy_server) = TURELY_PROXY_SERVER.as_ref() {
+        let truely_proxy_stream =
+            TcpStream::connect(truely_proxy_server)
+                .await
+                .context(IoSnafu {
+                    detail: format!("Connect to truely_proxy_server:{}", truely_proxy_server),
+                })?;
+
+        let (r, w) = truely_proxy_stream.into_split();
+        let (server_reader, mut server_writer) = (AsyncReader::new(r), AsyncWriter::new(w));
+        set_data_size(&mut server_writer, msg_len)
+            .await
+            .context(ProxySnafu)?;
+        server_writer.write_all(real_buf).await.context(IoSnafu {
+            detail: "Write To Truely Server Header(addr,tag)",
+        })?;
+        return proxy_with_norlmal_codec(
+            truely_proxy_server,
+            client_reader,
+            server_reader,
+            client_writer,
+            server_writer,
+        )
+        .await
+        .context(ProxySnafu);
+    }
+
     let mut cryption =
         Aes256GcmCryption::try_new_with_default_key().map_err(|e| ServerError::Decryption {
             detail: format!("{e}"),
