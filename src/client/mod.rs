@@ -1,5 +1,6 @@
 #[cfg(feature = "auto-proxy")]
 pub mod auto_proxy;
+pub mod github_proxy;
 pub mod http;
 pub mod socks;
 

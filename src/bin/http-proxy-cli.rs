@@ -34,6 +34,9 @@ struct Cli {
     /// [optional] Enable random key for sending message, default is false
     #[arg(short, long, value_name = "MSG_KEY")]
     msg_key: bool,
+    #[arg(short, long, value_name = "GITHUB_PROXY")]
+    /// [optional] Enable github proxy server by https://github.akams.cn/, default is false
+    github_proxy: bool,
 }
 
 #[tokio::main]
@@ -57,6 +60,9 @@ async fn main() {
     }
     if let Some(key) = cli.server_port {
         std::env::set_var("SERVER_PORT", key.to_string());
+    }
+    if cli.github_proxy {
+        std::env::set_var("GITHUB_PROXY", "ON");
     }
     init_tracing();
     tracing::info!("SERVER_HOST:{}", *SERVER_HOST);

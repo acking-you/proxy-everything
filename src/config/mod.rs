@@ -93,6 +93,25 @@ pub static TURELY_PROXY_SERVER: Lazy<Option<String>> =
         }
     });
 
+/// Enable github proxy server by https://github.akams.cn/
+pub static GITHUB_PROXY: Lazy<bool> = Lazy::new(|| match std::env::var("GITHUB_PROXY") {
+    Ok(v) => {
+        if v == "ON" || v == "true" {
+            tracing::info!("`GITHUB_PROXY` is enabled");
+            true
+        } else {
+            tracing::info!("`GITHUB_PROXY` is disabled");
+            false
+        }
+    }
+    Err(_) => {
+        tracing::error!(
+            "You are not set `ENV:GITHUB_PROXY`. We will not use github proxy server by default"
+        );
+        false
+    }
+});
+
 // 256-bit key,must be 256/8 = 32 byte key and hashcode
 pub static DEFAULT_KEY: Lazy<(Vec<u8>, u32)> = Lazy::new(|| {
     let default_key = "my-secret-key123my-secret-key123";

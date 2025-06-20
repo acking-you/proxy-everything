@@ -1,7 +1,7 @@
 [package]
 name = "http-proxy"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -39,6 +39,9 @@ futures = "0.3"
 mimalloc-rust = "0.2"
 anyhow = "1.0.86"
 uni-stream = "0.1.0"
+regex = "1"
+json-five = "0.2.2"
+
 
 [[bin]]
 name = "http-proxy-client"
