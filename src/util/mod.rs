@@ -1,9 +1,9 @@
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use futures::Future;
 #[cfg(not(target_env = "msvc"))]
-use tokio::signal::unix::{signal, Signal, SignalKind};
+use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -12,7 +12,7 @@ pub type TaskId = i64;
 const SIGNAL_TASK_ID: TaskId = -1;
 
 pub trait TaskIdGenerator {
-    fn gen(&mut self) -> TaskId;
+    fn r#gen(&mut self) -> TaskId;
 }
 
 macro_rules! make_task_id {
@@ -26,7 +26,7 @@ macro_rules! make_task_id {
         }
 
         impl TaskIdGenerator for $name {
-            fn gen(&mut self) -> TaskId {
+            fn r#gen(&mut self) -> TaskId {
                 let ret = self.0;
                 self.0 += 1;
                 ret

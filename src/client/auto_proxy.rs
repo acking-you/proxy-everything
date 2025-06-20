@@ -100,7 +100,7 @@ async fn get_http_body(stream: TcpStream) -> Result<String> {
         let (idx, _) = buf
             .iter()
             .enumerate()
-            .find(|(_, &c)| c == b':')
+            .find(|&(_, &c)| c == b':')
             .context(ReadHttpKeySnafu)?;
         let key = unsafe { std::str::from_utf8_unchecked(&buf[..idx]) }.trim();
         if idx + 1 >= buf.len() {
@@ -284,7 +284,7 @@ pub async fn run_auto_proxy_by_country(receiver: ReceiverChan) {
         // A [`host`] will only correspond to one task to execute the HTTP request, and the rest
         // will wait for the task to complete.
         tokio::spawn(check_proxy(TaskContext {
-            task_id: query_task_id.gen(),
+            task_id: query_task_id.r#gen(),
             proxy_set: proxy_set.clone(),
             non_proxy_set: non_proxy_set.clone(),
             proxy_file: proxy_file.clone(),

@@ -1,5 +1,5 @@
 use clap::Parser;
-use http_proxy::config::{init_tracing, SERVER_PORT};
+use http_proxy::config::{SERVER_PORT, init_tracing};
 use http_proxy::server::start_server;
 use mimalloc_rust::GlobalMiMalloc;
 
@@ -31,9 +31,11 @@ static GLOBAL_MIMALLOC: GlobalMiMalloc = GlobalMiMalloc;
 async fn main() {
     let cli = Cli::parse();
     init_tracing();
-    std::env::set_var("SERVER_PORT", cli.port.to_string());
-    if let Some(key) = &cli.turely_proxy_server {
-        std::env::set_var("TURELY_PROXY_SERVER", key);
+    unsafe {
+        std::env::set_var("SERVER_PORT", cli.port.to_string());
+        if let Some(key) = &cli.turely_proxy_server {
+            std::env::set_var("TURELY_PROXY_SERVER", key);
+        }
     }
     tracing::info!(
         "Start Listening: {}:{} with truly proxy server:{:?}",

@@ -1,6 +1,6 @@
 use clap::Parser;
 use http_proxy::client::start_client;
-use http_proxy::config::{init_tracing, CLIENT_PORT, DEFAULT_KEY, SERVER_HOST, SERVER_PORT};
+use http_proxy::config::{CLIENT_PORT, DEFAULT_KEY, SERVER_HOST, SERVER_PORT, init_tracing};
 use mimalloc_rust::GlobalMiMalloc;
 
 #[global_allocator]
@@ -42,24 +42,26 @@ struct Cli {
 #[tokio::main]
 async fn main() {
     let cli: Cli = Cli::parse();
-    std::env::set_var("SERVER_HOST", &cli.server_host);
-    if let Some(key) = &cli.key {
-        std::env::set_var("SECRET_KEY", key);
-    }
-    if let Some(key) = &cli.nonproxy_keywords {
-        std::env::set_var("NONPROXY_KEYWORDS", key);
-    }
-    if let Some(key) = &cli.proxy_keywords {
-        std::env::set_var("PROXY_KEYWORDS", key);
-    }
-    if let Some(key) = &cli.need_codec_ip {
-        std::env::set_var("NEED_CODEC_IP", key)
-    }
-    if let Some(key) = cli.client_port {
-        std::env::set_var("CLIENT_PORT", key.to_string());
-    }
-    if let Some(key) = cli.server_port {
-        std::env::set_var("SERVER_PORT", key.to_string());
+    unsafe {
+        std::env::set_var("SERVER_HOST", &cli.server_host);
+        if let Some(key) = &cli.key {
+            std::env::set_var("SECRET_KEY", key);
+        }
+        if let Some(key) = &cli.nonproxy_keywords {
+            std::env::set_var("NONPROXY_KEYWORDS", key);
+        }
+        if let Some(key) = &cli.proxy_keywords {
+            std::env::set_var("PROXY_KEYWORDS", key);
+        }
+        if let Some(key) = &cli.need_codec_ip {
+            std::env::set_var("NEED_CODEC_IP", key)
+        }
+        if let Some(key) = cli.client_port {
+            std::env::set_var("CLIENT_PORT", key.to_string());
+        }
+        if let Some(key) = cli.server_port {
+            std::env::set_var("SERVER_PORT", key.to_string());
+        }
     }
     if cli.github_proxy {
         std::env::set_var("GITHUB_PROXY", "ON");
