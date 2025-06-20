@@ -53,7 +53,7 @@ jobs:
         # Arguments to pass in
         with:
           # Make Rust compile to our target (defined in the matrix)
-          toolchain: nightly-2024-08-25
+          toolchain: nightly-2025-06-19
           targets: ${{ matrix.target }}
 
       - name: Build http-proxy-server
