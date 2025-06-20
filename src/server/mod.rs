@@ -10,8 +10,8 @@ use tokio::net::TcpListener;
 #[cfg(feature = "tokio")]
 use tokio::net::TcpStream;
 
-use crate::config::TURELY_PROXY_SERVER;
 use crate::MyAsyncWriteExt;
+use crate::config::TURELY_PROXY_SERVER;
 
 #[derive(Debug, Snafu)]
 pub enum ServerError {
@@ -39,8 +39,8 @@ use crate::util::{
     GracefulShutdownManager, GracefulShutdownManagerImpl, ProxyTaskId, TaskIdGenerator,
 };
 use crate::{
-    get_data_size, proxy_with_norlmal_codec, server_proxy_with_cryptor_codec, set_data_size,
-    Aes256GcmCryption, DataSize, MyAsyncReadExt, ProxyHeader,
+    Aes256GcmCryption, DataSize, MyAsyncReadExt, ProxyHeader, get_data_size,
+    proxy_with_norlmal_codec, server_proxy_with_cryptor_codec, set_data_size,
 };
 
 type Result<T> = std::result::Result<T, ServerError>;
@@ -158,7 +158,7 @@ pub async fn start_server(host: impl AsRef<str> + Debug, port: u16) {
             }
         };
 
-        manager.spawn(task_id.gen(), async move {
+        manager.spawn(task_id.r#gen(), async move {
             if let Err(e) = handle_connect(client_socket).await {
                 let report = Report::from_error(e).to_string();
                 tracing::warn!(handle_client_proxy_error = report);

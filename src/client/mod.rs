@@ -8,27 +8,27 @@ use std::fmt::{Debug, Display};
 use std::net::IpAddr;
 
 #[cfg(feature = "auto-proxy")]
-use auto_proxy::{run_auto_proxy_by_country, SendItem, SenderChan};
+use auto_proxy::{SendItem, SenderChan, run_auto_proxy_by_country};
 use snafu::{OptionExt, Report, ResultExt, Snafu};
 use tokio::io::AsyncReadExt;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 #[cfg(feature = "tokio")]
 use tokio::net::TcpListener;
 #[cfg(feature = "tokio")]
 use tokio::net::TcpStream;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 #[cfg(not(target_os = "windows"))]
-use tokio::signal::unix::{signal, Signal, SignalKind};
+use tokio::signal::unix::{Signal, SignalKind, signal};
 
 use self::http::{HttpProxierProvider, HttpProxyError};
 use self::socks::{SocksError, SocksProxierProvider};
 use crate::codec::{AsyncReader, AsyncReaderWriterRef, AsyncWriter};
-use crate::config::{gen_random_key, NEED_CODEC_IP};
+use crate::config::{NEED_CODEC_IP, gen_random_key};
 use crate::util::{
     GracefulShutdownManager, GracefulShutdownManagerImpl, ProxyTaskId, TaskIdGenerator,
 };
 use crate::{
-    client_proxy_with_cryptor_codec, proxy_with_norlmal_codec, set_data_size, Aes256GcmCryption,
-    MyAsyncWriteExt, ProxyHeader,
+    Aes256GcmCryption, MyAsyncWriteExt, ProxyHeader, client_proxy_with_cryptor_codec,
+    proxy_with_norlmal_codec, set_data_size,
 };
 
 #[derive(Debug, Snafu)]
@@ -518,7 +518,7 @@ pub async fn start_client<const NEED_CODEC: bool>(
     #[cfg(feature = "auto-proxy")]
     let sender = {
         let (tx, rx) = flume::bounded(DEFAULT_CHAN_CAP);
-        manager.spawn(proxy_id.gen(), async move {
+        manager.spawn(proxy_id.r#gen(), async move {
             run_auto_proxy_by_country(rx).await
         });
         tx
@@ -587,7 +587,7 @@ pub async fn start_client<const NEED_CODEC: bool>(
                     #[cfg(feature = "auto-proxy")]
                     sender,
                 });
-                manager.spawn(proxy_id.gen(), background_task);
+                manager.spawn(proxy_id.r#gen(), background_task);
             }
             _ = make_signal!() =>{
                 tracing::info!("graceful shutdown!");
