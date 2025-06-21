@@ -6,7 +6,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use super::auto_proxy::SenderChan;
-use super::{get_tcp_proxy_stream, ForwarderProvider, SocksProxySnafu, TcpForwardImpl};
+use super::replace_url::replace_url_if_needed;
+use super::{ForwarderProvider, SocksProxySnafu, TcpForwardImpl, get_tcp_proxy_stream};
 #[cfg(feature = "auto-proxy")]
 use crate::client::need_proxy;
 use crate::client::{change_msg_key, get_tcp_stream};
@@ -101,7 +102,7 @@ impl ForwarderProvider for SocksProxierProvider {
         let (s_r, s_w) = server_stream.into_split();
         Ok(Self::Item {
             context: super::ForwardContext {
-                host,
+                host: replace_url_if_needed(host),
                 port,
                 need_proxy,
                 msg_key,
@@ -225,7 +226,7 @@ async fn get_server_stream(
                     get_tcp_stream(host.as_ref(), port, detail).await?,
                     false,
                     msg_key,
-                ))
+                ));
             }
             crate::client::ProxyStatus::NeedSpecialProxy(proxy_server) => {
                 let msg_key = change_msg_key(proxy_server.as_str(), msg_key);

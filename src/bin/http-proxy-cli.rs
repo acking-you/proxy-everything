@@ -1,4 +1,5 @@
 use clap::Parser;
+use http_proxy::client::replace_url::update_proxy_server_queue;
 use http_proxy::client::start_client;
 use http_proxy::config::{CLIENT_PORT, DEFAULT_KEY, SERVER_HOST, SERVER_PORT, init_tracing};
 use mimalloc_rust::GlobalMiMalloc;
@@ -62,9 +63,11 @@ async fn main() {
         if let Some(key) = cli.server_port {
             std::env::set_var("SERVER_PORT", key.to_string());
         }
-    }
-    if cli.github_proxy {
-        std::env::set_var("GITHUB_PROXY", "ON");
+        if cli.github_proxy {
+            std::env::set_var("GITHUB_PROXY", "ON");
+            // TODO: Regularly update the list of proxy servers
+            update_proxy_server_queue().await;
+        }
     }
     init_tracing();
     tracing::info!("SERVER_HOST:{}", *SERVER_HOST);

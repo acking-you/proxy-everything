@@ -1,7 +1,7 @@
 #[cfg(feature = "auto-proxy")]
 pub mod auto_proxy;
-pub mod github_proxy;
 pub mod http;
+pub mod replace_url;
 pub mod socks;
 
 use std::borrow::Cow;

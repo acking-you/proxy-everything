@@ -1,7 +1,7 @@
 use once_cell::sync::Lazy;
 use rand::Rng;
 use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::{fmt, Layer};
+use tracing_subscriber::{Layer, fmt};
 
 pub fn init_tracing() {
     let subcriber = tracing_subscriber::registry().with(
@@ -105,7 +105,7 @@ pub static GITHUB_PROXY: Lazy<bool> = Lazy::new(|| match std::env::var("GITHUB_P
         }
     }
     Err(_) => {
-        tracing::error!(
+        tracing::warn!(
             "You are not set `ENV:GITHUB_PROXY`. We will not use github proxy server by default"
         );
         false

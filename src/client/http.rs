@@ -4,13 +4,14 @@ use snafu::{OptionExt, ResultExt, Snafu};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
+use super::replace_url::replace_url_if_needed;
 use super::{
-    change_msg_key, get_tcp_proxy_stream, get_tcp_stream, ForwardContext, ForwarderProvider,
-    HeaderContext, ProxyContext, TcpForwardImpl,
+    ForwardContext, ForwarderProvider, HeaderContext, ProxyContext, TcpForwardImpl, change_msg_key,
+    get_tcp_proxy_stream, get_tcp_stream,
 };
+use crate::client::HttpProxySnafu;
 #[cfg(feature = "auto-proxy")]
 use crate::client::need_proxy;
-use crate::client::HttpProxySnafu;
 use crate::codec::{AsyncReader, AsyncWriter};
 use crate::config::{PROXY_KEYWORDS, SERVER_HOST, SERVER_PORT};
 
@@ -121,7 +122,7 @@ impl ForwarderProvider for HttpProxierProvider {
             };
             let msg_key = msg_key.map(|s| Cow::Owned(s.to_owned()));
             return Ok(Self {
-                host: host.to_string(),
+                host: replace_url_if_needed(host.to_string()),
                 port,
                 has_ssl,
                 msg_key,
@@ -228,7 +229,7 @@ impl HttpProxierProvider {
                             get_tcp_stream(&self.host, self.port, detail).await?,
                             false,
                             self.msg_key.clone(),
-                        ))
+                        ));
                     }
                     crate::client::ProxyStatus::NeedSpecialProxy(proxy_host) => {
                         let msg_key = change_msg_key(proxy_host.as_str(), self.msg_key.clone());
