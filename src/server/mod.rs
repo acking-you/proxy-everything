@@ -1,3 +1,41 @@
+//! Server-side proxy implementation.
+//!
+//! This module provides the server-side proxy functionality. The server receives
+//! encrypted connections from clients, decrypts the proxy header, and forwards
+//! traffic to the destination.
+//!
+//! # Architecture
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────┐
+//! │                        Server Architecture                              │
+//! │                                                                         │
+//! │  Client ──► [encrypted] ──► Server (1081) ──► Destination              │
+//! │                                  │                                      │
+//! │                                  ▼                                      │
+//! │                         ┌─────────────────┐                            │
+//! │                         │ Decrypt Header  │                            │
+//! │                         │ (AES-256-GCM)   │                            │
+//! │                         └─────────────────┘                            │
+//! │                                  │                                      │
+//! │                                  ▼                                      │
+//! │                         ┌─────────────────┐                            │
+//! │                         │ Parse ProxyHeader│                           │
+//! │                         │ {host, port, key}│                           │
+//! │                         └─────────────────┘                            │
+//! │                                  │                                      │
+//! │                    ┌─────────────┴─────────────┐                       │
+//! │                    ▼                           ▼                        │
+//! │            With Session Key            Without Key                     │
+//! │            (encrypted stream)          (plain stream)                  │
+//! └─────────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! # Transparent Proxy Chain
+//!
+//! When `TURELY_PROXY_SERVER` is configured, the server acts as a transparent
+//! relay, forwarding all traffic to another proxy server without decryption.
+
 use std::fmt::Debug;
 
 use snafu::{Report, ResultExt, Snafu};
@@ -20,13 +58,13 @@ pub enum ServerError {
     #[snafu(display("SerdeJson Error occur!"))]
     SerdeJson { source: serde_json::Error },
     #[snafu(display("Server read header fail:{source}"))]
-    ReadHeader { source: super::Error },
+    ReadHeader { source: crate::ProxyError },
     #[snafu(display(
         "Exceeded the maximum supported header length({MAX_HEADER_SIZE}). size:{size}"
     ))]
     HeaderSize { size: DataSize },
     #[snafu(display("Proxy error happen!"))]
-    Proxy { source: super::Error },
+    Proxy { source: crate::ProxyError },
 }
 
 use crate::codec::{AsyncReader, AsyncWriter};

@@ -5,13 +5,10 @@ use snafu::{ResultExt, Snafu};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use super::auto_proxy::SenderChan;
-use super::{get_tcp_proxy_stream, ForwarderProvider, SocksProxySnafu, TcpForwardImpl};
-#[cfg(feature = "auto-proxy")]
-use crate::client::need_proxy;
-use crate::client::{change_msg_key, get_tcp_stream};
-use crate::codec::{AsyncReader, AsyncWriter};
-use crate::config::{SERVER_HOST, SERVER_PORT};
+use super::{
+    resolve_server_connection, split_and_wrap, ForwardContext, ForwarderProvider, ServerConnection,
+    SocksProxySnafu, TcpForwardImpl,
+};
 
 #[derive(Debug, Snafu)]
 pub enum SocksError {
@@ -90,26 +87,30 @@ impl ForwarderProvider for SocksProxierProvider {
         response(&mut proxy_context.stream)
             .await
             .context(SocksProxySnafu)?;
-        let (server_stream, need_proxy, msg_key) = get_server_stream(
-            host.as_str(),
-            port,
-            proxy_context.sender,
-            self.msg_key.clone(),
-        )
-        .await?;
-        let (r, w) = proxy_context.stream.into_split();
-        let (s_r, s_w) = server_stream.into_split();
+
+        // Use unified server connection resolution
+        let ServerConnection {
+            stream: server_stream,
+            need_proxy,
+            msg_key,
+        } = resolve_server_connection(host.as_str(), port, proxy_context.sender, self.msg_key)
+            .await?;
+
+        // Split streams using common helper
+        let (client_reader, client_writer) = split_and_wrap(proxy_context.stream);
+        let (server_reader, server_writer) = split_and_wrap(server_stream);
+
         Ok(Self::Item {
-            context: super::ForwardContext {
+            context: ForwardContext {
                 host,
                 port,
                 need_proxy,
                 msg_key,
             },
-            client_reader: AsyncReader::new(r),
-            client_writer: AsyncWriter::new(w),
-            server_reader: AsyncReader::new(s_r),
-            server_writer: AsyncWriter::new(s_w),
+            client_reader,
+            client_writer,
+            server_reader,
+            server_writer,
         })
     }
 }
@@ -207,58 +208,6 @@ async fn response(stream: &mut TcpStream) -> Result<()> {
         .context(IoSnafu {
             detail: "send response ok",
         })
-}
-
-async fn get_server_stream(
-    host: impl AsRef<str>,
-    port: u16,
-    sender: &SenderChan,
-    msg_key: Option<Cow<'static, str>>,
-) -> super::Result<(TcpStream, bool, Option<Cow<'static, str>>)> {
-    // check auto proxy to prevent proxy to remote server
-    #[cfg(feature = "auto-proxy")]
-    {
-        match need_proxy(host.as_ref(), port, sender).await? {
-            crate::client::ProxyStatus::NorlmalProxy => {}
-            crate::client::ProxyStatus::NoProxy(detail) => {
-                return Ok((
-                    get_tcp_stream(host.as_ref(), port, detail).await?,
-                    false,
-                    msg_key,
-                ))
-            }
-            crate::client::ProxyStatus::NeedSpecialProxy(proxy_server) => {
-                let msg_key = change_msg_key(proxy_server.as_str(), msg_key);
-                return Ok((
-                    get_tcp_proxy_stream(
-                        host.as_ref(),
-                        port,
-                        &proxy_server,
-                        *SERVER_PORT,
-                        msg_key.clone(),
-                        "[PROXY] we will proxy socks5",
-                    )
-                    .await?,
-                    true,
-                    msg_key,
-                ));
-            }
-        }
-    }
-    let msg_key = change_msg_key(SERVER_HOST.as_str(), msg_key);
-    Ok((
-        get_tcp_proxy_stream(
-            host.as_ref(),
-            port,
-            &SERVER_HOST,
-            *SERVER_PORT,
-            msg_key.clone(),
-            "[PROXY] we will proxy socks5",
-        )
-        .await?,
-        true,
-        msg_key,
-    ))
 }
 
 #[cfg(test)]

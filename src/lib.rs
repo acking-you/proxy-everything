@@ -1,279 +1,178 @@
-use std::borrow::Cow;
-use std::fmt::Display;
+//! Proxy-Everything: A secure TCP proxy with AES-256-GCM encryption.
+//!
+//! This crate provides a three-layer proxy system for secure traffic forwarding:
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────┐
+//! │                        Proxy Architecture                               │
+//! │                                                                         │
+//! │  Application ──► Client (local:1080) ──► [encrypted] ──► Server        │
+//! │                                                          (remote:1081) │
+//! │                                                               │         │
+//! │                                                               ▼         │
+//! │                                                          Destination    │
+//! └─────────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! # Features
+//!
+//! - **HTTP/HTTPS proxy**: Supports CONNECT method for HTTPS tunneling
+//! - **SOCKS5 proxy**: Full SOCKS5 protocol implementation
+//! - **AES-256-GCM encryption**: Secure traffic between client and server
+//! - **Auto-proxy**: Geo-based routing (CN=direct, US/SG/TW/HK/JP=proxy)
+//! - **Graceful shutdown**: Proper cleanup on SIGINT/SIGTERM/SIGQUIT
+//!
+//! # Modules
+//!
+//! - [`client`]: Client-side proxy implementation
+//! - [`server`]: Server-side proxy implementation
+//! - [`config`]: Configuration management
+//! - [`error`]: Unified error types
+//! - [`crypto`]: Cryptographic primitives
+//! - [`protocol`]: Wire protocol definitions
+
+// ============================================================================
+// Public modules
+// ============================================================================
 
 pub mod client;
-pub(crate) mod codec;
 pub mod config;
+pub mod error;
 pub mod server;
+
+// ============================================================================
+// Internal modules
+// ============================================================================
+
+pub(crate) mod codec;
+pub(crate) mod crypto;
+pub(crate) mod protocol;
 pub(crate) mod util;
 
-use codec::{AsyncDecryptCodec, AsyncEncryptCodec, AsyncNormalCodec, CodecError};
-use config::DEFAULT_KEY;
-use ring::aead::{
-    Aad, BoundKey, Nonce, NonceSequence, OpeningKey, SealingKey, Tag, UnboundKey, AES_256_GCM,
-    NONCE_LEN,
+// ============================================================================
+// Re-exports for public API
+// ============================================================================
+
+pub use crypto::{
+    Aes256GcmCryption, Aes256GcmDecryptor, Aes256GcmEncryptor, Decryptor, Encryptor, RingResult,
 };
-use serde::{Deserialize, Serialize};
-use snafu::{ResultExt, Snafu};
+pub use error::{ProxyError, Result};
+pub use protocol::{DataSize, ProxyHeader, MAX_DATA_SIZE};
 
-#[derive(Debug, Snafu)]
-pub enum Error {
-    #[snafu(display("Read header error:`{detail}`"))]
-    ReadHeader {
-        detail: String,
-        source: std::io::Error,
-    },
-    #[snafu(display("Write header error:`{detail}`"))]
-    WriteHeader {
-        detail: String,
-        source: std::io::Error,
-    },
-    #[snafu(display("Checksum not pass: size:`{size}`"))]
-    CheckSum { size: u32 },
-    #[snafu(display("Data size must be less than `{size}`"))]
-    MaxSize { size: u32 },
-    #[snafu(display("Write data error in `codec_and_write`.detail:{detail}"))]
-    WriteDataInProxy {
-        detail: &'static str,
-        source: std::io::Error,
-    },
-    #[snafu(display("Reader codec error in proxy"))]
-    Codec { source: CodecError },
-    #[snafu(display("Proxy error! Send data to server or client fails!,detail:{msg}"))]
-    Proxy { msg: String },
-    #[snafu(display("Construct cryptor error! detail:{detail}"))]
-    ConstructCryptor { detail: String },
-}
+// ============================================================================
+// Internal re-exports (for use within the crate)
+// ============================================================================
 
-type Result<T, E = Error> = std::result::Result<T, E>;
-type RingResult<T> = Result<T, ring::error::Unspecified>;
+pub(crate) use codec::{AsyncDecryptCodec, AsyncEncryptCodec, AsyncNormalCodec};
+pub(crate) use protocol::{get_data_size, set_data_size};
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ProxyHeader {
-    pub host: String,
-    pub port: u16,
-    pub key: Option<Cow<'static, str>>,
-}
+// Note: snafu context types are used in submodules via crate::error
 
-impl Display for ProxyHeader {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.host, self.port)
-    }
-}
+// ============================================================================
+// Async I/O Traits
+// ============================================================================
 
-#[derive(Clone, Copy, Default)]
-struct CounterNonceSequence(u32, [u8; NONCE_LEN]);
-
-impl NonceSequence for CounterNonceSequence {
-    // called once for each seal operation
-    fn advance(&mut self) -> RingResult<Nonce> {
-        let nonce_bytes = &mut self.1;
-
-        let bytes = self.0.to_be_bytes();
-        nonce_bytes[8..].copy_from_slice(&bytes);
-
-        self.0 += 1; // advance the counter
-        Ok(Nonce::assume_unique_for_key(*nonce_bytes))
-    }
-}
-
-pub struct Aes256GcmCryption {
-    seal: Aes256GcmEncryptor,
-    open: Aes256GcmDecryptor,
-}
-
-impl Aes256GcmCryption {
-    pub fn try_new(key: &[u8]) -> RingResult<Self> {
-        Ok(Self {
-            seal: Aes256GcmEncryptor::try_new(key)?,
-            open: Aes256GcmDecryptor::try_new(key)?,
-        })
-    }
-
-    pub fn try_new_with_default_key() -> RingResult<Self> {
-        Aes256GcmCryption::try_new(DEFAULT_KEY.0.as_ref())
-    }
-
-    pub fn encrypt(&mut self, data: &mut [u8]) -> RingResult<Tag> {
-        self.seal.encrypt(data)
-    }
-
-    pub fn decrypt(&mut self, decrypeted_data: &[u8], tag: Tag) -> RingResult<(Vec<u8>, usize)> {
-        self.open.decrypt(decrypeted_data, tag)
-    }
-
-    pub fn decrypt_with_tag<'a>(&mut self, data: &'a mut [u8]) -> RingResult<&'a mut [u8]> {
-        self.open.decrypt_with_tag(data)
-    }
-}
-
-#[derive(Debug)]
-pub struct Aes256GcmEncryptor {
-    seal: SealingKey<CounterNonceSequence>,
-}
-
-impl Aes256GcmEncryptor {
-    pub fn try_new(key: &[u8]) -> RingResult<Self> {
-        let counter = CounterNonceSequence::default();
-        Ok(Self {
-            seal: SealingKey::new(UnboundKey::new(&AES_256_GCM, key)?, counter),
-        })
-    }
-}
-
-impl Encryptor for Aes256GcmEncryptor {
-    fn encrypt(&mut self, data: &mut [u8]) -> RingResult<Tag> {
-        self.seal.seal_in_place_separate_tag(Aad::empty(), data)
-    }
-}
-
-#[derive(Debug)]
-pub struct Aes256GcmDecryptor {
-    open: OpeningKey<CounterNonceSequence>,
-}
-
-impl Aes256GcmDecryptor {
-    pub fn try_new(key: &[u8]) -> RingResult<Self> {
-        let counter = CounterNonceSequence::default();
-        Ok(Self {
-            open: OpeningKey::new(UnboundKey::new(&AES_256_GCM, key)?, counter),
-        })
-    }
-}
-
-impl Decryptor for Aes256GcmDecryptor {
-    fn decrypt(&mut self, decrypeted_data: &[u8], tag: Tag) -> RingResult<(Vec<u8>, usize)> {
-        let mut new_data = [decrypeted_data, tag.as_ref()].concat();
-        let new_data_len = self.decrypt_with_tag(&mut new_data)?.len();
-        Ok((new_data, new_data_len))
-    }
-
-    fn decrypt_with_tag<'a>(&mut self, data: &'a mut [u8]) -> RingResult<&'a mut [u8]> {
-        self.open.open_in_place(Aad::empty(), data)
-    }
-}
-
-pub trait Encryptor: 'static {
-    fn encrypt(&mut self, data: &mut [u8]) -> RingResult<Tag>;
-}
-
-pub trait Decryptor {
-    fn decrypt(&mut self, decrypeted_data: &[u8], tag: Tag) -> RingResult<(Vec<u8>, usize)>;
-    fn decrypt_with_tag<'a>(&mut self, data: &'a mut [u8]) -> RingResult<&'a mut [u8]>;
-}
-
-/// Checksum for read data length
-#[inline]
-fn get_check_sum(data: DataSize) -> DataSize {
-    data ^ DEFAULT_KEY.1
-}
-
-type DataSize = u32;
-
-/// Max datasize when read data
-pub const MAX_DATA_SIZE: DataSize = 30 * 1024 * 1024;
-
-/// Abstraction of intermediate layers for free switching of runtimes (e.g. monoio and tokio)
+/// Async read extension trait.
+///
+/// Provides a runtime-agnostic interface for async read operations,
+/// allowing the codebase to potentially support multiple async runtimes.
 pub(crate) trait MyAsyncReadExt {
-    async fn read_u32(&mut self) -> Result<u32, std::io::Error>;
-    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error>;
-    async fn read_exact(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error>;
+    /// Reads a big-endian u32.
+    async fn read_u32(&mut self) -> std::result::Result<u32, std::io::Error>;
+
+    /// Reads into buffer, returning bytes read.
+    async fn read(&mut self, buf: &mut [u8]) -> std::result::Result<usize, std::io::Error>;
+
+    /// Reads exactly enough bytes to fill the buffer.
+    async fn read_exact(&mut self, buf: &mut [u8]) -> std::result::Result<usize, std::io::Error>;
 }
 
+/// Async write extension trait.
+///
+/// Provides a runtime-agnostic interface for async write operations.
 pub(crate) trait MyAsyncWriteExt {
-    async fn write_u32(&mut self, n: u32) -> Result<(), std::io::Error>;
-    async fn write_all(&mut self, src: &[u8]) -> Result<(), std::io::Error>;
+    /// Writes a big-endian u32.
+    async fn write_u32(&mut self, n: u32) -> std::result::Result<(), std::io::Error>;
+
+    /// Writes all bytes from the buffer.
+    async fn write_all(&mut self, src: &[u8]) -> std::result::Result<(), std::io::Error>;
 }
 
-pub(crate) async fn get_data_size<T: MyAsyncReadExt + Unpin>(reader: &mut T) -> Result<DataSize> {
-    let msg_checksum = reader.read_u32().await.context(ReadHeaderSnafu {
-        detail: "Read Header(checksum)",
-    })?;
-    let msg_len = reader.read_u32().await.context(ReadHeaderSnafu {
-        detail: "Read Header(msg_len)",
-    })?;
-    if get_check_sum(msg_checksum) != msg_len {
-        CheckSumSnafu { size: msg_len }.fail()?;
-    }
-    if msg_len > MAX_DATA_SIZE {
-        MaxSizeSnafu {
-            size: MAX_DATA_SIZE,
-        }
-        .fail()?;
-    }
-    Ok(msg_len)
-}
-
-pub(crate) async fn set_data_size<T: MyAsyncWriteExt + Unpin>(
-    writer: &mut T,
-    data_size: DataSize,
-) -> Result<()> {
-    writer
-        .write_u32(get_check_sum(data_size))
-        .await
-        .context(WriteHeaderSnafu {
-            detail: "Send Header(check_sum)",
-        })?;
-    writer
-        .write_u32(data_size)
-        .await
-        .context(WriteHeaderSnafu {
-            detail: "Send Header(msg_len)",
-        })?;
-    Ok(())
-}
-
-/// For free choice of unpacking when reading data
+/// Async codec reader trait.
+///
+/// Provides streaming read with optional encoding/decoding transformation.
 pub(crate) trait MyAsyncCodecReader {
+    /// The item type returned by codec operations.
     type Item<'a>
     where
         Self: 'a;
+
+    /// Reads and decodes the next chunk of data.
     async fn codec(&mut self) -> Result<Self::Item<'_>>;
+
+    /// Reads, decodes, and writes to the given writer.
     async fn codec_and_write<W: MyAsyncWriteExt + Send + Unpin>(
         &mut self,
         writer: &mut W,
     ) -> Result<DataSize>;
 }
 
-pub(crate) fn proxy_result_handle(
-    host: impl AsRef<str>,
-    ret: Result<DataSize>,
-    detail: &'static str,
-) {
+// ============================================================================
+// Proxy Result Handling
+// ============================================================================
+
+/// Logs the result of a proxy operation.
+///
+/// Used for consistent logging of proxy completion or errors.
+pub(crate) fn proxy_result_handle(host: impl AsRef<str>, ret: Result<DataSize>, detail: &'static str) {
     match ret {
-        Ok(n) => tracing::info!("We got {n} bytes,detail:{detail} host:{}", host.as_ref()),
-        Err(e) => tracing::error!("We got error:{e}, detail:{detail} host:{}", host.as_ref()),
+        Ok(n) => tracing::info!("Transferred {n} bytes, detail:{detail} host:{}", host.as_ref()),
+        Err(e) => tracing::error!("Proxy error:{e}, detail:{detail} host:{}", host.as_ref()),
     }
 }
 
-fn get_decyptor_codec<R: MyAsyncReadExt + Unpin>(
+// ============================================================================
+// Codec Factory Functions
+// ============================================================================
+
+/// Creates a decryption codec for the given reader and key.
+fn get_decryptor_codec<R: MyAsyncReadExt + Unpin>(
     key: &impl AsRef<str>,
     reader: R,
 ) -> Result<AsyncDecryptCodec<R, Aes256GcmDecryptor>> {
     Ok(AsyncDecryptCodec::new(
         reader,
         Aes256GcmDecryptor::try_new(key.as_ref().as_bytes()).map_err(|e| {
-            Error::ConstructCryptor {
+            ProxyError::Crypto {
                 detail: format!("{e}"),
             }
         })?,
     ))
 }
 
-fn get_encyptor_codec<R: MyAsyncReadExt + Unpin>(
+/// Creates an encryption codec for the given reader and key.
+fn get_encryptor_codec<R: MyAsyncReadExt + Unpin>(
     key: impl AsRef<str>,
     reader: R,
 ) -> Result<AsyncEncryptCodec<R, Aes256GcmEncryptor>> {
     Ok(AsyncEncryptCodec::new(
         reader,
         Aes256GcmEncryptor::try_new(key.as_ref().as_bytes()).map_err(|e| {
-            Error::ConstructCryptor {
+            ProxyError::Crypto {
                 detail: format!("{e}"),
             }
         })?,
     ))
 }
 
+// ============================================================================
+// Bidirectional Proxy Functions
+// ============================================================================
+
+/// Starts bidirectional proxy between client and server.
+///
+/// This is the core proxy loop that copies data in both directions
+/// until one side closes the connection.
 async fn start_proxy<
     ClientCodec: MyAsyncCodecReader + Send + Unpin,
     ServerCodec: MyAsyncCodecReader + Send + Unpin,
@@ -287,17 +186,30 @@ async fn start_proxy<
 ) -> Result<()> {
     let client_to_server = codec::copy(client_codec, server_writer);
     let server_to_client = codec::copy(server_codec, client_writer);
+
+    // Race both directions - first to complete wins
     tokio::select! {
-        ret = client_to_server=> {
-            proxy_result_handle(host,ret,"client->server");
+        ret = client_to_server => {
+            proxy_result_handle(&host, ret, "client->server");
         }
-        ret = server_to_client=> {
-            proxy_result_handle(host,ret,"server->client");
+        ret = server_to_client => {
+            proxy_result_handle(&host, ret, "server->client");
         }
     }
     Ok(())
 }
 
+/// Client-side proxy with encryption.
+///
+/// Encrypts data from client before sending to server,
+/// decrypts data from server before sending to client.
+///
+/// # Data Flow
+///
+/// ```text
+/// Client ──► [encrypt] ──► Server
+/// Client ◄── [decrypt] ◄── Server
+/// ```
 pub(crate) async fn client_proxy_with_cryptor_codec<
     R: MyAsyncReadExt + Send + Unpin,
     W: MyAsyncWriteExt + Send + Unpin,
@@ -309,17 +221,28 @@ pub(crate) async fn client_proxy_with_cryptor_codec<
     client_writer: W,
     server_writer: W,
 ) -> Result<()> {
-    tracing::info!("client start forward with random_key:{}", key.as_ref());
+    tracing::info!("Client proxy starting with session key:{}", key.as_ref());
     start_proxy(
         host,
-        get_encyptor_codec(key, client_reader)?,
-        get_decyptor_codec(key, server_reader)?,
+        get_encryptor_codec(key, client_reader)?,
+        get_decryptor_codec(key, server_reader)?,
         client_writer,
         server_writer,
     )
     .await
 }
 
+/// Server-side proxy with decryption.
+///
+/// Decrypts data from client, encrypts data to client.
+/// This is the inverse of `client_proxy_with_cryptor_codec`.
+///
+/// # Data Flow
+///
+/// ```text
+/// Client ──► [decrypt] ──► Destination
+/// Client ◄── [encrypt] ◄── Destination
+/// ```
 pub(crate) async fn server_proxy_with_cryptor_codec<
     R: MyAsyncReadExt + Send + Unpin,
     W: MyAsyncWriteExt + Send + Unpin,
@@ -331,18 +254,22 @@ pub(crate) async fn server_proxy_with_cryptor_codec<
     client_writer: W,
     server_writer: W,
 ) -> Result<()> {
-    tracing::info!("server start forward with random_key:{}", key.as_ref());
+    tracing::info!("Server proxy starting with session key:{}", key.as_ref());
     start_proxy(
         host,
-        get_decyptor_codec(key, client_reader)?,
-        get_encyptor_codec(key, server_reader)?,
+        get_decryptor_codec(key, client_reader)?,
+        get_encryptor_codec(key, server_reader)?,
         client_writer,
         server_writer,
     )
     .await
 }
 
-pub(crate) async fn proxy_with_norlmal_codec<
+/// Plain proxy without encryption.
+///
+/// Used for direct connections that don't require encryption,
+/// such as local traffic or already-encrypted protocols.
+pub(crate) async fn proxy_with_normal_codec<
     R: MyAsyncReadExt + Send + Unpin,
     W: MyAsyncWriteExt + Send + Unpin,
 >(
@@ -362,51 +289,5 @@ pub(crate) async fn proxy_with_norlmal_codec<
     .await
 }
 
-#[cfg(test)]
-mod tests {
-
-    use std::time::Instant;
-
-    use super::*;
-
-    struct Timer {
-        ins: Instant,
-        hint: String,
-    }
-
-    impl Timer {
-        fn new_with_hint(hint: String) -> Self {
-            Self {
-                ins: Instant::now(),
-                hint,
-            }
-        }
-    }
-
-    impl Drop for Timer {
-        fn drop(&mut self) {
-            println!("{} consume time:{:?}", self.hint, self.ins.elapsed());
-        }
-    }
-
-    #[test]
-    fn test_encrypt() -> RingResult<()> {
-        let  data = String::from("fdafas反对fdasfasfasfsdafdasfsdfasd范德萨发顺🤣❤️😁😍👍👍丰十大大师傅士大夫大撒发射点发士大夫大师傅大师傅士大夫士大夫阿斯蒂芬大师傅阿斯顿法大师傅看叫阿三的发就可是大家发开始打客服开始大幅喀什的开发点卡收费就开始打客服就是的咖啡肯定撒法开始打客服就是的咖啡就开始大幅扣税的急啊看发叫阿三的发生的开发就是大家可是大家发看大数据开发大数据开发大家ask发就是的咖啡的萨芬就卡死的房价开始打家开发商的JFK上的飞机卡上的纠纷开始打飞机宽带技术开发就开始大家开发建设的卡JFK大数据风控静安寺的看法角度看萨芬卡上的纠纷看静安寺的看法角度思考积分可是大家发卡是大家看法就大肆砍伐尽快打算减肥肯定是积分开始大幅技术大咖积分开始打飞机扣税的急啊看发的技术开发就是JFK十大福克斯大家开发大撒发射点幅度萨芬撒旦发发收范德萨发顺丰士大夫十大阿斯蒂芬大师傅阿斯顿附件是的客服对接撒巨大石块积分的课时费阿斯蒂芬法大师傅大师傅十大法大师傅阿斯蒂芬阿斯顿法大师傅阿斯蒂芬大师傅阿斯顿法大师傅大师傅阿斯蒂芬阿斯蒂芬士大夫阿斯蒂芬大师傅的萨芬打算减肥上岛咖啡加快速度大数据开发就是打客服看大数据开发就开始减肥卡萨丁JFK是大家看法加快速度JFK技术大咖积分喀什的开发独守空房技术大咖积分空手道解放扣税的开发商的开发接口是大家看法角度看是否扣税的急啊看发生的开发的快速减肥开始大幅就是打客服卡上的纠纷啊撒旦解放扣税的急啊看发加快速度点卡JFK啥的但是法大师傅技术大咖积分卡萨丁就反馈是大家看法啊是大家看法卡上的纠纷可是大家发喀什的开发大卡司喀什的开发就是打客服法大师傅士大夫的式咖啡机上岛咖啡就是的咖啡艰苦大师傅看上雕刻技法喀什的开发上岛咖啡就喀什的开发就是打客服卡上的纠纷技术的咖啡机肯定撒开发啊十大科技开发速度加啊反馈就是的咖啡开始大幅大师傅似的十大放假啊上岛咖啡就可是大家发空间的是否撒旦士大夫的撒娇开发是大家看法大肆砍伐就喀什的开发氨基酸的考虑非军事对抗疗法金克拉撒旦发艰苦拉萨的飞机喀什打开发就可是大家发可是大家看附件卡上的纠纷卡刷点卡技术的咖啡机可是大家发卡是大家看法静安寺的看法就可是大家发卡萨丁就开发商的急啊看飞机迪斯科发技术的咖啡机可是大家发看电视剧开发商大开始打到发大水发大水");
-        let mut cryption = Aes256GcmCryption::try_new_with_default_key()?;
-        let mut out_buf = data.as_bytes().to_vec();
-        let tag = {
-            let _timer = Timer::new_with_hint("Encrypt".into());
-            cryption.encrypt(&mut out_buf)?
-        };
-        println!("tag:{:?}", tag.as_ref());
-        let (decrypeted_data, len) = {
-            let _timer = Timer::new_with_hint("Decrypt".into());
-            cryption.decrypt(&out_buf, tag)?
-        };
-        assert_eq!(
-            data,
-            String::from_utf8(decrypeted_data[..len].to_vec()).unwrap()
-        );
-        Ok(())
-    }
-}
+// Backward compatibility alias
+pub(crate) use proxy_with_normal_codec as proxy_with_norlmal_codec;

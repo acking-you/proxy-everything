@@ -5,13 +5,11 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
 use super::{
-    change_msg_key, get_tcp_proxy_stream, get_tcp_stream, ForwardContext, ForwarderProvider,
-    HeaderContext, ProxyContext, TcpForwardImpl,
+    change_msg_key, get_tcp_proxy_stream, get_tcp_stream, resolve_server_connection, split_and_wrap,
+    ForwardContext, ForwarderProvider, HeaderContext, ProxyContext, ServerConnection,
+    TcpForwardImpl,
 };
-#[cfg(feature = "auto-proxy")]
-use crate::client::need_proxy;
 use crate::client::HttpProxySnafu;
-use crate::codec::{AsyncReader, AsyncWriter};
 use crate::config::{PROXY_KEYWORDS, SERVER_HOST, SERVER_PORT};
 
 #[derive(Debug, Snafu)]
@@ -140,9 +138,11 @@ impl ForwarderProvider for HttpProxierProvider {
     // when it is https proxy we will decide start proxy or not
     async fn try_build_forwarder(self, mut context: ProxyContext<'_>) -> super::Result<Self::Item> {
         let (server_stream, need_proxy, msg_key) = self.get_server_stream(&mut context).await?;
-        let ProxyContext { stream, .. } = context;
-        let (r, w) = stream.into_split();
-        let (s_r, s_w) = server_stream.into_split();
+
+        // Split streams using common helper
+        let (client_reader, client_writer) = split_and_wrap(context.stream);
+        let (server_reader, server_writer) = split_and_wrap(server_stream);
+
         Ok(TcpForwardImpl {
             context: ForwardContext {
                 need_proxy,
@@ -150,10 +150,10 @@ impl ForwarderProvider for HttpProxierProvider {
                 port: self.port,
                 msg_key,
             },
-            client_reader: AsyncReader::new(r),
-            client_writer: AsyncWriter::new(w),
-            server_reader: AsyncReader::new(s_r),
-            server_writer: AsyncWriter::new(s_w),
+            client_reader,
+            client_writer,
+            server_reader,
+            server_writer,
         })
     }
 }
@@ -210,7 +210,7 @@ impl HttpProxierProvider {
 
             Ok((server_stream, has_proxy_status.is_some(), msg_key))
         } else {
-            // response to 200
+            // HTTPS CONNECT: respond with 200 OK first
             context
                 .stream
                 .write_all(b"HTTP/1.1 200 OK\r\n\r\n")
@@ -221,50 +221,20 @@ impl HttpProxierProvider {
                 })
                 .context(HttpProxySnafu)?;
 
-            // check auto proxy to prevent proxy to remote server
-            #[cfg(feature = "auto-proxy")]
-            {
-                match need_proxy(self.host.as_str(), self.port, context.sender).await? {
-                    crate::client::ProxyStatus::NorlmalProxy => {}
-                    crate::client::ProxyStatus::NoProxy(detail) => {
-                        return Ok((
-                            get_tcp_stream(&self.host, self.port, detail).await?,
-                            false,
-                            self.msg_key.clone(),
-                        ))
-                    }
-                    crate::client::ProxyStatus::NeedSpecialProxy(proxy_host) => {
-                        let msg_key = change_msg_key(proxy_host.as_str(), self.msg_key.clone());
-                        return Ok((
-                            get_tcp_proxy_stream(
-                                self.host.as_str(),
-                                self.port,
-                                &proxy_host,
-                                *SERVER_PORT,
-                                msg_key.clone(),
-                                "[PROXY] we will proxy https",
-                            )
-                            .await?,
-                            true,
-                            msg_key,
-                        ));
-                    }
-                }
-            }
-            let msg_key = change_msg_key(SERVER_HOST.as_str(), self.msg_key.clone());
-            Ok((
-                get_tcp_proxy_stream(
-                    self.host.as_str(),
-                    self.port,
-                    &SERVER_HOST,
-                    *SERVER_PORT,
-                    msg_key.clone(),
-                    "[PROXY] we will proxy https",
-                )
-                .await?,
-                true,
+            // Use unified server connection resolution for HTTPS
+            let ServerConnection {
+                stream,
+                need_proxy,
                 msg_key,
-            ))
+            } = resolve_server_connection(
+                self.host.as_str(),
+                self.port,
+                context.sender,
+                self.msg_key.clone(),
+            )
+            .await?;
+
+            Ok((stream, need_proxy, msg_key))
         }
     }
 }

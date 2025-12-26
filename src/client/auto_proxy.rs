@@ -1,3 +1,48 @@
+//! Automatic proxy decision based on IP geolocation.
+//!
+//! This module provides geo-based routing decisions by querying ip-api.com
+//! to determine whether traffic should be proxied or connected directly.
+//!
+//! # Decision Flow
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────┐
+//! │                    Auto-Proxy Decision Flow                             │
+//! │                                                                         │
+//! │  Host Request ──► Check Local Cache ──► Cache Hit? ──► Return Result   │
+//! │                          │                   │                          │
+//! │                          │ No                │ Yes                      │
+//! │                          ▼                   │                          │
+//! │                   Query ip-api.com ◄─────────┘                         │
+//! │                          │                                              │
+//! │                          ▼                                              │
+//! │                   Parse Country Code                                    │
+//! │                          │                                              │
+//! │              ┌───────────┴───────────┐                                 │
+//! │              ▼                       ▼                                  │
+//! │         CN (China)            US/SG/TW/HK/JP/IN                        │
+//! │              │                       │                                  │
+//! │              ▼                       ▼                                  │
+//! │         Direct Connect          Use Proxy                              │
+//! │              │                       │                                  │
+//! │              └───────────┬───────────┘                                 │
+//! │                          ▼                                              │
+//! │                   Update Cache File                                     │
+//! │                   (WAL for persistence)                                 │
+//! └─────────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! # Concurrency Control
+//!
+//! When multiple requests arrive for the same host simultaneously, only one
+//! HTTP request is made to ip-api.com. Other requests wait for the result
+//! via broadcast channel, preventing duplicate API calls.
+//!
+//! # Cache Files
+//!
+//! - `~/.http2-config-proxy.txt`: Hosts that should use proxy
+//! - `~/.http2-config-non-proxy.txt`: Hosts that should connect directly
+
 use std::env;
 use std::num::ParseIntError;
 use std::path::Path;

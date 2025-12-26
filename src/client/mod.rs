@@ -1,3 +1,51 @@
+//! Client-side proxy implementation.
+//!
+//! This module provides the client-side proxy functionality, supporting both
+//! HTTP/HTTPS and SOCKS5 protocols. The client listens on a local port and
+//! forwards traffic to the remote proxy server.
+//!
+//! # Architecture
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────┐
+//! │                        Client Architecture                              │
+//! │                                                                         │
+//! │  Browser/App ──► Local Proxy (1080) ──► Protocol Handler ──► Server    │
+//! │                         │                     │                         │
+//! │                         ▼                     ▼                         │
+//! │                  ┌─────────────┐      ┌─────────────┐                  │
+//! │                  │ HTTP/HTTPS  │      │   SOCKS5    │                  │
+//! │                  │   Handler   │      │   Handler   │                  │
+//! │                  └─────────────┘      └─────────────┘                  │
+//! │                         │                     │                         │
+//! │                         └──────────┬─────────┘                         │
+//! │                                    ▼                                    │
+//! │                           ┌─────────────────┐                          │
+//! │                           │  Auto-Proxy     │                          │
+//! │                           │  Decision       │                          │
+//! │                           └─────────────────┘                          │
+//! │                                    │                                    │
+//! │                         ┌──────────┴──────────┐                        │
+//! │                         ▼                     ▼                         │
+//! │                   Direct Connect        Proxy Server                   │
+//! │                   (CN traffic)          (Foreign)                      │
+//! └─────────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! # Protocol Support
+//!
+//! - **HTTP**: Plain HTTP requests are forwarded directly or through proxy
+//! - **HTTPS**: CONNECT method establishes encrypted tunnel
+//! - **SOCKS5**: Full SOCKS5 protocol with IPv4/IPv6/domain support
+//!
+//! # Auto-Proxy Feature
+//!
+//! When the `auto-proxy` feature is enabled, the client automatically decides
+//! whether to use the proxy based on the destination's geographic location:
+//!
+//! - **Direct**: CN (China) traffic
+//! - **Proxy**: US, SG, TW, HK, JP, IN traffic
+
 #[cfg(feature = "auto-proxy")]
 pub mod auto_proxy;
 pub mod http;
@@ -45,9 +93,9 @@ pub enum ClientError {
     #[snafu(display("URI(`{uri}`) Encryption error occur,detail:{detail}"))]
     Encryption { uri: String, detail: String },
     #[snafu(display("URI(`{uri}`) Send header error"))]
-    SendHeader { uri: String, source: crate::Error },
+    SendHeader { uri: String, source: crate::ProxyError },
     #[snafu(display("URI(`{uri}`) Proxy error happen"))]
-    Proxy { uri: String, source: crate::Error },
+    Proxy { uri: String, source: crate::ProxyError },
     #[cfg(feature = "auto-proxy")]
     #[snafu(display("URI(`{uri}`) Send item for auto proxy error"))]
     SendAutoProxy {
@@ -175,6 +223,109 @@ pub struct TcpForwardImpl {
     server_reader: TcpAsyncReader,
     server_writer: TcpAsyncWriter,
 }
+
+// ============================================================================
+// Common Helper Functions
+// ============================================================================
+
+/// Splits a TcpStream into async reader and writer.
+///
+/// This is a convenience function that wraps the stream splitting
+/// and adapter creation into a single call.
+#[inline]
+pub fn split_and_wrap(stream: TcpStream) -> (TcpAsyncReader, TcpAsyncWriter) {
+    let (r, w) = stream.into_split();
+    (AsyncReader::new(r), AsyncWriter::new(w))
+}
+
+/// Result of server connection resolution.
+///
+/// Encapsulates the connection state after proxy decision,
+/// including the established stream and routing information.
+pub struct ServerConnection {
+    /// The established TCP connection to the server (direct or proxy).
+    pub stream: TcpStream,
+    /// Whether the connection goes through the proxy server.
+    pub need_proxy: bool,
+    /// Optional session encryption key.
+    pub msg_key: Option<Cow<'static, str>>,
+}
+
+/// Resolves server connection based on proxy rules.
+///
+/// This function unifies the connection establishment logic for both
+/// HTTP and SOCKS5 protocols. It handles:
+///
+/// 1. Auto-proxy decision (if enabled)
+/// 2. Direct connection for non-proxy hosts
+/// 3. Proxy connection through configured server
+///
+/// # Arguments
+///
+/// * `host` - Target hostname or IP
+/// * `port` - Target port
+/// * `sender` - Channel for auto-proxy queries
+/// * `msg_key` - Optional pre-configured session key
+///
+/// # Returns
+///
+/// A `ServerConnection` containing the established stream and routing info.
+#[cfg(feature = "auto-proxy")]
+pub async fn resolve_server_connection(
+    host: &str,
+    port: u16,
+    sender: &SenderChan,
+    msg_key: Option<Cow<'static, str>>,
+) -> Result<ServerConnection> {
+    use crate::config::{SERVER_HOST, SERVER_PORT};
+
+    match need_proxy(host, port, sender).await? {
+        ProxyStatus::NorlmalProxy => {}
+        ProxyStatus::NoProxy(detail) => {
+            return Ok(ServerConnection {
+                stream: get_tcp_stream(host, port, detail).await?,
+                need_proxy: false,
+                msg_key,
+            });
+        }
+        ProxyStatus::NeedSpecialProxy(proxy_server) => {
+            let msg_key = change_msg_key(proxy_server.as_str(), msg_key);
+            return Ok(ServerConnection {
+                stream: get_tcp_proxy_stream(
+                    host,
+                    port,
+                    &proxy_server,
+                    *SERVER_PORT,
+                    msg_key.clone(),
+                    "[PROXY] special proxy",
+                )
+                .await?,
+                need_proxy: true,
+                msg_key,
+            });
+        }
+    }
+
+    // Default: use normal proxy
+    let msg_key = change_msg_key(SERVER_HOST.as_str(), msg_key);
+    Ok(ServerConnection {
+        stream: get_tcp_proxy_stream(
+            host,
+            port,
+            &SERVER_HOST,
+            *SERVER_PORT,
+            msg_key.clone(),
+            "[PROXY] default proxy",
+        )
+        .await?,
+        need_proxy: true,
+        msg_key,
+    })
+}
+
+// ============================================================================
+// URI and Proxy Status
+// ============================================================================
 
 #[inline]
 pub fn get_uri(host: impl AsRef<str>, port: u16) -> String {

@@ -1,36 +1,70 @@
+//! Stream codecs for proxy data transformation.
+//!
+//! This module provides streaming codecs that handle reading, optional
+//! encryption/decryption, and writing of proxy data.
+//!
+//! # Codec Types
+//!
+//! - [`AsyncNormalCodec`]: Plain passthrough with dynamic buffer sizing
+//! - [`AsyncEncryptCodec`]: Encrypts data before transmission
+//! - [`AsyncDecryptCodec`]: Decrypts received data
+//!
+//! # Data Flow
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────┐
+//! │                    Codec Pipeline                               │
+//! │                                                                 │
+//! │  Source ──► AsyncReader ──► Codec ──► AsyncWriter ──► Dest     │
+//! │                              │                                  │
+//! │                              ▼                                  │
+//! │                    ┌─────────────────┐                         │
+//! │                    │ Normal: pass    │                         │
+//! │                    │ Encrypt: seal   │                         │
+//! │                    │ Decrypt: open   │                         │
+//! │                    └─────────────────┘                         │
+//! └─────────────────────────────────────────────────────────────────┘
+//! ```
+
 use ring::aead::chacha20_poly1305_openssh::TAG_LEN;
 use ring::aead::Tag;
-use snafu::ResultExt;
-use snafu::Snafu;
+use snafu::{ResultExt, Snafu};
 
-use crate::get_data_size;
-use crate::set_data_size;
-use crate::CodecSnafu;
-use crate::DataSize;
-use crate::Decryptor;
-use crate::Encryptor;
-use crate::MyAsyncCodecReader;
-use crate::WriteDataInProxySnafu;
-use crate::{MyAsyncReadExt, MyAsyncWriteExt};
+use crate::crypto::{Decryptor, Encryptor};
+use crate::error::{IoSnafu, ProxyError};
+use crate::protocol::{get_data_size, set_data_size, DataSize};
+use crate::{MyAsyncCodecReader, MyAsyncReadExt, MyAsyncWriteExt};
 
+// ============================================================================
+// Async I/O Wrappers
+// ============================================================================
+
+/// Async reader wrapper for Tokio streams.
 pub struct AsyncReader<T>(T);
+
+/// Async writer wrapper for Tokio streams.
 pub struct AsyncWriter<T>(T);
 
+/// Async reader/writer reference wrapper.
+///
+/// Allows using a single stream for both reading and writing
+/// without splitting ownership.
 pub struct AsyncReaderWriterRef<'a, T>(&'a mut T);
 
-/// For tokio
 #[cfg(feature = "tokio")]
 impl<T: tokio::io::AsyncReadExt + Unpin> AsyncReader<T> {
     pub fn new(reader: T) -> Self {
         Self(reader)
     }
 }
+
 #[cfg(feature = "tokio")]
 impl<T: tokio::io::AsyncWriteExt + Unpin> AsyncWriter<T> {
     pub fn new(writer: T) -> Self {
         Self(writer)
     }
 }
+
 #[cfg(feature = "tokio")]
 impl<'a, T: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin>
     AsyncReaderWriterRef<'a, T>
@@ -40,29 +74,22 @@ impl<'a, T: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin>
     }
 }
 
+// ============================================================================
+// MyAsyncReadExt Implementations
+// ============================================================================
+
 #[cfg(feature = "tokio")]
 impl<T: tokio::io::AsyncReadExt + Send + Unpin + 'static> MyAsyncReadExt for AsyncReader<T> {
-    async fn read_u32(&mut self) -> crate::Result<u32, std::io::Error> {
+    async fn read_u32(&mut self) -> std::result::Result<u32, std::io::Error> {
         self.0.read_u32().await
     }
 
-    async fn read(&mut self, buf: &mut [u8]) -> crate::Result<usize, std::io::Error> {
+    async fn read(&mut self, buf: &mut [u8]) -> std::result::Result<usize, std::io::Error> {
         self.0.read(buf).await
     }
 
-    async fn read_exact(&mut self, buf: &mut [u8]) -> crate::Result<usize, std::io::Error> {
+    async fn read_exact(&mut self, buf: &mut [u8]) -> std::result::Result<usize, std::io::Error> {
         self.0.read_exact(buf).await
-    }
-}
-
-#[cfg(feature = "tokio")]
-impl<T: tokio::io::AsyncWriteExt + Send + Unpin> MyAsyncWriteExt for AsyncWriter<T> {
-    async fn write_u32(&mut self, n: u32) -> crate::Result<(), std::io::Error> {
-        self.0.write_u32(n).await
-    }
-
-    async fn write_all(&mut self, src: &[u8]) -> crate::Result<(), std::io::Error> {
-        self.0.write_all(src).await
     }
 }
 
@@ -70,16 +97,31 @@ impl<T: tokio::io::AsyncWriteExt + Send + Unpin> MyAsyncWriteExt for AsyncWriter
 impl<'a, T: tokio::io::AsyncWriteExt + tokio::io::AsyncReadExt + Send + Unpin> MyAsyncReadExt
     for AsyncReaderWriterRef<'a, T>
 {
-    async fn read_u32(&mut self) -> crate::Result<u32, std::io::Error> {
+    async fn read_u32(&mut self) -> std::result::Result<u32, std::io::Error> {
         self.0.read_u32().await
     }
 
-    async fn read(&mut self, buf: &mut [u8]) -> crate::Result<usize, std::io::Error> {
+    async fn read(&mut self, buf: &mut [u8]) -> std::result::Result<usize, std::io::Error> {
         self.0.read(buf).await
     }
 
-    async fn read_exact(&mut self, buf: &mut [u8]) -> crate::Result<usize, std::io::Error> {
+    async fn read_exact(&mut self, buf: &mut [u8]) -> std::result::Result<usize, std::io::Error> {
         self.0.read_exact(buf).await
+    }
+}
+
+// ============================================================================
+// MyAsyncWriteExt Implementations
+// ============================================================================
+
+#[cfg(feature = "tokio")]
+impl<T: tokio::io::AsyncWriteExt + Send + Unpin> MyAsyncWriteExt for AsyncWriter<T> {
+    async fn write_u32(&mut self, n: u32) -> std::result::Result<(), std::io::Error> {
+        self.0.write_u32(n).await
+    }
+
+    async fn write_all(&mut self, src: &[u8]) -> std::result::Result<(), std::io::Error> {
+        self.0.write_all(src).await
     }
 }
 
@@ -87,24 +129,36 @@ impl<'a, T: tokio::io::AsyncWriteExt + tokio::io::AsyncReadExt + Send + Unpin> M
 impl<'a, T: tokio::io::AsyncWriteExt + tokio::io::AsyncReadExt + Send + Unpin> MyAsyncWriteExt
     for AsyncReaderWriterRef<'a, T>
 {
-    async fn write_u32(&mut self, n: u32) -> crate::Result<(), std::io::Error> {
+    async fn write_u32(&mut self, n: u32) -> std::result::Result<(), std::io::Error> {
         self.0.write_u32(n).await
     }
 
-    async fn write_all(&mut self, src: &[u8]) -> crate::Result<(), std::io::Error> {
+    async fn write_all(&mut self, src: &[u8]) -> std::result::Result<(), std::io::Error> {
         self.0.write_all(src).await
     }
 }
 
+// ============================================================================
+// Codec Error (kept for backward compatibility, may be removed in future)
+// ============================================================================
+
+/// Codec-specific error type.
+///
+/// Retained for backward compatibility. New code should use `ProxyError`.
 #[derive(Debug, Snafu)]
+#[allow(dead_code)]
 pub enum CodecError {
-    #[snafu(display("Normal reader errror"))]
+    #[snafu(display("Normal reader error"))]
     Normal { source: std::io::Error },
-    #[snafu(display("Decrypt error: detail:{detail}"))]
+    #[snafu(display("Decrypt error: {detail}"))]
     Decrypt { detail: String },
-    #[snafu(display("Encrypt error: detail:{detail}"))]
+    #[snafu(display("Encrypt error: {detail}"))]
     Encrypt { detail: String },
 }
+
+// ============================================================================
+// AsyncNormalCodec
+// ============================================================================
 
 /// Dynamic buffer codec for efficient streaming I/O.
 ///
@@ -205,8 +259,7 @@ impl<T: MyAsyncReadExt + Send + Unpin> MyAsyncCodecReader for AsyncNormalCodec<T
             .reader
             .read(&mut self.buffer)
             .await
-            .context(NormalSnafu)
-            .context(CodecSnafu)?;
+            .map_err(|e| ProxyError::CodecRead { source: e })?;
         self.update_need_resize(n);
         Ok(&mut self.buffer[0..n])
     }
@@ -220,14 +273,30 @@ impl<T: MyAsyncReadExt + Send + Unpin> MyAsyncCodecReader for AsyncNormalCodec<T
         if n == 0 {
             return Ok(0);
         }
-        writer.write_all(src).await.context(WriteDataInProxySnafu {
-            detail: "normal write",
+        writer.write_all(src).await.context(IoSnafu {
+            context: "codec",
+            detail: "normal write".to_string(),
         })?;
         Ok(n as DataSize)
     }
 }
 
-/// For decrypt codec
+// ============================================================================
+// AsyncDecryptCodec
+// ============================================================================
+
+/// Decryption codec for encrypted streams.
+///
+/// Reads length-prefixed encrypted data, decrypts it, and returns plaintext.
+///
+/// # Wire Format
+///
+/// ```text
+/// ┌──────────────┬──────────────┬─────────────────────┬────────────────┐
+/// │  Checksum    │   Length     │   Ciphertext        │   Auth Tag     │
+/// │  (4 bytes)   │  (4 bytes)   │    (N bytes)        │  (16 bytes)    │
+/// └──────────────┴──────────────┴─────────────────────┴────────────────┘
+/// ```
 pub struct AsyncDecryptCodec<T, D> {
     codec_normal: AsyncNormalCodec<T>,
     decryptor: D,
@@ -245,26 +314,28 @@ impl<T: MyAsyncReadExt + Unpin, D: Decryptor + Unpin> AsyncDecryptCodec<T, D> {
 impl<T: MyAsyncReadExt + Send + Unpin, D: Decryptor + Send + Unpin + 'static> MyAsyncCodecReader
     for AsyncDecryptCodec<T, D>
 {
-    type Item<'a> = &'a mut[u8]
+    type Item<'a> = &'a mut [u8]
     where
         Self: 'a;
+
     async fn codec(&mut self) -> crate::Result<&mut [u8]> {
         let reader = &mut self.codec_normal.reader;
         let buffer = &mut self.codec_normal.buffer;
+
+        // Read length-prefixed data
         let data_size = get_data_size(reader).await?;
         buffer.resize(data_size as usize, 0);
-        reader
-            .read_exact(buffer)
-            .await
-            .context(WriteDataInProxySnafu {
-                detail: "decrypt_codec:read_exact datasize",
-            })?;
+        reader.read_exact(buffer).await.context(IoSnafu {
+            context: "decrypt_codec",
+            detail: "read_exact".to_string(),
+        })?;
+
+        // Decrypt in-place
         self.decryptor
             .decrypt_with_tag(buffer)
-            .map_err(|e| CodecError::Decrypt {
+            .map_err(|e| ProxyError::CodecDecrypt {
                 detail: format!("{e}"),
             })
-            .context(CodecSnafu)
     }
 
     async fn codec_and_write<W: MyAsyncWriteExt + Send + Unpin>(
@@ -272,17 +343,30 @@ impl<T: MyAsyncReadExt + Send + Unpin, D: Decryptor + Send + Unpin + 'static> My
         writer: &mut W,
     ) -> crate::Result<DataSize> {
         let data = self.codec().await?;
-        writer
-            .write_all(data)
-            .await
-            .context(WriteDataInProxySnafu {
-                detail: "decrypt_write:write data",
-            })?;
+        writer.write_all(data).await.context(IoSnafu {
+            context: "decrypt_write",
+            detail: "write data".to_string(),
+        })?;
         Ok(data.len() as DataSize)
     }
 }
 
-/// For encrypt codec
+// ============================================================================
+// AsyncEncryptCodec
+// ============================================================================
+
+/// Encryption codec for outgoing streams.
+///
+/// Reads plaintext, encrypts it, and writes length-prefixed ciphertext.
+///
+/// # Wire Format
+///
+/// ```text
+/// ┌──────────────┬──────────────┬─────────────────────┬────────────────┐
+/// │  Checksum    │   Length     │   Ciphertext        │   Auth Tag     │
+/// │  (4 bytes)   │  (4 bytes)   │    (N bytes)        │  (16 bytes)    │
+/// └──────────────┴──────────────┴─────────────────────┴────────────────┘
+/// ```
 pub struct AsyncEncryptCodec<T, E> {
     codec_normal: AsyncNormalCodec<T>,
     encryptor: E,
@@ -300,7 +384,7 @@ impl<T: MyAsyncReadExt + Unpin, E: Encryptor + Unpin> AsyncEncryptCodec<T, E> {
 impl<T: MyAsyncReadExt + Send + Unpin, E: Encryptor + Send + Unpin> MyAsyncCodecReader
     for AsyncEncryptCodec<T, E>
 {
-    type Item<'a> = (&'a[u8],Tag)
+    type Item<'a> = (&'a [u8], Tag)
     where
         Self: 'a;
 
@@ -309,13 +393,14 @@ impl<T: MyAsyncReadExt + Send + Unpin, E: Encryptor + Send + Unpin> MyAsyncCodec
         if raw_data.is_empty() {
             return Ok((raw_data, Tag::from([0; TAG_LEN])));
         }
+
+        // Encrypt in-place and get auth tag
         let tag = self
             .encryptor
             .encrypt(raw_data)
-            .map_err(|e| CodecError::Encrypt {
+            .map_err(|e| ProxyError::CodecEncrypt {
                 detail: format!("{}", e),
-            })
-            .context(CodecSnafu)?;
+            })?;
         Ok((raw_data, tag))
     }
 
@@ -327,24 +412,29 @@ impl<T: MyAsyncReadExt + Send + Unpin, E: Encryptor + Send + Unpin> MyAsyncCodec
         if data.is_empty() {
             return Ok(0);
         }
+
+        // Write length prefix, ciphertext, and tag
         let length = (data.len() + tag.as_ref().len()) as DataSize;
         set_data_size(writer, length).await?;
-        writer
-            .write_all(data)
-            .await
-            .context(WriteDataInProxySnafu {
-                detail: "encrypt_write:write data",
-            })?;
-        writer
-            .write_all(tag.as_ref())
-            .await
-            .context(WriteDataInProxySnafu {
-                detail: "encrypt_write:write tag",
-            })?;
+        writer.write_all(data).await.context(IoSnafu {
+            context: "encrypt_write",
+            detail: "write data".to_string(),
+        })?;
+        writer.write_all(tag.as_ref()).await.context(IoSnafu {
+            context: "encrypt_write",
+            detail: "write tag".to_string(),
+        })?;
         Ok(length)
     }
 }
 
+// ============================================================================
+// Copy Function
+// ============================================================================
+
+/// Copies data from a codec reader to a writer until EOF.
+///
+/// Returns the total number of bytes transferred.
 pub async fn copy<R: MyAsyncCodecReader + Send + Unpin, W: MyAsyncWriteExt + Send + Unpin>(
     mut reader: R,
     mut writer: W,
