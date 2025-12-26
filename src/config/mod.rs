@@ -83,11 +83,10 @@ pub static SERVER_HOST: Lazy<String> = Lazy::new(|| match std::env::var("SERVER_
 /// Turly proxy server (ip/addr:port)
 pub static TURELY_PROXY_SERVER: Lazy<Option<String>> =
     Lazy::new(|| match std::env::var("TURELY_PROXY_SERVER") {
-        Ok(s) => Some(s),
-        Err(_) => {
-            tracing::error!(
-                "You are not set `ENV:TURELY_PROXY_SERVER`. You will be used as a real proxy \
-                 server, please be careful about security!"
+        Ok(s) if !s.trim().is_empty() => Some(s),
+        _ => {
+            tracing::info!(
+                "No `ENV:TURELY_PROXY_SERVER` set. Running as real proxy server."
             );
             None
         }
