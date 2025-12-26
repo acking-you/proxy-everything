@@ -32,11 +32,10 @@ async fn main() {
             std::env::set_var("TURELY_PROXY_SERVER", key);
         }
     }
-    tracing::info!(
-        "Start Listening: {}:{} with truly proxy server:{:?}",
-        cli.host,
-        cli.port,
-        cli.turely_proxy_server
-    );
+    let mode = match &cli.turely_proxy_server {
+        Some(upstream) => format!("chain mode -> {}", upstream),
+        None => "direct mode".to_string(),
+    };
+    tracing::info!("Server listening on {}:{} ({})", cli.host, cli.port, mode);
     start_server(cli.host, *SERVER_PORT).await;
 }
