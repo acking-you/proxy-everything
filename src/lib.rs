@@ -182,7 +182,6 @@ pub(crate) trait MyAsyncReadExt {
 
 pub(crate) trait MyAsyncWriteExt {
     async fn write_u32(&mut self, n: u32) -> Result<(), std::io::Error>;
-    async fn write(&mut self, src: &[u8]) -> Result<usize, std::io::Error>;
     async fn write_all(&mut self, src: &[u8]) -> Result<(), std::io::Error>;
 }
 

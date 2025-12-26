@@ -45,7 +45,7 @@ pub trait GracefulShutdownManager {
     where
         F: Future + Send + 'static;
 
-    fn is_cancelled(&self) -> bool;
+    fn cancellation_token(&self) -> CancellationToken;
 }
 
 pub struct GracefulShutdownManagerImpl {
@@ -78,7 +78,7 @@ impl GracefulShutdownManagerImpl {
     pub fn spawn_graceful_signals(&mut self) -> bool {
         macro_rules! fetch_signal {
             ($signal:expr) => {
-                if let Some(sig) = get_signal(SignalKind::interrupt()) {
+                if let Some(sig) = get_signal($signal) {
                     sig
                 } else {
                     return false;
@@ -166,7 +166,7 @@ impl GracefulShutdownManager for GracefulShutdownManagerImpl {
         })
     }
 
-    fn is_cancelled(&self) -> bool {
-        self.is_cancel.load(std::sync::atomic::Ordering::Relaxed)
+    fn cancellation_token(&self) -> CancellationToken {
+        self.token.clone()
     }
 }

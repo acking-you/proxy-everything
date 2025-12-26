@@ -48,10 +48,13 @@ const HTTPS_SCHEMA: &str = "https://";
 fn extract_host_uri(uri: &str, default_port: u16) -> Result<(&str, u16)> {
     let mut parts = uri.split(':');
     let host = parts.next().context(HostSnafu { uri })?;
-    let port = parts
-        .next()
-        .map(|port| port.trim().parse::<u16>().unwrap_or(default_port))
-        .unwrap_or(default_port);
+    let port = match parts.next() {
+        Some(port_str) => port_str
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| HttpProxyError::Port { uri: uri.to_string() })?,
+        None => default_port,
+    };
     Ok((host, port))
 }
 

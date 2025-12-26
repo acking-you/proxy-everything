@@ -61,10 +61,6 @@ impl<T: tokio::io::AsyncWriteExt + Send + Unpin> MyAsyncWriteExt for AsyncWriter
         self.0.write_u32(n).await
     }
 
-    async fn write(&mut self, src: &[u8]) -> crate::Result<usize, std::io::Error> {
-        self.0.write(src).await
-    }
-
     async fn write_all(&mut self, src: &[u8]) -> crate::Result<(), std::io::Error> {
         self.0.write_all(src).await
     }
@@ -95,59 +91,6 @@ impl<'a, T: tokio::io::AsyncWriteExt + tokio::io::AsyncReadExt + Send + Unpin> M
         self.0.write_u32(n).await
     }
 
-    async fn write(&mut self, src: &[u8]) -> crate::Result<usize, std::io::Error> {
-        self.0.write(src).await
-    }
-
-    async fn write_all(&mut self, src: &[u8]) -> crate::Result<(), std::io::Error> {
-        self.0.write_all(src).await
-    }
-}
-
-/// For monoio
-#[cfg(feature = "monoio")]
-impl<T: monoio::io::AsyncReadRentExt + Unpin> AsyncReader<T> {
-    pub fn new(reader: T) -> Self {
-        Self(reader)
-    }
-}
-#[cfg(feature = "monoio")]
-impl<T: monoio::io::AsyncBufRead + monoio::io::AsyncReadRentExt + Unpin> AsyncWriter<T> {
-    pub fn new(writer: T) -> Self {
-        Self(writer)
-    }
-}
-
-#[cfg(feature = "monoio")]
-impl<T: monoio::io::AsyncBufRead + monoio::io::AsyncBufReadExt + Unpin + 'static> MyAsyncReadExt
-    for AsyncReader<T>
-{
-    async fn read_u32(&mut self) -> crate::Result<u32, std::io::Error> {
-        self.0.read(buf).await
-    }
-
-    async fn read(&mut self, buf: &mut [u8]) -> crate::Result<usize, std::io::Error> {
-        let buf = Vec::with_capacity(10);
-        let buf_mut = &mut buf;
-        let (sz, _) = self.0.read(buf_mut).await;
-        sz
-    }
-
-    async fn read_exact(&mut self, buf: &mut [u8]) -> crate::Result<usize, std::io::Error> {
-        self.0.read_exact(buf).await
-    }
-}
-
-#[cfg(feature = "monoio")]
-impl<T: tokio::io::AsyncWriteExt + Unpin> MyAsyncWriteExt for AsyncWriter<T> {
-    async fn write_u32(&mut self, n: u32) -> crate::Result<(), std::io::Error> {
-        self.0.write_u32(n).await
-    }
-
-    async fn write(&mut self, src: &[u8]) -> crate::Result<usize, std::io::Error> {
-        self.0.write(src).await
-    }
-
     async fn write_all(&mut self, src: &[u8]) -> crate::Result<(), std::io::Error> {
         self.0.write_all(src).await
     }
@@ -163,16 +106,48 @@ pub enum CodecError {
     Encrypt { detail: String },
 }
 
+/// Dynamic buffer codec for efficient streaming I/O.
+///
+/// This codec implements an adaptive buffer sizing strategy to balance memory usage
+/// and performance. The buffer automatically grows when data fills it completely,
+/// and shrinks after consecutive small reads to avoid holding unnecessary memory.
+///
+/// # Buffer Sizing Strategy
+///
+/// ```text
+/// Buffer Size
+///     ^
+/// 8MB |                    ┌─────────────────── MAX_BUF_SIZE
+///     |                   /
+///     |                  /  ← doubles on full buffer
+///     |                 /
+///     |                /
+///     |               /
+///     |              /
+/// 512B|─────────────┴────────────────────────── INIT_BUF_SIZE
+///     |             ↑
+///     |    shrinks to half after 8 consecutive
+///     |    small reads (< 25% capacity)
+///     └──────────────────────────────────────→ Time
+/// ```
+///
+/// - Initial size: 512B (INIT_BUF_SIZE)
+/// - Maximum size: 8MB (MAX_BUF_SIZE)
+/// - Expansion: doubles when buffer is completely filled
+/// - Shrinking: halves after SHRINK_THRESHOLD (8) consecutive small reads
+///
+/// The counter-based shrinking prevents thrashing when data sizes fluctuate.
 pub struct AsyncNormalCodec<T> {
     reader: T,
     buffer: Vec<u8>,
     need_resize: usize,
+    shrink_count: u8,
 }
 
-const INIT_BUF_SIZE: usize = 8 * 1024;
+const INIT_BUF_SIZE: usize = 512;
 const MAX_BUF_SIZE: usize = 8 * 1024 * 1024;
+const SHRINK_THRESHOLD: u8 = 8;
 
-/// For common codec
 impl<T> AsyncNormalCodec<T>
 where
     T: MyAsyncReadExt + Unpin,
@@ -182,6 +157,7 @@ where
             reader,
             buffer: vec![0; INIT_BUF_SIZE],
             need_resize: INIT_BUF_SIZE,
+            shrink_count: 0,
         }
     }
 
@@ -197,13 +173,21 @@ where
 
     #[inline]
     fn update_need_resize(&mut self, n: usize) {
-        //扩容
         if n == self.buffer.len() {
+            // Buffer full: double the size for next read
             self.need_resize = n * 2;
-        }
-        //缩容
-        else if n != 0 && n < INIT_BUF_SIZE && self.need_resize > INIT_BUF_SIZE {
-            self.need_resize = INIT_BUF_SIZE;
+            self.shrink_count = 0;
+        } else if n != 0 && n < self.buffer.len() / 4 && self.buffer.len() > INIT_BUF_SIZE {
+            // Small read (< 25% capacity): increment shrink counter
+            self.shrink_count = self.shrink_count.saturating_add(1);
+            if self.shrink_count >= SHRINK_THRESHOLD {
+                // After consecutive small reads, shrink to half (not directly to minimum)
+                self.need_resize = (self.buffer.len() / 2).max(INIT_BUF_SIZE);
+                self.shrink_count = 0;
+            }
+        } else {
+            // Normal read: reset shrink counter
+            self.shrink_count = 0;
         }
     }
 }

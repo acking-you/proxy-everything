@@ -1,10 +1,5 @@
 use std::fmt::Debug;
 
-#[cfg(feature = "monoio")]
-use monoio::{
-    io::{AsyncReadRentExt, Splitable},
-    net::TcpStream,
-};
 use snafu::{Report, ResultExt, Snafu};
 use tokio::net::TcpListener;
 #[cfg(feature = "tokio")]
@@ -146,23 +141,31 @@ pub async fn start_server(host: impl AsRef<str> + Debug, port: u16) {
         return;
     }
     let mut task_id = ProxyTaskId::new();
+    let cancel_token = manager.cancellation_token();
 
-    while !manager.is_cancelled() {
-        let ret = listener.accept().await;
-        let (client_socket, _) = match ret {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(accept_error = ?e,info = "pause 3s,and retry again");
-                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-                continue;
+    loop {
+        tokio::select! {
+            ret = listener.accept() => {
+                let (client_socket, _) = match ret {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(accept_error = ?e, info = "pause 3s, and retry again");
+                        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                        continue;
+                    }
+                };
+                manager.spawn(task_id.r#gen(), async move {
+                    if let Err(e) = handle_connect(client_socket).await {
+                        let report = Report::from_error(e).to_string();
+                        tracing::warn!(handle_client_proxy_error = report);
+                    }
+                });
             }
-        };
-
-        manager.spawn(task_id.r#gen(), async move {
-            if let Err(e) = handle_connect(client_socket).await {
-                let report = Report::from_error(e).to_string();
-                tracing::warn!(handle_client_proxy_error = report);
+            _ = cancel_token.cancelled() => {
+                break;
             }
-        });
+        }
     }
+    tracing::info!("graceful shutdown, waiting for tasks to complete...");
+    manager.wait().await;
 }

@@ -102,11 +102,15 @@ async fn get_http_body(stream: TcpStream) -> Result<String> {
             .enumerate()
             .find(|&(_, &c)| c == b':')
             .context(ReadHttpKeySnafu)?;
-        let key = unsafe { std::str::from_utf8_unchecked(&buf[..idx]) }.trim();
+        let key = std::str::from_utf8(&buf[..idx])
+            .map_err(|_| Error::ReadHttpKey)?
+            .trim();
         if idx + 1 >= buf.len() {
             ReadHttpValueSnafu {}.fail()?;
         }
-        let value = unsafe { std::str::from_utf8_unchecked(&buf[idx + 1..]) }.trim();
+        let value = std::str::from_utf8(&buf[idx + 1..])
+            .map_err(|_| Error::ReadHttpValue)?
+            .trim();
         if key == "Content-Length" || key == "content-length" {
             body_length = Some(value.parse::<usize>().context(ContentLengthSnafu)?);
         }
@@ -130,7 +134,7 @@ async fn get_http_body(stream: TcpStream) -> Result<String> {
         .read_exact(&mut buf)
         .await
         .context(ReadHttpBodyWithIOSnafu)?;
-    Ok(unsafe { String::from_utf8_unchecked(buf) })
+    String::from_utf8(buf).context(SerdeUtf8Snafu)
 }
 
 pub async fn get_country_code(host: impl AsRef<str>) -> Result<ProxyStrategy> {
@@ -383,15 +387,18 @@ async fn check_proxy(context: TaskContext) {
         tracing::info!(task_id, host, info = "add host to proxy set");
         wal_tracing(&mut proxy_file, host.as_str()).await;
         wal_tracing(&mut proxy_file, "\n").await;
-        proxy_set.insert(host);
+        let _ = proxy_file.flush().await;
+        proxy_set.insert(host.clone());
     } else {
         let mut non_proxy_set = non_proxy_set.write().await;
         let mut non_proxy_file = non_proxy_file.lock().await;
         tracing::info!(task_id, host, info = "add host to no proxy set");
         wal_tracing(&mut non_proxy_file, host.as_str()).await;
         wal_tracing(&mut non_proxy_file, "\n").await;
-        non_proxy_set.insert(host);
+        let _ = non_proxy_file.flush().await;
+        non_proxy_set.insert(host.clone());
     }
+    tasks.remove(&host);
 }
 
 async fn wal_tracing(file: &mut tokio::fs::File, text: impl AsRef<str>) {

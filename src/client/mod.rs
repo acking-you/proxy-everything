@@ -16,8 +16,6 @@ use tokio::net::TcpListener;
 #[cfg(feature = "tokio")]
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-#[cfg(not(target_os = "windows"))]
-use tokio::signal::unix::{Signal, SignalKind, signal};
 
 use self::http::{HttpProxierProvider, HttpProxyError};
 use self::socks::{SocksError, SocksProxierProvider};
@@ -310,6 +308,10 @@ pub async fn get_tcp_proxy_stream(
             detail: e.to_string(),
         })?;
 
+    // SAFETY: We use `as_bytes_mut()` to encrypt the JSON string in-place.
+    // After encryption, the bytes are no longer valid UTF-8, but we only use
+    // `addr` as a byte slice for network transmission (write_all), never as
+    // a String again. The String is dropped after this scope.
     let (addr, tag, len) = unsafe {
         let addr = header_json.as_bytes_mut();
         let tag = cryption
@@ -524,51 +526,8 @@ pub async fn start_client<const NEED_CODEC: bool>(
         tx
     };
 
-    #[cfg(not(target_os = "windows"))]
-    let (mut quit, mut terminate, mut interrupt) = {
-        (
-            signal(SignalKind::quit()).expect("quit signal nerver fails"),
-            signal(SignalKind::terminate()).expect("terminate signal never fails"),
-            signal(SignalKind::interrupt()).expect("interrupt signal never fails"),
-        )
-    };
-
-    #[cfg(target_os = "windows")]
-    async fn wait_signal() {
-        let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("ctrl-c trigger");
-    }
-
-    #[cfg(target_os = "windows")]
-    macro_rules! make_signal {
-        () => {
-            wait_signal()
-        };
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    async fn wait_signal(quit: &mut Signal, terminate: &mut Signal, interrupt: &mut Signal) {
-        tokio::select! {
-            _ = quit.recv()=>{
-                tracing::info!("quit trigger");
-            }
-            _ = terminate.recv()=>{
-                tracing::info!("terminate trigger");
-            }
-            _ = interrupt.recv()=>{
-                tracing::info!("interrupt trigger");
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    macro_rules! make_signal {
-        () => {
-            wait_signal(&mut quit, &mut terminate, &mut interrupt)
-        };
-    }
-
-    while !manager.is_cancelled() {
+    let cancel_token = manager.cancellation_token();
+    loop {
         tokio::select! {
             ret = listener.accept() => {
                 let (stream, _) = ret.context(IoSnafu {
@@ -589,12 +548,12 @@ pub async fn start_client<const NEED_CODEC: bool>(
                 });
                 manager.spawn(proxy_id.r#gen(), background_task);
             }
-            _ = make_signal!() =>{
-                tracing::info!("graceful shutdown!");
-                return Ok(());
+            _ = cancel_token.cancelled() => {
+                break;
             }
         }
     }
+    tracing::info!("graceful shutdown, waiting for tasks to complete...");
     manager.wait().await;
     Ok(())
 }
