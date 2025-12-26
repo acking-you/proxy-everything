@@ -50,6 +50,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Build http-proxy-server
         uses: actions-rs/cargo@v1
