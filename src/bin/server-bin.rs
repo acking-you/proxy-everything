@@ -15,12 +15,7 @@ struct Cli {
     /// [optional] When this option is enabled,
     /// the service will perform an additional layer of transparent forwarding to the specified
     /// server.
-    #[arg(
-        short,
-        long,
-        value_name = "TURELY_PROXY_SERVER",
-        default_value = "None"
-    )]
+    #[arg(short, long, value_name = "TURELY_PROXY_SERVER")]
     turely_proxy_server: Option<String>,
 }
 
