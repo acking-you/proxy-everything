@@ -34,7 +34,8 @@ Configure system proxy to `127.0.0.1:7890` and you're done.
 
 ## Documentation
 
-- [Server Deployment](docs/server-deployment.md) - Docker, binary, environment variables
+- [Server Deployment (Docker)](docs/server-deployment.md) - Docker deployment guide
+- [Server Deployment (Systemd)](docs/systemd-deployment.md) - Binary + systemd deployment
 - [Client Usage](docs/client-usage.md) - Windows, Linux, macOS, Android, iOS
 
 ## Features
