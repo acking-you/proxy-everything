@@ -1,17 +1,21 @@
 FROM debian:testing-slim
 
-# 设置工作目录
+ARG TARGETARCH
+
 WORKDIR /http2-server
 
 RUN mkdir conf
 
 ENV HOME=/http2-server/conf
 
-# 打包可执行文件
-COPY ./target/release/http-proxy-server .
+# Server port (default: 1081)
+ENV SERVER_PORT=1081
 
-# 指定程序启动命令
+# Transparent proxy target (optional, enables chain mode)
+# ENV TURELY_PROXY_SERVER=
+
+COPY ./linux-${TARGETARCH}/http-proxy-server .
+
 CMD ["./http-proxy-server"]
 
-# 代理服务器的端口
 EXPOSE 1081

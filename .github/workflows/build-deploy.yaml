@@ -150,3 +150,55 @@ jobs:
             ${{ env.SERVER_ASSET }}
             ${{ env.CLIENT_ASSET }}
             ${{ env.CLI_ASSET }}
+
+  docker-build:
+    name: Build and push Docker image
+    runs-on: ubuntu-latest
+    needs: build-and-deploy
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Get version from tag
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Download x86_64 binary
+        run: |
+          gh release download ${{ env.VERSION }} -p "http-proxy-server-*-x86_64-unknown-linux-musl.tar.gz"
+          tar -xzf http-proxy-server-*-x86_64-unknown-linux-musl.tar.gz
+          mkdir -p docker/linux-amd64
+          mv http-proxy-server-*/http-proxy-server docker/linux-amd64/
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Download aarch64 binary
+        run: |
+          gh release download ${{ env.VERSION }} -p "http-proxy-server-*-aarch64-unknown-linux-musl.tar.gz"
+          tar -xzf http-proxy-server-*-aarch64-unknown-linux-musl.tar.gz
+          mkdir -p docker/linux-arm64
+          mv http-proxy-server-*/http-proxy-server docker/linux-arm64/
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./docker
+          file: ./docker/http2-server.dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ackingliu/http2-server:${{ env.VERSION }}
+            ackingliu/http2-server:latest
