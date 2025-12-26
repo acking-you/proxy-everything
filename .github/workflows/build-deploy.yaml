@@ -50,11 +50,6 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        # Arguments to pass in
-        with:
-          # Make Rust compile to our target (defined in the matrix)
-          toolchain: 1.87.0
-          targets: ${{ matrix.target }}
 
       - name: Build http-proxy-server
         uses: actions-rs/cargo@v1
