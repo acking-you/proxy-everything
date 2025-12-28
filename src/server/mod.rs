@@ -830,7 +830,7 @@ pub async fn run_server_with_listener(
                         let ctx = ctx.clone();
                         let task = async move {
                             if let Err(e) = handle_connect(socket, peer_addr, ctx).await {
-                                tracing::debug!("connection error: {e}");
+                                tracing::error!("connection error: {e}");
                             }
                         };
                         if let Some(ref t) = tracker {
