@@ -1,7 +1,7 @@
 //! Proxy admin CLI for control plane operations.
 
 use clap::{Parser, Subcommand};
-use http_proxy::config::{CONTROL_SESSION_KEY, SERVER_PORT};
+use http_proxy::config::{CONTROL_SESSION_KEY, DEFAULT_SECRET_KEY, SERVER_PORT};
 use http_proxy::control::{ControlClient, ControlOp, ControlRequest};
 use http_proxy::metrics::{Granularity, TopCategory};
 use mimalloc_rust::GlobalMiMalloc;
@@ -90,7 +90,8 @@ async fn main() {
     let session_key = cli
         .session_key
         .or_else(|| (*CONTROL_SESSION_KEY).clone())
-        .or_else(|| std::env::var("SECRET_KEY").ok());
+        .or_else(|| std::env::var("SECRET_KEY").ok())
+        .or_else(|| Some(DEFAULT_SECRET_KEY.to_string()));
     let mut client =
         match ControlClient::connect(&cli.server_host, cli.server_port, session_key).await {
             Ok(client) => client,

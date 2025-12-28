@@ -59,6 +59,18 @@ pub struct ConnectionRecord {
     pub error: Option<String>,
 }
 
+/// System-level statistics for update.
+#[derive(Debug, Clone, Default)]
+pub struct SystemStats {
+    pub cpu_percent: f32,
+    pub memory_used: u64,
+    pub memory_total: u64,
+    pub disk_read_bytes: u64,
+    pub disk_write_bytes: u64,
+    pub disk_used: u64,
+    pub disk_total: u64,
+}
+
 /// Time bucket for aggregated metrics.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TimeBucket {
@@ -103,14 +115,27 @@ pub struct TrafficStats {
 #[derive(Debug, Default)]
 pub struct RealtimeStats {
     pub active_connections: AtomicU64,
+    // Process-level stats
     pub cpu_percent_x100: AtomicU32,
     pub memory_bytes: AtomicU64,
     pub started_at_ms: AtomicU64,
+    // System-level stats
+    pub sys_cpu_percent_x100: AtomicU32,
+    pub sys_memory_used: AtomicU64,
+    pub sys_memory_total: AtomicU64,
+    pub sys_disk_read_bytes: AtomicU64,
+    pub sys_disk_write_bytes: AtomicU64,
+    pub sys_disk_used: AtomicU64,
+    pub sys_disk_total: AtomicU64,
 }
 
 impl RealtimeStats {
     pub fn cpu_percent(&self) -> f32 {
         self.cpu_percent_x100.load(Ordering::Relaxed) as f32 / 100.0
+    }
+
+    pub fn sys_cpu_percent(&self) -> f32 {
+        self.sys_cpu_percent_x100.load(Ordering::Relaxed) as f32 / 100.0
     }
 
     pub fn uptime_secs(&self) -> u64 {
@@ -127,6 +152,21 @@ pub struct RealtimeSnapshot {
     pub cpu_percent: f32,
     pub memory_bytes: u64,
     pub uptime_secs: u64,
+    // System-level stats
+    #[serde(default)]
+    pub sys_cpu_percent: f32,
+    #[serde(default)]
+    pub sys_memory_used: u64,
+    #[serde(default)]
+    pub sys_memory_total: u64,
+    #[serde(default)]
+    pub sys_disk_read_bytes: u64,
+    #[serde(default)]
+    pub sys_disk_write_bytes: u64,
+    #[serde(default)]
+    pub sys_disk_used: u64,
+    #[serde(default)]
+    pub sys_disk_total: u64,
 }
 
 impl From<&RealtimeStats> for RealtimeSnapshot {
@@ -136,6 +176,13 @@ impl From<&RealtimeStats> for RealtimeSnapshot {
             cpu_percent: stats.cpu_percent(),
             memory_bytes: stats.memory_bytes.load(Ordering::Relaxed),
             uptime_secs: stats.uptime_secs(),
+            sys_cpu_percent: stats.sys_cpu_percent(),
+            sys_memory_used: stats.sys_memory_used.load(Ordering::Relaxed),
+            sys_memory_total: stats.sys_memory_total.load(Ordering::Relaxed),
+            sys_disk_read_bytes: stats.sys_disk_read_bytes.load(Ordering::Relaxed),
+            sys_disk_write_bytes: stats.sys_disk_write_bytes.load(Ordering::Relaxed),
+            sys_disk_used: stats.sys_disk_used.load(Ordering::Relaxed),
+            sys_disk_total: stats.sys_disk_total.load(Ordering::Relaxed),
         }
     }
 }
@@ -416,14 +463,39 @@ impl MetricsStore {
         RealtimeSnapshot::from(&self.realtime)
     }
 
-    /// Update system stats (call periodically).
-    pub fn update_system_stats(&self, cpu_percent: f32, memory_bytes: u64) {
+    /// Update process-level stats (call periodically).
+    pub fn update_process_stats(&self, cpu_percent: f32, memory_bytes: u64) {
         self.realtime
             .cpu_percent_x100
             .store((cpu_percent * 100.0) as u32, Ordering::Relaxed);
         self.realtime
             .memory_bytes
             .store(memory_bytes, Ordering::Relaxed);
+    }
+
+    /// Update system-level stats (call periodically).
+    pub fn update_system_stats(&self, stats: SystemStats) {
+        self.realtime
+            .sys_cpu_percent_x100
+            .store((stats.cpu_percent * 100.0) as u32, Ordering::Relaxed);
+        self.realtime
+            .sys_memory_used
+            .store(stats.memory_used, Ordering::Relaxed);
+        self.realtime
+            .sys_memory_total
+            .store(stats.memory_total, Ordering::Relaxed);
+        self.realtime
+            .sys_disk_read_bytes
+            .store(stats.disk_read_bytes, Ordering::Relaxed);
+        self.realtime
+            .sys_disk_write_bytes
+            .store(stats.disk_write_bytes, Ordering::Relaxed);
+        self.realtime
+            .sys_disk_used
+            .store(stats.disk_used, Ordering::Relaxed);
+        self.realtime
+            .sys_disk_total
+            .store(stats.disk_total, Ordering::Relaxed);
     }
 
     /// Increment active connections.

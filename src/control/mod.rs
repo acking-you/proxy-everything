@@ -358,6 +358,42 @@ impl ControlClient {
             _ => Ok(vec![]),
         }
     }
+
+    pub async fn add_node(&mut self, token: Option<String>, addr: String) -> Result<()> {
+        let resp = self
+            .request(ControlRequest {
+                token,
+                op: ControlOp::AddNode { addr },
+            })
+            .await?;
+        if resp.ok {
+            Ok(())
+        } else {
+            Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: resp.error.unwrap_or_else(|| "add node failed".to_string()),
+                },
+            })
+        }
+    }
+
+    pub async fn remove_node(&mut self, token: Option<String>, node_id: String) -> Result<()> {
+        let resp = self
+            .request(ControlRequest {
+                token,
+                op: ControlOp::RemoveNode { node_id },
+            })
+            .await?;
+        if resp.ok {
+            Ok(())
+        } else {
+            Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: resp.error.unwrap_or_else(|| "remove node failed".to_string()),
+                },
+            })
+        }
+    }
 }
 
 pub fn is_control_target(host: &str, port: u16) -> bool {

@@ -750,20 +750,59 @@ pub async fn run_server_with_listener(
 ) {
     config.metrics.init_realtime();
 
-    // Spawn system stats collector (every 60s) with cancellation support
+    // Spawn system stats collector (every 5s) with cancellation support
     let metrics_for_stats = config.metrics.clone();
     let stats_cancel = cancel_token.clone();
     tokio::spawn(async move {
-        use sysinfo::{Pid, ProcessesToUpdate, System};
+        use crate::metrics::SystemStats;
+        use sysinfo::{Disks, Pid, ProcessesToUpdate, System};
         let pid = Pid::from_u32(std::process::id());
-        let mut sys = System::new();
+        let mut sys = System::new_all();
+        let mut disks = Disks::new_with_refreshed_list();
+        // Initial refresh for CPU baseline
+        sys.refresh_cpu_all();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         loop {
             tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                    // Refresh process stats
                     sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
                     if let Some(proc) = sys.process(pid) {
-                        metrics_for_stats.update_system_stats(proc.cpu_usage(), proc.memory());
+                        metrics_for_stats.update_process_stats(proc.cpu_usage(), proc.memory());
                     }
+
+                    // Refresh system stats
+                    sys.refresh_cpu_all();
+                    sys.refresh_memory();
+                    disks.refresh();
+
+                    // Calculate system CPU (average of all cores)
+                    let cpu_percent = sys.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>()
+                        / sys.cpus().len().max(1) as f32;
+
+                    // Disk stats (sum of all disks)
+                    let (disk_used, disk_total) = disks.iter().fold((0u64, 0u64), |(used, total), d| {
+                        (used + d.total_space() - d.available_space(), total + d.total_space())
+                    });
+
+                    // Disk IO (cumulative, from /proc/diskstats on Linux)
+                    let (disk_read, disk_write) = sys.processes()
+                        .get(&pid)
+                        .map(|p| {
+                            let disk = p.disk_usage();
+                            (disk.total_read_bytes, disk.total_written_bytes)
+                        })
+                        .unwrap_or((0, 0));
+
+                    metrics_for_stats.update_system_stats(SystemStats {
+                        cpu_percent,
+                        memory_used: sys.used_memory(),
+                        memory_total: sys.total_memory(),
+                        disk_read_bytes: disk_read,
+                        disk_write_bytes: disk_write,
+                        disk_used,
+                        disk_total,
+                    });
                 }
                 _ = stats_cancel.cancelled() => {
                     break;

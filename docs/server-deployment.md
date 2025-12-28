@@ -2,7 +2,31 @@
 
 > **Important**: Before deployment, open port `1081` (or your custom port) in your cloud provider's security group / firewall settings.
 
-## Docker (Recommended)
+## Quick Start with Management Script (Recommended)
+
+```bash
+# Download script
+curl -fsSL https://raw.githubusercontent.com/acking-you/proxy-everything/dev/scripts/proxy-ctl.sh -o /usr/local/bin/proxy-ctl
+chmod +x /usr/local/bin/proxy-ctl
+
+# Initialize config (optional, uses defaults if skipped)
+proxy-ctl init
+
+# Start server (uses default SECRET_KEY)
+proxy-ctl start
+
+# Update to latest version
+proxy-ctl update
+
+# Other commands
+proxy-ctl status    # Check status
+proxy-ctl logs 100  # View last 100 lines
+proxy-ctl stop      # Stop server
+```
+
+Config file location: `/etc/proxy-server.conf`
+
+## Docker (Manual)
 
 ### Quick Start (Ubuntu/Debian)
 
@@ -10,8 +34,12 @@
 # Install Docker (skip if already installed)
 curl -fsSL https://get.docker.com | sh
 
+# Create data directory (for persistence)
+mkdir -p /opt/proxy-data
+
 # Deploy proxy server (replace YOUR_SECRET_KEY with a 32-char string)
 docker run -d --name proxy-server --restart=always -p 1081:1081 \
+  -v /opt/proxy-data:/root/.proxy-everything \
   -e SECRET_KEY=YOUR_SECRET_KEY \
   ackingliu/http2-server:latest
 ```
@@ -23,8 +51,12 @@ docker run -d --name proxy-server --restart=always -p 1081:1081 \
 curl -fsSL https://get.docker.com | sh
 systemctl start docker && systemctl enable docker
 
+# Create data directory
+mkdir -p /opt/proxy-data
+
 # Deploy
 docker run -d --name proxy-server --restart=always -p 1081:1081 \
+  -v /opt/proxy-data:/root/.proxy-everything \
   -e SECRET_KEY=YOUR_SECRET_KEY \
   ackingliu/http2-server:latest
 ```
@@ -110,3 +142,48 @@ docker run -d --name proxy-server --restart=always -p 1081:1081 \
   -e SECRET_KEY=YOUR_CORRECT_KEY \
   ackingliu/http2-server:latest
 ```
+
+## Remote Update (Pull New Image & Restart)
+
+Update container to latest image with minimal downtime (~1-3 seconds):
+
+```bash
+# Using management script (recommended)
+proxy-ctl update
+
+# Or manual one-liner
+docker pull ackingliu/http2-server:latest && \
+docker stop proxy-server && \
+docker rm proxy-server && \
+docker run -d --name proxy-server --restart=always -p 1081:1081 \
+  -v /opt/proxy-data:/root/.proxy-everything \
+  -e SECRET_KEY=my-secret-key123my-secret-key123 \
+  ackingliu/http2-server:latest
+```
+
+### Remote Update via SSH
+
+```bash
+# Using script (if installed on server)
+ssh user@your-server "proxy-ctl update"
+
+# Or direct command
+ssh user@your-server "docker pull ackingliu/http2-server:latest && \
+  docker stop proxy-server && docker rm proxy-server && \
+  docker run -d --name proxy-server --restart=always -p 1081:1081 \
+  -v /opt/proxy-data:/root/.proxy-everything \
+  -e SECRET_KEY=my-secret-key123my-secret-key123 ackingliu/http2-server:latest"
+```
+
+## Data Persistence
+
+The server stores data in `/root/.proxy-everything/` inside the container:
+- `nodes.json` - Cluster node information
+
+Mount a host directory to preserve data across container restarts:
+
+```bash
+-v /opt/proxy-data:/root/.proxy-everything
+```
+
+Without this mount, node data will be lost when container is removed.

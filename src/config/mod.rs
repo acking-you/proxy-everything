@@ -134,9 +134,12 @@ pub static NODE_SYNC_INTERVAL_SECS: Lazy<u64> = Lazy::new(|| {
         .unwrap_or(30)
 });
 
+/// Default secret key (32 bytes) used when SECRET_KEY env is not set
+pub const DEFAULT_SECRET_KEY: &str = "my-secret-key123my-secret-key123";
+
 // 256-bit key,must be 256/8 = 32 byte key and hashcode
 pub static DEFAULT_KEY: Lazy<(Vec<u8>, u32)> = Lazy::new(|| {
-    let default_key = "my-secret-key123my-secret-key123";
+    let default_key = DEFAULT_SECRET_KEY;
     let key = match std::env::var("SECRET_KEY") {
         Ok(k) => {
             let key = k.as_bytes();
