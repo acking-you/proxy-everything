@@ -10,12 +10,12 @@ struct Cli {
     #[arg(short = 'H', long, value_name = "SERVER_HOST", default_value = "0.0.0.0")]
     host: String,
     /// [optional] Port number(uses port 1081 by default)
-    #[arg(short, long, value_name = "SERVER_PORT", default_value = "1081")]
+    #[arg(short, long, value_name = "SERVER_PORT", default_value = "1081", env = "SERVER_PORT")]
     port: u16,
     /// [optional] When this option is enabled,
     /// the service will perform an additional layer of transparent forwarding to the specified
     /// server.
-    #[arg(short, long, value_name = "TURELY_PROXY_SERVER")]
+    #[arg(short, long, value_name = "TURELY_PROXY_SERVER", env = "TURELY_PROXY_SERVER")]
     turely_proxy_server: Option<String>,
 }
 

@@ -14,7 +14,7 @@ case "$INSTANCE" in
     proxy|relay)
         shift
         ;;
-    start|stop|restart|update|logs|status|shell|init|help|--help|-h)
+    start|stop|restart|update|logs|status|shell|init|help|--help|-h|all)
         INSTANCE="proxy"
         ;;
     *)
@@ -27,36 +27,37 @@ case "$INSTANCE" in
         ;;
 esac
 
+# Set instance-specific defaults FIRST (before loading config)
+case "$INSTANCE" in
+    relay)
+        # Relay instance defaults
+        DEFAULT_CONTAINER="proxy-relay"
+        DEFAULT_PORT="11111"
+        DEFAULT_DATA_DIR="/opt/proxy-relay-data"
+        ;;
+    *)
+        # Default proxy instance
+        DEFAULT_CONTAINER="proxy-server"
+        DEFAULT_PORT="1081"
+        DEFAULT_DATA_DIR="/opt/proxy-data"
+        ;;
+esac
+
 # Configuration file per instance
 CONFIG_FILE="${PROXY_CONFIG:-/etc/proxy-${INSTANCE}.conf}"
 
-# Load config if exists
+# Load config if exists (overrides defaults)
 if [ -f "$CONFIG_FILE" ]; then
     source "$CONFIG_FILE"
 fi
 
-# Default configurations per instance
-case "$INSTANCE" in
-    relay)
-        # Relay instance defaults
-        IMAGE="${PROXY_IMAGE:-ackingliu/http2-server:latest}"
-        CONTAINER="${PROXY_CONTAINER:-proxy-relay}"
-        PORT="${PROXY_PORT:-11111}"
-        DATA_DIR="${PROXY_DATA_DIR:-/opt/proxy-relay-data}"
-        SECRET_KEY="${SECRET_KEY:-my-secret-key123my-secret-key123}"
-        # Relay mode requires TURELY_PROXY_SERVER to be set
-        TURELY_PROXY_SERVER="${TURELY_PROXY_SERVER:-}"
-        ;;
-    *)
-        # Default proxy instance
-        IMAGE="${PROXY_IMAGE:-ackingliu/http2-server:latest}"
-        CONTAINER="${PROXY_CONTAINER:-proxy-server}"
-        PORT="${PROXY_PORT:-1081}"
-        DATA_DIR="${PROXY_DATA_DIR:-/opt/proxy-data}"
-        SECRET_KEY="${SECRET_KEY:-my-secret-key123my-secret-key123}"
-        TURELY_PROXY_SERVER="${TURELY_PROXY_SERVER:-}"
-        ;;
-esac
+# Apply defaults (config file values take precedence)
+IMAGE="${PROXY_IMAGE:-ackingliu/http2-server:latest}"
+CONTAINER="${PROXY_CONTAINER:-$DEFAULT_CONTAINER}"
+PORT="${PROXY_PORT:-$DEFAULT_PORT}"
+DATA_DIR="${PROXY_DATA_DIR:-$DEFAULT_DATA_DIR}"
+SECRET_KEY="${SECRET_KEY:-my-secret-key123my-secret-key123}"
+TURELY_PROXY_SERVER="${TURELY_PROXY_SERVER:-}"
 
 # Colors
 RED='\033[0;31m'
@@ -99,22 +100,24 @@ do_start() {
 
     # Build docker run command
     local mode_info="normal proxy"
-    local extra_env=""
+    local docker_cmd="docker run -d --name $CONTAINER --restart=always"
+    docker_cmd="$docker_cmd -p ${PORT}:${PORT}"
+    docker_cmd="$docker_cmd -v ${DATA_DIR}:/root/.proxy-everything"
+    docker_cmd="$docker_cmd -e SECRET_KEY=$SECRET_KEY"
+    docker_cmd="$docker_cmd -e SERVER_PORT=$PORT"
+
     if [ -n "$TURELY_PROXY_SERVER" ]; then
         mode_info="transparent relay -> $TURELY_PROXY_SERVER"
-        extra_env="-e TURELY_PROXY_SERVER=$TURELY_PROXY_SERVER"
+        docker_cmd="$docker_cmd -e TURELY_PROXY_SERVER=$TURELY_PROXY_SERVER"
     fi
 
+    [ -n "$CONTROL_ADMIN_TOKEN" ] && docker_cmd="$docker_cmd -e CONTROL_ADMIN_TOKEN=$CONTROL_ADMIN_TOKEN"
+    [ -n "$NODE_ADVERTISE_ADDR" ] && docker_cmd="$docker_cmd -e NODE_ADVERTISE_ADDR=$NODE_ADVERTISE_ADDR"
+    docker_cmd="$docker_cmd $IMAGE"
+
     log_info "Starting $CONTAINER on port $PORT in $mode_info mode..."
-    docker run -d --name "$CONTAINER" --restart=always \
-        -p "${PORT}:${PORT}" \
-        -v "${DATA_DIR}:/root/.proxy-everything" \
-        -e SECRET_KEY="$SECRET_KEY" \
-        -e SERVER_PORT="$PORT" \
-        ${extra_env} \
-        ${CONTROL_ADMIN_TOKEN:+-e CONTROL_ADMIN_TOKEN="$CONTROL_ADMIN_TOKEN"} \
-        ${NODE_ADVERTISE_ADDR:+-e NODE_ADVERTISE_ADDR="$NODE_ADVERTISE_ADDR"} \
-        "$IMAGE"
+    log_info "Command: $docker_cmd"
+    eval "$docker_cmd"
 
     log_info "Container started successfully"
     docker ps | grep "$CONTAINER"

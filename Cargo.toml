@@ -18,7 +18,7 @@ tracing-subscriber = { version = "0.3.18", features = [
     "env-filter",
     "fmt",
 ], default-features = true }
-clap = { version = "4.4.8", features = ["derive"], optional = true }
+clap = { version = "4.4.8", features = ["derive", "env"], optional = true }
 rand = "0.8.5"
 hashbrown = { version = "0.14.3", optional = true }
 dashmap = { version = "5.5.3", optional = true }
