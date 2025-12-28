@@ -34,7 +34,10 @@ pub enum ProxyError {
 
     /// I/O error without source (for simple cases).
     #[snafu(display("IO error [{context}]: {detail}"))]
-    IoSimple { context: &'static str, detail: String },
+    IoSimple {
+        context: &'static str,
+        detail: String,
+    },
 
     // ========== Cryptography Errors ==========
     /// Encryption or decryption failure.
@@ -148,7 +151,10 @@ pub enum ProxyError {
 
     /// DNS resolution failed.
     #[snafu(display("Auto-proxy: DNS resolution failed for `{host}`"))]
-    AutoProxyDns { host: String, source: std::io::Error },
+    AutoProxyDns {
+        host: String,
+        source: std::io::Error,
+    },
 
     /// DNS record is empty.
     #[snafu(display("Auto-proxy: empty DNS record"))]

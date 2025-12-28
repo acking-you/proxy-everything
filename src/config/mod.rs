@@ -1,7 +1,7 @@
 use once_cell::sync::Lazy;
 use rand::Rng;
 use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::{fmt, Layer};
+use tracing_subscriber::{Layer, fmt};
 
 pub fn init_tracing() {
     let subcriber = tracing_subscriber::registry().with(
@@ -29,6 +29,16 @@ pub fn gen_random_key() -> String {
         .collect();
 
     random_string
+}
+
+fn parse_bool_env(var: &str, default: bool) -> bool {
+    match std::env::var(var) {
+        Ok(val) => matches!(
+            val.trim().to_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => default,
+    }
 }
 
 /// Port for connect to proxy server
@@ -85,12 +95,44 @@ pub static TURELY_PROXY_SERVER: Lazy<Option<String>> =
     Lazy::new(|| match std::env::var("TURELY_PROXY_SERVER") {
         Ok(s) if !s.trim().is_empty() => Some(s),
         _ => {
-            tracing::info!(
-                "No `ENV:TURELY_PROXY_SERVER` set. Running as real proxy server."
-            );
+            tracing::info!("No `ENV:TURELY_PROXY_SERVER` set. Running as real proxy server.");
             None
         }
     });
+
+/// Control plane admin token (optional). If set, control requests must include it.
+pub static CONTROL_ADMIN_TOKEN: Lazy<Option<String>> =
+    Lazy::new(|| std::env::var("CONTROL_ADMIN_TOKEN").ok());
+
+/// Require encrypted control payloads (default: true).
+pub static CONTROL_REQUIRE_ENCRYPTION: Lazy<bool> =
+    Lazy::new(|| parse_bool_env("CONTROL_REQUIRE_ENCRYPTION", true));
+
+/// Session key for control plane (optional; 32 bytes).
+pub static CONTROL_SESSION_KEY: Lazy<Option<String>> =
+    Lazy::new(|| std::env::var("CONTROL_SESSION_KEY").ok());
+
+/// Advertised address for node sync (e.g., "1.2.3.4:1081").
+pub static NODE_ADVERTISE_ADDR: Lazy<Option<String>> = Lazy::new(|| {
+    std::env::var("NODE_ADVERTISE_ADDR")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+});
+
+/// Optional stable node ID (defaults to NODE_ADVERTISE_ADDR if unset).
+pub static NODE_ID: Lazy<Option<String>> = Lazy::new(|| {
+    std::env::var("NODE_ID")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+});
+
+/// Node sync interval (seconds).
+pub static NODE_SYNC_INTERVAL_SECS: Lazy<u64> = Lazy::new(|| {
+    std::env::var("NODE_SYNC_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(30)
+});
 
 // 256-bit key,must be 256/8 = 32 byte key and hashcode
 pub static DEFAULT_KEY: Lazy<(Vec<u8>, u32)> = Lazy::new(|| {

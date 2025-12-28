@@ -26,13 +26,13 @@
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 
-use ring::aead::chacha20_poly1305_openssh::TAG_LEN;
 use ring::aead::Tag;
+use ring::aead::chacha20_poly1305_openssh::TAG_LEN;
 use snafu::{ResultExt, Snafu};
 
 use crate::crypto::{Decryptor, Encryptor};
 use crate::error::{IoSnafu, ProxyError};
-use crate::protocol::{get_data_size, set_data_size, DataSize};
+use crate::protocol::{DataSize, get_data_size, set_data_size};
 use crate::{MyAsyncCodecReader, MyAsyncReadExt, MyAsyncWriteExt};
 
 // ============================================================================
@@ -123,6 +123,10 @@ impl<T: tokio::io::AsyncWriteExt + Send + Unpin> MyAsyncWriteExt for AsyncWriter
     async fn write_all(&mut self, src: &[u8]) -> std::result::Result<(), std::io::Error> {
         self.0.write_all(src).await
     }
+
+    async fn shutdown(&mut self) -> std::result::Result<(), std::io::Error> {
+        self.0.shutdown().await
+    }
 }
 
 #[cfg(feature = "tokio")]
@@ -135,6 +139,10 @@ impl<'a, T: tokio::io::AsyncWriteExt + tokio::io::AsyncReadExt + Send + Unpin> M
 
     async fn write_all(&mut self, src: &[u8]) -> std::result::Result<(), std::io::Error> {
         self.0.write_all(src).await
+    }
+
+    async fn shutdown(&mut self) -> std::result::Result<(), std::io::Error> {
+        self.0.shutdown().await
     }
 }
 
@@ -247,7 +255,8 @@ where
 }
 
 impl<T: MyAsyncReadExt + Send + Unpin> MyAsyncCodecReader for AsyncNormalCodec<T> {
-    type Item<'a> = &'a mut [u8]
+    type Item<'a>
+        = &'a mut [u8]
     where
         Self: 'a;
 
@@ -314,7 +323,8 @@ impl<T: MyAsyncReadExt + Unpin, D: Decryptor + Unpin> AsyncDecryptCodec<T, D> {
 impl<T: MyAsyncReadExt + Send + Unpin, D: Decryptor + Send + Unpin + 'static> MyAsyncCodecReader
     for AsyncDecryptCodec<T, D>
 {
-    type Item<'a> = &'a mut [u8]
+    type Item<'a>
+        = &'a mut [u8]
     where
         Self: 'a;
 
@@ -384,7 +394,8 @@ impl<T: MyAsyncReadExt + Unpin, E: Encryptor + Unpin> AsyncEncryptCodec<T, E> {
 impl<T: MyAsyncReadExt + Send + Unpin, E: Encryptor + Send + Unpin> MyAsyncCodecReader
     for AsyncEncryptCodec<T, E>
 {
-    type Item<'a> = (&'a [u8], Tag)
+    type Item<'a>
+        = (&'a [u8], Tag)
     where
         Self: 'a;
 

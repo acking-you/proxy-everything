@@ -5,9 +5,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
 use super::{
-    change_msg_key, get_tcp_proxy_stream, get_tcp_stream, resolve_server_connection, split_and_wrap,
     ForwardContext, ForwarderProvider, HeaderContext, ProxyContext, ServerConnection,
-    TcpForwardImpl,
+    TcpForwardImpl, change_msg_key, get_tcp_proxy_stream, get_tcp_stream,
+    resolve_server_connection, split_and_wrap,
 };
 use crate::client::HttpProxySnafu;
 use crate::config::{PROXY_KEYWORDS, SERVER_HOST, SERVER_PORT};
@@ -50,7 +50,9 @@ fn extract_host_uri(uri: &str, default_port: u16) -> Result<(&str, u16)> {
         Some(port_str) => port_str
             .trim()
             .parse::<u16>()
-            .map_err(|_| HttpProxyError::Port { uri: uri.to_string() })?,
+            .map_err(|_| HttpProxyError::Port {
+                uri: uri.to_string(),
+            })?,
         None => default_port,
     };
     Ok((host, port))

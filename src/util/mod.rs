@@ -35,7 +35,6 @@ macro_rules! make_task_id {
     };
 }
 
-make_task_id!(ProxyTaskId);
 make_task_id!(QueryIpTaskId);
 
 pub trait GracefulShutdownManager {
@@ -72,6 +71,10 @@ impl GracefulShutdownManagerImpl {
             token: CancellationToken::new(),
             is_cancel: Arc::new(false.into()),
         }
+    }
+
+    pub fn tracker(&self) -> &TaskTracker {
+        &self.tracker
     }
 
     #[cfg(not(target_env = "msvc"))]

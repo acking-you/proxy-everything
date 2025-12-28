@@ -7,7 +7,7 @@ use mimalloc_rust::GlobalMiMalloc;
 #[command(author = "L_B__", version = "0.1.0")]
 struct Cli {
     /// [optional] 0.0.0.0 or 127.0.0.1 (uses 0.0.0.0 by default)
-    #[arg(short, long, value_name = "SERVER_HOST", default_value = "0.0.0.0")]
+    #[arg(short = 'H', long, value_name = "SERVER_HOST", default_value = "0.0.0.0")]
     host: String,
     /// [optional] Port number(uses port 1081 by default)
     #[arg(short, long, value_name = "SERVER_PORT", default_value = "1081")]

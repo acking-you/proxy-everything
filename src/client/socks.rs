@@ -6,8 +6,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use super::{
-    resolve_server_connection, split_and_wrap, ForwardContext, ForwarderProvider, ServerConnection,
-    SocksProxySnafu, TcpForwardImpl,
+    ForwardContext, ForwarderProvider, ServerConnection, SocksProxySnafu, TcpForwardImpl,
+    resolve_server_connection, split_and_wrap,
 };
 
 #[derive(Debug, Snafu)]

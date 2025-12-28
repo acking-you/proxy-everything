@@ -37,6 +37,8 @@ Configure system proxy to `127.0.0.1:7890` and you're done.
 - [Server Deployment (Docker)](docs/server-deployment.md) - Docker deployment guide
 - [Server Deployment (Systemd)](docs/systemd-deployment.md) - Binary + systemd deployment
 - [Client Usage](docs/client-usage.md) - Windows, Linux, macOS, Android, iOS
+- [Admin Test Script](docs/admin-test.md) - How to run `http-proxy-admin` control-plane tests
+- [Metrics Monitoring](docs/metrics-monitoring.md) - TUI + admin CLI for realtime metrics
 
 ## Features
 

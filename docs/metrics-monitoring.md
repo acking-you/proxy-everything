@@ -1,0 +1,172 @@
+# Metrics Monitoring (TUI + Admin CLI)
+
+This project exposes proxy metrics over the **control plane**. There are two
+ways to monitor them:
+
+- **`proxy-tui`**: interactive terminal UI
+- **`http-proxy-admin`**: CLI with JSON output (script-friendly)
+
+Both tools use the same control API and require the same credentials.
+
+---
+
+## Prerequisites
+
+- Server is running and reachable on its proxy port (default `1081`)
+- If the server enforces control encryption (default: `true`), you must provide
+  a **control session key** that matches the server configuration
+- If the server is configured with `CONTROL_ADMIN_TOKEN`, you must pass it
+
+---
+
+## Control Plane Authentication & Encryption
+
+The control connection is validated in two steps:
+
+1) **Session key** (encryption)
+2) **Admin token** (optional)
+
+### Session key sources
+
+The client tools look for a session key in this order:
+
+1. CLI flag `-k/--session-key`
+2. Environment variable `CONTROL_SESSION_KEY`
+3. Environment variable `SECRET_KEY`
+
+If the server has `CONTROL_REQUIRE_ENCRYPTION=true` (default), a session key is
+**required**. Make sure the key used by the client matches the server:
+
+- Server picks a session key in this order:
+  1. `CONTROL_SESSION_KEY`
+  2. `SECRET_KEY`
+  3. Built-in default key (`my-secret-key123my-secret-key123`)
+
+### Admin token
+
+If the server sets `CONTROL_ADMIN_TOKEN`, the tools must include `--token` with
+the same value or requests will return `"unauthorized"`.
+
+---
+
+## 1) Terminal UI (proxy-tui)
+
+### Build
+
+`proxy-tui` is behind the `tui` feature.
+
+```bash
+cargo build --release --features tui --bin proxy-tui
+```
+
+### Run
+
+```bash
+./target/release/proxy-tui \
+  -H 127.0.0.1 \
+  -p 1081 \
+  -k YOUR_SESSION_KEY \
+  --token YOUR_ADMIN_TOKEN
+```
+
+### Options
+
+- `-H, --server-host`  Proxy server host
+- `-p, --server-port`  Proxy server port (default: `1081`)
+- `-k, --session-key`  Control session key (32 bytes)
+- `--token`            Admin token (if required by server)
+- `-r, --refresh`      Refresh interval in seconds (default: `2`)
+
+### TUI Tabs
+
+- **Nodes**: cluster node list (if node discovery is configured)
+- **Realtime**: active connections, CPU, memory, uptime + recent minute buckets
+- **Connections**: last 20 connection records
+- **Top-N**: top hosts and top client IPs by traffic
+
+### Keys
+
+- `q` / `Esc` - quit
+- `Tab` / `Right` - next tab
+- `Shift+Tab` / `Left` - previous tab
+- `Up` / `Down` - move selection in Nodes tab
+
+---
+
+## 2) Admin CLI (http-proxy-admin)
+
+### Build
+
+```bash
+cargo build --release --bin http-proxy-admin
+```
+
+### Common flags
+
+```bash
+http-proxy-admin -H <SERVER_HOST> -p <SERVER_PORT> -k <SESSION_KEY> --token <ADMIN_TOKEN>
+```
+
+### Metrics commands
+
+#### Realtime stats
+
+```bash
+http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY metrics realtime
+```
+
+Fields:
+- `active_connections`
+- `cpu_percent`
+- `memory_bytes`
+- `uptime_secs`
+
+#### Recent connections
+
+```bash
+http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY \
+  metrics connections --limit 20
+```
+
+Each record contains client IP, destination, bytes up/down, latency, duration,
+start/end timestamps, and optional error.
+
+#### Time buckets
+
+```bash
+http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY \
+  metrics buckets --granularity minute --count 10
+```
+
+- `--granularity`: `minute`, `hour`, `day` (short forms: `m`, `h`, `d`)
+- `--count`: number of buckets to return
+
+#### Top-N (hosts / IPs)
+
+```bash
+http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY \
+  metrics top-n --category hosts --limit 10
+
+http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY \
+  metrics top-n --category ips --limit 10
+```
+
+- `--category`: `hosts`/`host` or `ips`/`ip`
+
+---
+
+## Troubleshooting
+
+- **`unauthorized`**
+  - `CONTROL_ADMIN_TOKEN` is set on the server; pass `--token`.
+- **No response / connection rejected**
+  - Session key mismatch or missing. Provide `-k` or set `CONTROL_SESSION_KEY`.
+- **`invalid granularity` / `invalid category`**
+  - Use allowed values: `minute|hour|day` and `hosts|ips`.
+
+---
+
+## Security Notes
+
+- Use a strong, private 32-byte session key in production.
+- Avoid using the built-in default key outside of local testing.

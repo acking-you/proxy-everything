@@ -37,7 +37,10 @@
 
 pub mod client;
 pub mod config;
+pub mod control;
 pub mod error;
+pub mod metrics;
+pub mod nodes;
 pub mod server;
 
 // ============================================================================
@@ -57,7 +60,7 @@ pub use crypto::{
     Aes256GcmCryption, Aes256GcmDecryptor, Aes256GcmEncryptor, Decryptor, Encryptor, RingResult,
 };
 pub use error::{ProxyError, Result};
-pub use protocol::{DataSize, ProxyHeader, MAX_DATA_SIZE};
+pub use protocol::{DataSize, MAX_DATA_SIZE, ProxyHeader};
 
 // ============================================================================
 // Internal re-exports (for use within the crate)
@@ -96,6 +99,11 @@ pub(crate) trait MyAsyncWriteExt {
 
     /// Writes all bytes from the buffer.
     async fn write_all(&mut self, src: &[u8]) -> std::result::Result<(), std::io::Error>;
+
+    /// Shuts down the writer (best-effort for half-close).
+    async fn shutdown(&mut self) -> std::result::Result<(), std::io::Error> {
+        Ok(())
+    }
 }
 
 /// Async codec reader trait.
@@ -124,9 +132,16 @@ pub(crate) trait MyAsyncCodecReader {
 /// Logs the result of a proxy operation.
 ///
 /// Used for consistent logging of proxy completion or errors.
-pub(crate) fn proxy_result_handle(host: impl AsRef<str>, ret: Result<DataSize>, detail: &'static str) {
+pub(crate) fn proxy_result_handle(
+    host: impl AsRef<str>,
+    ret: Result<DataSize>,
+    detail: &'static str,
+) {
     match ret {
-        Ok(n) => tracing::info!("Transferred {n} bytes, detail:{detail} host:{}", host.as_ref()),
+        Ok(n) => tracing::info!(
+            "Transferred {n} bytes, detail:{detail} host:{}",
+            host.as_ref()
+        ),
         Err(e) => tracing::error!("Proxy error:{e}, detail:{detail} host:{}", host.as_ref()),
     }
 }
@@ -142,10 +157,8 @@ fn get_decryptor_codec<R: MyAsyncReadExt + Unpin>(
 ) -> Result<AsyncDecryptCodec<R, Aes256GcmDecryptor>> {
     Ok(AsyncDecryptCodec::new(
         reader,
-        Aes256GcmDecryptor::try_new(key.as_ref().as_bytes()).map_err(|e| {
-            ProxyError::Crypto {
-                detail: format!("{e}"),
-            }
+        Aes256GcmDecryptor::try_new(key.as_ref().as_bytes()).map_err(|e| ProxyError::Crypto {
+            detail: format!("{e}"),
         })?,
     ))
 }
@@ -157,10 +170,8 @@ fn get_encryptor_codec<R: MyAsyncReadExt + Unpin>(
 ) -> Result<AsyncEncryptCodec<R, Aes256GcmEncryptor>> {
     Ok(AsyncEncryptCodec::new(
         reader,
-        Aes256GcmEncryptor::try_new(key.as_ref().as_bytes()).map_err(|e| {
-            ProxyError::Crypto {
-                detail: format!("{e}"),
-            }
+        Aes256GcmEncryptor::try_new(key.as_ref().as_bytes()).map_err(|e| ProxyError::Crypto {
+            detail: format!("{e}"),
         })?,
     ))
 }
@@ -243,6 +254,7 @@ pub(crate) async fn client_proxy_with_cryptor_codec<
 /// Client ──► [decrypt] ──► Destination
 /// Client ◄── [encrypt] ◄── Destination
 /// ```
+#[allow(dead_code)]
 pub(crate) async fn server_proxy_with_cryptor_codec<
     R: MyAsyncReadExt + Send + Unpin,
     W: MyAsyncWriteExt + Send + Unpin,
