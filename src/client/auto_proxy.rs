@@ -112,6 +112,7 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::info;
 use uni_stream::addr::get_ip_addrs;
 
+use crate::config::REVERSE_GEO_PROXY;
 use crate::util::{QueryIpTaskId, TaskId, TaskIdGenerator};
 
 async fn get_http_body(stream: TcpStream) -> Result<String> {
@@ -224,6 +225,19 @@ pub async fn get_country_code(host: impl AsRef<str>) -> Result<ProxyStrategy> {
         }
     }
     Ok(ProxyStrategy::Proxy)
+}
+
+/// Apply reverse logic if REVERSE_GEO_PROXY is enabled.
+#[inline]
+fn apply_reverse(strategy: ProxyStrategy) -> ProxyStrategy {
+    if *REVERSE_GEO_PROXY {
+        match strategy {
+            ProxyStrategy::Proxy => ProxyStrategy::Direct,
+            ProxyStrategy::Direct => ProxyStrategy::Proxy,
+        }
+    } else {
+        strategy
+    }
 }
 
 pub type IpAddress = String;
@@ -414,7 +428,7 @@ async fn check_proxy(context: TaskContext) {
 
     tracing::info!(task_id, host, info = "start to query ip-api");
     let need_proxy = match get_country_code(host.as_str()).await {
-        Ok(c) => c == ProxyStrategy::Proxy,
+        Ok(c) => apply_reverse(c) == ProxyStrategy::Proxy,
         Err(e) => {
             tracing::error!(task_id,host,get_country_code_error = ?snafu::Report::from_error(e));
             true

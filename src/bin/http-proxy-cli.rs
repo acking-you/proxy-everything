@@ -16,7 +16,7 @@ struct Cli {
     #[arg(short, long, value_name = "CLIENT_PORT")]
     client_port: Option<u16>,
     /// [optional] Port number exposed by the proxy server (uses port 1081 by default)
-    #[arg(short, long, value_name = "SERVER_PORT")]
+    #[arg(short = 'p', long, value_name = "SERVER_PORT")]
     server_port: Option<u16>,
     /// [optional] Keys for symmetric encryption (must be 32 bytes in length, default value is
     /// `my-secret-key123my-secret-key123`)
@@ -34,6 +34,9 @@ struct Cli {
     /// [optional] Enable random key for sending message, default is false
     #[arg(short, long, value_name = "MSG_KEY")]
     msg_key: bool,
+    /// [optional] Reverse geo-proxy logic: CN sites use proxy, others direct
+    #[arg(long, env = "REVERSE_GEO_PROXY")]
+    reverse_geo: bool,
 }
 
 #[tokio::main]
@@ -58,6 +61,9 @@ async fn main() {
         }
         if let Some(key) = cli.server_port {
             std::env::set_var("SERVER_PORT", key.to_string());
+        }
+        if cli.reverse_geo {
+            std::env::set_var("REVERSE_GEO_PROXY", "true");
         }
     }
     init_tracing();

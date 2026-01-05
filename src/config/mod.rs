@@ -112,6 +112,11 @@ pub static CONTROL_REQUIRE_ENCRYPTION: Lazy<bool> =
 pub static CONTROL_SESSION_KEY: Lazy<Option<String>> =
     Lazy::new(|| std::env::var("CONTROL_SESSION_KEY").ok());
 
+/// Reverse geo-proxy logic: if true, CN sites use proxy, others direct.
+#[cfg(feature = "auto-proxy")]
+pub static REVERSE_GEO_PROXY: Lazy<bool> =
+    Lazy::new(|| parse_bool_env("REVERSE_GEO_PROXY", false));
+
 /// Advertised address for node sync (e.g., "1.2.3.4:1081").
 pub static NODE_ADVERTISE_ADDR: Lazy<Option<String>> = Lazy::new(|| {
     std::env::var("NODE_ADVERTISE_ADDR")
