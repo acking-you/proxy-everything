@@ -25,10 +25,10 @@ docker run -d --name proxy-server --restart=always -p 1081:1081 \
 Download `http-proxy-cli` from [releases](https://github.com/acking-you/proxy-everything/releases), then:
 
 ```bash
-./http-proxy-cli -s YOUR_SERVER_IP -c 7890
+./http-proxy-cli -s YOUR_SERVER_IP -c 7890 --set-system-proxy
 ```
 
-Configure system proxy to `127.0.0.1:7890` and you're done.
+The `--set-system-proxy` flag auto-configures your OS proxy settings. Without it, configure system proxy to `127.0.0.1:7890` manually.
 
 [Full client usage guide →](docs/client-usage.md)
 
@@ -45,5 +45,7 @@ Configure system proxy to `127.0.0.1:7890` and you're done.
 - AES-256-GCM encryption
 - HTTP/HTTPS/SOCKS5 proxy support
 - Auto-routing based on geo-location
+- Reverse geo mode (`--reverse-geo`): proxy CN sites, direct for others
+- Auto system proxy setup (`--set-system-proxy`): Linux/macOS/Windows
 - Transparent proxy chain mode
 - Multi-platform support

@@ -2,6 +2,7 @@ use clap::Parser;
 use http_proxy::client::start_client;
 use http_proxy::config::{CLIENT_PORT, DEFAULT_KEY, SERVER_HOST, SERVER_PORT, init_tracing};
 use mimalloc_rust::GlobalMiMalloc;
+use sysproxy::Sysproxy;
 
 #[global_allocator]
 static GLOBAL_MIMALLOC: GlobalMiMalloc = GlobalMiMalloc;
@@ -37,6 +38,43 @@ struct Cli {
     /// [optional] Reverse geo-proxy logic: CN sites use proxy, others direct
     #[arg(long, env = "REVERSE_GEO_PROXY")]
     reverse_geo: bool,
+    /// [optional] Set OS system proxy to local client port (Linux/macOS/Windows)
+    #[arg(long)]
+    set_system_proxy: bool,
+}
+
+fn set_system_proxy(port: u16) -> Option<Sysproxy> {
+    if !Sysproxy::is_support() {
+        tracing::error!("System proxy is not supported on this platform");
+        return None;
+    }
+    let original = match Sysproxy::get_system_proxy() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("Failed to get current system proxy: {e}");
+            return None;
+        }
+    };
+    let new_proxy = Sysproxy {
+        enable: true,
+        host: "127.0.0.1".into(),
+        port,
+        bypass: original.bypass.clone(),
+    };
+    if let Err(e) = new_proxy.set_system_proxy() {
+        tracing::error!("Failed to set system proxy: {e}");
+        return None;
+    }
+    tracing::info!("System proxy set to 127.0.0.1:{port}");
+    Some(original)
+}
+
+fn restore_system_proxy(original: Sysproxy) {
+    if let Err(e) = original.set_system_proxy() {
+        tracing::error!("Failed to restore system proxy: {e}");
+    } else {
+        tracing::info!("System proxy restored");
+    }
 }
 
 #[tokio::main]
@@ -71,11 +109,22 @@ async fn main() {
     tracing::info!("SECRET_KEY:{}", String::from_utf8_lossy(&DEFAULT_KEY.0));
     tracing::info!("CLIENT_PORT:{}", *CLIENT_PORT);
     tracing::info!("SERVER_PORT:{}", *SERVER_PORT);
+
+    let original_proxy = if cli.set_system_proxy {
+        set_system_proxy(*CLIENT_PORT)
+    } else {
+        None
+    };
+
     if cli.msg_key {
         start_client::<true>("0.0.0.0", *CLIENT_PORT).await.unwrap();
     } else {
         start_client::<false>("0.0.0.0", *CLIENT_PORT)
             .await
             .unwrap();
+    }
+
+    if let Some(original) = original_proxy {
+        restore_system_proxy(original);
     }
 }

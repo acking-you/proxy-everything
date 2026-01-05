@@ -3,9 +3,22 @@
 ## Quick Start
 
 1. Download `http-proxy-cli` from [releases](https://github.com/acking-you/proxy-everything/releases) (choose your platform)
-2. Run: `http-proxy-cli -s <server-ip> -c <local-port>`
-3. Configure system proxy to `127.0.0.1:<local-port>`
-4. Done! Open YouTube and enjoy.
+2. Run: `http-proxy-cli -s <server-ip> -c <local-port> --set-system-proxy`
+3. Done! The `--set-system-proxy` flag auto-configures your OS proxy.
+
+Without `--set-system-proxy`, manually configure system proxy to `127.0.0.1:<local-port>`.
+
+## CLI Options
+
+| Option | Description |
+|--------|-------------|
+| `-s, --server-host` | Server IP/domain (required) |
+| `-c, --client-port` | Local port (default: 1080) |
+| `-p, --server-port` | Server port (default: 1081) |
+| `-k, --key` | 32-byte encryption key |
+| `--set-system-proxy` | Auto-set OS proxy (Linux/macOS/Windows) |
+| `--reverse-geo` | Reverse geo logic: proxy CN, direct others |
+| `-m, --msg-key` | Enable random message key |
 
 ---
 
@@ -15,10 +28,12 @@
 
 2. Extract and open Command Prompt in that directory:
    ```cmd
-   .\http-proxy-cli.exe -s YOUR_SERVER_IP -c 7890
+   .\http-proxy-cli.exe -s YOUR_SERVER_IP -c 7890 --set-system-proxy
    ```
 
-3. Configure system proxy:
+3. (With `--set-system-proxy`) System proxy is auto-configured. Skip to step 5.
+
+4. (Without `--set-system-proxy`) Configure system proxy manually:
    - Open Settings → Network & Internet → Proxy
    - Enable "Use a proxy server"
    - Address: `127.0.0.1`, Port: `7890`
@@ -26,7 +41,7 @@
    ![Windows Proxy Settings 1](../assets/win-proxy1.png)
    ![Windows Proxy Settings 2](../assets/win-proxy2.png)
 
-4. (Optional) Create `start_proxy.bat` for quick launch:
+5. (Optional) Create `start_proxy.bat` for quick launch:
    ```bat
    @echo off
    http-proxy-cli.exe -s YOUR_SERVER_IP -c 7890
@@ -43,10 +58,12 @@
    ```bash
    tar -xzf http-proxy-cli-*-linux-musl.tar.gz
    chmod +x http-proxy-cli
-   ./http-proxy-cli -s YOUR_SERVER_IP -c 7890
+   ./http-proxy-cli -s YOUR_SERVER_IP -c 7890 --set-system-proxy
    ```
 
-3. Configure system proxy:
+3. (With `--set-system-proxy`) System proxy is auto-configured via gsettings (GNOME). For other DEs, configure manually.
+
+4. (Without `--set-system-proxy`) Configure system proxy manually:
 
    **GNOME (Ubuntu, Fedora):**
    ```bash
@@ -67,7 +84,7 @@
    export https_proxy=http://127.0.0.1:7890
    ```
 
-4. (Optional) Create systemd service for auto-start:
+5. (Optional) Create systemd service for auto-start:
    ```bash
    sudo tee /etc/systemd/system/proxy-client.service << EOF
    [Unit]
@@ -95,10 +112,12 @@
    ```bash
    tar -xzf http-proxy-cli-*-apple-darwin.tar.gz
    chmod +x http-proxy-cli
-   ./http-proxy-cli -s YOUR_SERVER_IP -c 7890
+   ./http-proxy-cli -s YOUR_SERVER_IP -c 7890 --set-system-proxy
    ```
 
-3. Configure system proxy:
+3. (With `--set-system-proxy`) System proxy is auto-configured via networksetup.
+
+4. (Without `--set-system-proxy`) Configure system proxy manually:
    - System Preferences → Network → Advanced → Proxies
    - Enable "Web Proxy (HTTP)" and "Secure Web Proxy (HTTPS)"
    - Server: `127.0.0.1`, Port: `7890`

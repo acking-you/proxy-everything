@@ -35,7 +35,7 @@ Application → Client (local:1080) → [encrypted] → Server (remote:1081) →
 - `src/client/mod.rs` - Client entry point, `ForwarderProvider` trait for protocol abstraction
 - `src/client/http.rs` - HTTP/HTTPS CONNECT handling
 - `src/client/socks.rs` - SOCKS5 protocol implementation
-- `src/client/auto_proxy.rs` - Geo-based routing via ip-api.com (CN=direct, US/SG/TW/HK/JP=proxy)
+- `src/client/auto_proxy.rs` - Geo-based routing via ip-api.com (CN=direct, others=proxy; reversible via `REVERSE_GEO_PROXY`)
 - `src/server/mod.rs` - Server-side decryption and forwarding, supports transparent proxy chaining
 - `src/codec/mod.rs` - `AsyncEncryptCodec`/`AsyncDecryptCodec`/`AsyncNormalCodec` for stream processing
 - `src/config/mod.rs` - Environment variable configuration (`SERVER_HOST`, `CLIENT_PORT`, `SECRET_KEY`, etc.)
@@ -63,6 +63,7 @@ Application → Client (local:1080) → [encrypted] → Server (remote:1081) →
 | `SECRET_KEY` | 32-byte encryption key | - |
 | `PROXY_KEYWORDS` | Domains to proxy (comma-separated) | google,youtube,github... |
 | `NONPROXY_KEYWORDS` | Domains to direct connect | bilibili,baidu,taobao... |
+| `REVERSE_GEO_PROXY` | Reverse geo logic (CN=proxy, others=direct) | false |
 | `TURELY_PROXY_SERVER` | Transparent proxy chain target | - |
 
 ## Toolchain
