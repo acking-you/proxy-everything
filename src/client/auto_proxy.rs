@@ -40,8 +40,9 @@
 //!
 //! # Cache Files
 //!
-//! - `~/.http2-config-proxy.txt`: Hosts that should use proxy
-//! - `~/.http2-config-non-proxy.txt`: Hosts that should connect directly
+//! Cache files are stored in `~/http-proxy-cli-config/` directory:
+//! - `proxy-cache.txt`: Hosts that should use proxy
+//! - `non-proxy-cache.txt`: Hosts that should connect directly
 
 use std::env;
 use std::num::ParseIntError;
@@ -245,6 +246,13 @@ pub type SendItem = (IpAddress, Sender<bool>);
 pub type SenderChan = Sender<SendItem>;
 pub type ReceiverChan = Receiver<SendItem>;
 
+/// Data directory name for storing cache files.
+/// All cache files are stored in ~/http-proxy-cli-config/ to consolidate
+/// configuration and cache data in a single location.
+const DATA_DIR_NAME: &str = "http-proxy-cli-config";
+
+/// Load or create a cache file and return its contents as a HashSet.
+/// Creates the data directory if it doesn't exist.
 async fn get_data_set_and_file(
     name: impl AsRef<str>,
 ) -> Result<(HashSet<String>, tokio::fs::File)> {
@@ -253,7 +261,12 @@ async fn get_data_set_and_file(
     } else {
         env::var_os("HOME").context(NotFindHomeSnafu { var: "HOME" })?
     };
-    let path = Path::new(&home_dir).join(name.as_ref());
+    let data_dir = Path::new(&home_dir).join(DATA_DIR_NAME);
+    // Create data directory if not exists
+    if !data_dir.exists() {
+        tokio::fs::create_dir_all(&data_dir).await.context(OpenFileSnafu)?;
+    }
+    let path = data_dir.join(name.as_ref());
     let mut file = OpenOptions::new()
         .read(true)
         .append(true)
@@ -267,8 +280,11 @@ async fn get_data_set_and_file(
         .context(ReadFileSnafu)?;
     Ok((content.lines().map(|l| l.to_string()).collect(), file))
 }
-const NON_PROXY_FILE_NAME: &str = ".http2-config-non-proxy.txt";
-const PROXY_FILE_NAME: &str = ".http2-config-proxy.txt";
+
+/// Cache file for hosts that should connect directly (no proxy).
+const NON_PROXY_FILE_NAME: &str = "non-proxy-cache.txt";
+/// Cache file for hosts that should use proxy.
+const PROXY_FILE_NAME: &str = "proxy-cache.txt";
 
 type RwSharedSet = Arc<RwLock<HashSet<String>>>;
 type SharedFile = Arc<Mutex<tokio::fs::File>>;
