@@ -184,9 +184,10 @@ fn split_concat_with_default(data: String, mut default: Vec<String>) -> Vec<Stri
     keywords
 }
 
+/// CN sites keyword list (direct in normal mode, proxy in reverse mode)
 #[cfg(feature = "auto-proxy")]
-pub static NONPROXY_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
-    let default_keywords = vec![
+static CN_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
+    vec![
         "chaoxing".to_string(),
         "bilibili".to_string(),
         "bili".to_string(),
@@ -206,7 +207,35 @@ pub static NONPROXY_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
         "zhihu".to_string(),
         "ximalaya".to_string(),
         "cn".to_string(),
-    ];
+    ]
+});
+
+/// Foreign sites keyword list (proxy in normal mode, direct in reverse mode)
+#[cfg(feature = "auto-proxy")]
+static FOREIGN_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
+    vec![
+        "tiktok".to_string(),
+        "youtube".to_string(),
+        "scholar.google".to_string(),
+        "reddit".to_string(),
+        "google".to_string(),
+        "chatgpt".to_string(),
+        "twitter".to_string(),
+        "facebook".to_string(),
+        "bilibili.tv".to_string(),
+        "github".to_string(),
+        "docker".to_string(),
+    ]
+});
+
+#[cfg(feature = "auto-proxy")]
+pub static NONPROXY_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
+    // Swap defaults in reverse-geo mode
+    let default_keywords = if *REVERSE_GEO_PROXY {
+        FOREIGN_KEYWORDS.clone()
+    } else {
+        CN_KEYWORDS.clone()
+    };
     match std::env::var("NONPROXY_KEYWORDS") {
         Ok(k) => {
             let keywords = split_concat_with_default(k, default_keywords);
@@ -246,20 +275,12 @@ fn parse_keywords(keywords: Vec<String>) -> Vec<ParsedProxyKeyWord> {
 
 #[cfg(feature = "auto-proxy")]
 pub static PROXY_KEYWORDS: Lazy<Vec<ParsedProxyKeyWord>> = Lazy::new(|| {
-    let default_keywords = vec![
-        "tiktok".to_string(),
-        "youtube".to_string(),
-        "scholar.google".to_string(),
-        // for reddit
-        "reddit".to_string(),
-        "google".to_string(),
-        "chatgpt".to_string(),
-        "twitter".to_string(),
-        "facebook".to_string(),
-        "bilibili.tv".to_string(),
-        "github".to_string(),
-        "docker".to_string(),
-    ];
+    // Swap defaults in reverse-geo mode
+    let default_keywords = if *REVERSE_GEO_PROXY {
+        CN_KEYWORDS.clone()
+    } else {
+        FOREIGN_KEYWORDS.clone()
+    };
     match std::env::var("PROXY_KEYWORDS") {
         Ok(k) => {
             let keywords = split_concat_with_default(k, default_keywords);
