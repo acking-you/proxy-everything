@@ -418,7 +418,8 @@ async fn check_proxy(context: TaskContext) {
                 }
                 Err(e) => {
                     tracing::error!(task_id, host, receive_exist_task_error = ?e);
-                    cache_miss_send(notifier, true, &host).await;
+                    // On error: proxy in normal mode, direct in reverse mode
+                    cache_miss_send(notifier, !*REVERSE_GEO_PROXY, &host).await;
                 }
             }
             return;
@@ -431,7 +432,8 @@ async fn check_proxy(context: TaskContext) {
         Ok(c) => apply_reverse(c) == ProxyStrategy::Proxy,
         Err(e) => {
             tracing::error!(task_id,host,get_country_code_error = ?snafu::Report::from_error(e));
-            true
+            // On error: proxy in normal mode, direct in reverse mode
+            !*REVERSE_GEO_PROXY
         }
     };
     cache_miss_send(notifier, need_proxy, &host).await;
