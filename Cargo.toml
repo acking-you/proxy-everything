@@ -10,6 +10,7 @@ tokio = { version = "1", features = ["full"], optional = true }
 tokio-util = { version = "0.7.10", features = ["full"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+toml = { version = "0.8", optional = true }
 snafu = "0.7.5"
 ring = "0.17.8"
 once_cell = "1.18.0"
@@ -60,7 +61,7 @@ required-features = ["tui"]
 [features]
 default = ["tokio", "auto-proxy", "cli-dep", "tui"]
 tokio = ["dep:tokio", "dep:tokio-util"]
-cli-dep = ["dep:clap", "dep:sysproxy"]
+cli-dep = ["dep:clap", "dep:sysproxy", "dep:toml"]
 tui = ["dep:ratatui", "dep:crossterm", "dep:clap", "dep:chrono"]
 auto-proxy = [
     "dep:hashbrown",

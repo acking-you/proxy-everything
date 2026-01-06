@@ -1,28 +1,58 @@
+use std::path::PathBuf;
+
 use clap::Parser;
 use http_proxy::client::start_client;
 use http_proxy::config::{CLIENT_PORT, DEFAULT_KEY, SERVER_HOST, SERVER_PORT, init_tracing};
 use mimalloc_rust::GlobalMiMalloc;
+use serde::Deserialize;
 use sysproxy::Sysproxy;
 
 #[global_allocator]
 static GLOBAL_MIMALLOC: GlobalMiMalloc = GlobalMiMalloc;
 
+#[derive(Debug, Deserialize, Default)]
+struct Config {
+    server_host: Option<String>,
+    server_port: Option<u16>,
+    client_port: Option<u16>,
+    secret_key: Option<String>,
+    nonproxy_keywords: Option<Vec<String>>,
+    proxy_keywords: Option<Vec<String>>,
+    need_codec_ip: Option<Vec<String>>,
+    msg_key: Option<bool>,
+    reverse_geo: Option<bool>,
+    set_system_proxy: Option<bool>,
+    /// If true, restore original proxy settings on exit; if false, disable proxy (default: false)
+    restore_proxy_on_exit: Option<bool>,
+}
+
+impl Config {
+    fn load(path: &PathBuf) -> Result<Self, String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read config file '{}': {e}", path.display()))?;
+        toml::from_str(&content)
+            .map_err(|e| format!("Failed to parse config file '{}': {e}", path.display()))
+    }
+}
+
 #[derive(Parser)]
 #[command(author = "L_B__", version, about, long_about = None)]
 struct Cli {
-    /// [required] IP or domain name of the proxy server (port is fixed to 1081)
+    /// [optional] Path to TOML config file
+    #[arg(short = 'f', long, value_name = "CONFIG_FILE")]
+    config: Option<PathBuf>,
+    /// [optional] IP or domain name of the proxy server
     #[arg(short, long, value_name = "SERVER_HOST")]
-    server_host: String,
+    server_host: Option<String>,
     /// [optional] Port number exposed by the local client agent (uses port 1080 by default)
     #[arg(short, long, value_name = "CLIENT_PORT")]
     client_port: Option<u16>,
     /// [optional] Port number exposed by the proxy server (uses port 1081 by default)
     #[arg(short = 'p', long, value_name = "SERVER_PORT")]
     server_port: Option<u16>,
-    /// [optional] Keys for symmetric encryption (must be 32 bytes in length, default value is
-    /// `my-secret-key123my-secret-key123`)
-    #[arg(short, long, value_name = "SECRET_KEY")]
-    key: Option<String>,
+    /// [optional] Keys for symmetric encryption (must be 32 bytes in length)
+    #[arg(short = 'k', long = "key", value_name = "SECRET_KEY")]
+    secret_key: Option<String>,
     /// [optional] Keywords-set for identify no proxy
     #[arg(long, value_name = "NONPROXY_KEYWORDS")]
     nonproxy_keywords: Option<String>,
@@ -69,6 +99,20 @@ fn set_system_proxy(port: u16) -> Option<Sysproxy> {
     Some(original)
 }
 
+fn disable_system_proxy(original: Sysproxy) {
+    let disabled = Sysproxy {
+        enable: false,
+        host: original.host,
+        port: original.port,
+        bypass: original.bypass,
+    };
+    if let Err(e) = disabled.set_system_proxy() {
+        tracing::error!("Failed to disable system proxy: {e}");
+    } else {
+        tracing::info!("System proxy disabled");
+    }
+}
+
 fn restore_system_proxy(original: Sysproxy) {
     if let Err(e) = original.set_system_proxy() {
         tracing::error!("Failed to restore system proxy: {e}");
@@ -80,43 +124,87 @@ fn restore_system_proxy(original: Sysproxy) {
 #[tokio::main]
 async fn main() {
     let cli: Cli = Cli::parse();
+
+    // Load config file if specified
+    let config = if let Some(ref path) = cli.config {
+        match Config::load(path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        Config::default()
+    };
+
+    // Priority: CLI args > config file > env vars > defaults
+    let server_host = cli
+        .server_host
+        .or(config.server_host)
+        .or_else(|| std::env::var("SERVER_HOST").ok());
+
+    let Some(server_host) = server_host else {
+        eprintln!("Error: server_host is required. Use -s/--server-host, config file, or SERVER_HOST env var.");
+        std::process::exit(1);
+    };
+
+    let msg_key = cli.msg_key || config.msg_key.unwrap_or(false);
+    let reverse_geo = cli.reverse_geo || config.reverse_geo.unwrap_or(false);
+    let do_set_system_proxy = cli.set_system_proxy || config.set_system_proxy.unwrap_or(false);
+    let restore_proxy_on_exit = config.restore_proxy_on_exit.unwrap_or(false);
+
+    // SAFETY: Environment variables are set before any async code runs.
+    // The tokio runtime hasn't started yet, so there are no other threads
+    // that could race with these set_var calls.
     unsafe {
-        std::env::set_var("SERVER_HOST", &cli.server_host);
-        if let Some(key) = &cli.key {
+        std::env::set_var("SERVER_HOST", &server_host);
+
+        if let Some(key) = cli.secret_key.or(config.secret_key) {
             std::env::set_var("SECRET_KEY", key);
         }
-        if let Some(key) = &cli.nonproxy_keywords {
-            std::env::set_var("NONPROXY_KEYWORDS", key);
+        if let Some(keywords) = cli
+            .nonproxy_keywords
+            .or_else(|| config.nonproxy_keywords.map(|v| v.join(",")))
+        {
+            std::env::set_var("NONPROXY_KEYWORDS", keywords);
         }
-        if let Some(key) = &cli.proxy_keywords {
-            std::env::set_var("PROXY_KEYWORDS", key);
+        if let Some(keywords) = cli
+            .proxy_keywords
+            .or_else(|| config.proxy_keywords.map(|v| v.join(",")))
+        {
+            std::env::set_var("PROXY_KEYWORDS", keywords);
         }
-        if let Some(key) = &cli.need_codec_ip {
-            std::env::set_var("NEED_CODEC_IP", key)
+        if let Some(ips) = cli
+            .need_codec_ip
+            .or_else(|| config.need_codec_ip.map(|v| v.join(",")))
+        {
+            std::env::set_var("NEED_CODEC_IP", ips);
         }
-        if let Some(key) = cli.client_port {
-            std::env::set_var("CLIENT_PORT", key.to_string());
+        if let Some(port) = cli.client_port.or(config.client_port) {
+            std::env::set_var("CLIENT_PORT", port.to_string());
         }
-        if let Some(key) = cli.server_port {
-            std::env::set_var("SERVER_PORT", key.to_string());
+        if let Some(port) = cli.server_port.or(config.server_port) {
+            std::env::set_var("SERVER_PORT", port.to_string());
         }
-        if cli.reverse_geo {
+        if reverse_geo {
             std::env::set_var("REVERSE_GEO_PROXY", "true");
         }
     }
+
     init_tracing();
     tracing::info!("SERVER_HOST:{}", *SERVER_HOST);
     tracing::info!("SECRET_KEY:{}", String::from_utf8_lossy(&DEFAULT_KEY.0));
     tracing::info!("CLIENT_PORT:{}", *CLIENT_PORT);
     tracing::info!("SERVER_PORT:{}", *SERVER_PORT);
 
-    let original_proxy = if cli.set_system_proxy {
+    let original_proxy = if do_set_system_proxy {
         set_system_proxy(*CLIENT_PORT)
     } else {
         None
     };
 
-    if cli.msg_key {
+    if msg_key {
         start_client::<true>("0.0.0.0", *CLIENT_PORT).await.unwrap();
     } else {
         start_client::<false>("0.0.0.0", *CLIENT_PORT)
@@ -125,6 +213,10 @@ async fn main() {
     }
 
     if let Some(original) = original_proxy {
-        restore_system_proxy(original);
+        if restore_proxy_on_exit {
+            restore_system_proxy(original);
+        } else {
+            disable_system_proxy(original);
+        }
     }
 }
