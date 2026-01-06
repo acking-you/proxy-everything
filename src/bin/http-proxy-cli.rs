@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use http_proxy::client::start_client;
-use http_proxy::config::{CLIENT_PORT, DEFAULT_KEY, SERVER_HOST, SERVER_PORT, init_tracing};
+use http_proxy::config::{CLIENT_PORT, SERVER_HOST, SERVER_PORT, init_tracing};
 use mimalloc_rust::GlobalMiMalloc;
 use serde::{Deserialize, Serialize};
 use sysproxy::Sysproxy;
@@ -234,8 +234,12 @@ async fn main() -> Result<()> {
         let config_path = get_default_config_path()?;
         std::fs::write(&config_path, DEFAULT_CONFIG_TEMPLATE)
             .with_context(|| format!("Failed to create config at '{}'", config_path.display()))?;
-        eprintln!("Generated config template: {}", config_path.display());
-        eprintln!("Please edit the config file and run again.");
+        eprintln!();
+        eprintln!("Welcome to HTTP Proxy CLI!");
+        eprintln!();
+        eprintln!("Config file created at: {}", config_path.display());
+        eprintln!("Please edit the config file to set your server_host, then run again.");
+        eprintln!();
         return Ok(());
     };
 
@@ -289,22 +293,53 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Check if secret key is configured (not using default)
+    let secret_key_configured = std::env::var("SECRET_KEY").is_ok();
+
+    // Check if config is valid (server_host is not template default)
+    let config_valid = server_host != "your-server.com" && !server_host.is_empty();
+
     init_tracing();
-    tracing::info!("SERVER_HOST:{}", *SERVER_HOST);
-    tracing::info!("SECRET_KEY:{}", String::from_utf8_lossy(&DEFAULT_KEY.0));
-    tracing::info!("CLIENT_PORT:{}", *CLIENT_PORT);
-    tracing::info!("SERVER_PORT:{}", *SERVER_PORT);
+
+    // Force lazy statics to initialize (triggers WARN logs before banner)
+    let client_port = *CLIENT_PORT;
+    let server_port = *SERVER_PORT;
+    let remote_server = SERVER_HOST.clone();
+
+    // Print startup banner
+    eprintln!();
+    eprintln!("+------------------------------------------------------------+");
+    if config_valid {
+        eprintln!("|           HTTP Proxy CLI Started Successfully              |");
+    } else {
+        eprintln!("|           HTTP Proxy CLI Started Unsuccessfully            |");
+    }
+    eprintln!("+------------------------------------------------------------+");
+    eprintln!("|  Local Proxy    : 127.0.0.1:{:<28}|", client_port);
+    eprintln!("|  Remote Server  : {}:{:<28}|", remote_server, server_port);
+    eprintln!("|  Secret Key     : {:<39}|", if secret_key_configured { "configured" } else { "default (insecure)" });
+    eprintln!("|  Reverse Geo    : {:<39}|", if reverse_geo { "enabled" } else { "disabled" });
+    eprintln!("|  System Proxy   : {:<39}|", if do_set_system_proxy { "enabled" } else { "disabled" });
+    eprintln!("+------------------------------------------------------------+");
+    eprintln!();
+
+    if !config_valid {
+        eprintln!("WARNING: server_host not configured properly!");
+        eprintln!("Please edit your config file and set a valid server_host.");
+        eprintln!("Config location: ~/http-proxy-cli-config/config.toml");
+        return Ok(());
+    }
 
     let original_proxy = if do_set_system_proxy {
-        set_system_proxy(*CLIENT_PORT)
+        set_system_proxy(client_port)
     } else {
         None
     };
 
     if msg_key {
-        start_client::<true>("0.0.0.0", *CLIENT_PORT).await.unwrap();
+        start_client::<true>("0.0.0.0", client_port).await.unwrap();
     } else {
-        start_client::<false>("0.0.0.0", *CLIENT_PORT)
+        start_client::<false>("0.0.0.0", client_port)
             .await
             .unwrap();
     }
