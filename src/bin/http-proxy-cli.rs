@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use anyhow::{Context, Result};
 use clap::Parser;
 use http_proxy::client::start_client;
 use http_proxy::config::{CLIENT_PORT, DEFAULT_KEY, SERVER_HOST, SERVER_PORT, init_tracing};
@@ -27,11 +28,11 @@ struct Config {
 }
 
 impl Config {
-    fn load(path: &PathBuf) -> Result<Self, String> {
+    fn load(path: &PathBuf) -> Result<Self> {
         let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read config file '{}': {e}", path.display()))?;
+            .with_context(|| format!("Failed to read config file '{}'", path.display()))?;
         toml::from_str(&content)
-            .map_err(|e| format!("Failed to parse config file '{}': {e}", path.display()))
+            .with_context(|| format!("Failed to parse config file '{}'", path.display()))
     }
 }
 
@@ -122,18 +123,12 @@ fn restore_system_proxy(original: Sysproxy) {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<()> {
     let cli: Cli = Cli::parse();
 
     // Load config file if specified
     let config = if let Some(ref path) = cli.config {
-        match Config::load(path) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(1);
-            }
-        }
+        Config::load(path)?
     } else {
         Config::default()
     };
@@ -142,12 +137,8 @@ async fn main() {
     let server_host = cli
         .server_host
         .or(config.server_host)
-        .or_else(|| std::env::var("SERVER_HOST").ok());
-
-    let Some(server_host) = server_host else {
-        eprintln!("Error: server_host is required. Use -s/--server-host, config file, or SERVER_HOST env var.");
-        std::process::exit(1);
-    };
+        .or_else(|| std::env::var("SERVER_HOST").ok())
+        .context("server_host is required. Use -s/--server-host, config file, or SERVER_HOST env var.")?;
 
     let msg_key = cli.msg_key || config.msg_key.unwrap_or(false);
     let reverse_geo = cli.reverse_geo || config.reverse_geo.unwrap_or(false);
@@ -219,4 +210,6 @@ async fn main() {
             disable_system_proxy(original);
         }
     }
+
+    Ok(())
 }
