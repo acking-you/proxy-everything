@@ -167,6 +167,26 @@ pub static DEFAULT_KEY: Lazy<(Vec<u8>, u32)> = Lazy::new(|| {
 
 const DEFAULT_WORD: &str = "%DEFAULT%";
 
+/// Get user-configured keywords from environment variable (excluding %DEFAULT% placeholder).
+/// This is used to check what keywords the user explicitly configured,
+/// so we can remove conflicting keywords from the opposite list.
+///
+/// For example, if user sets NONPROXY_KEYWORDS="google", we need to remove "google"
+/// from PROXY_KEYWORDS to respect user's preference.
+///
+/// Returns empty Vec if env var is not set.
+fn get_user_keywords(env_var: &str) -> Vec<String> {
+    std::env::var(env_var)
+        .map(|k| {
+            k.trim()
+                .split(',')
+                .filter(|v| *v != DEFAULT_WORD)
+                .map(|v| v.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn split_concat_with_default(data: String, mut default: Vec<String>) -> Vec<String> {
     let keyowrds_iter = data.trim().split(',').map(|v| v.to_string());
     let mut keywords = Vec::with_capacity(default.len());
@@ -228,6 +248,16 @@ static FOREIGN_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
     ]
 });
 
+/// NONPROXY_KEYWORDS: Sites that should connect directly without proxy.
+///
+/// User configuration priority logic:
+/// 1. Load default keywords based on reverse_geo mode (CN_KEYWORDS or FOREIGN_KEYWORDS)
+/// 2. If user set NONPROXY_KEYWORDS env var, use user's config (with %DEFAULT% expansion)
+/// 3. Remove any keywords that user explicitly put in PROXY_KEYWORDS
+///    This ensures user's explicit proxy preference takes priority
+///
+/// Example: If default has "bilibili" in nonproxy, but user adds "bilibili" to proxy_keywords,
+/// "bilibili" will be removed from nonproxy list to respect user's choice.
 #[cfg(feature = "auto-proxy")]
 pub static NONPROXY_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
     // Swap defaults in reverse-geo mode
@@ -236,19 +266,20 @@ pub static NONPROXY_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
     } else {
         CN_KEYWORDS.clone()
     };
-    match std::env::var("NONPROXY_KEYWORDS") {
-        Ok(k) => {
-            let keywords = split_concat_with_default(k, default_keywords);
-            tracing::info!("`NONPROXY_KEYWORDS` is `{keywords:?}`");
-            keywords
-        }
-        Err(_) => {
-            tracing::info!(
-                "No ENV:`NONPROXY_KEYWORDS` provided,we use default keywords:{default_keywords:?}"
-            );
-            default_keywords
-        }
-    }
+    // Get user's proxy_keywords to exclude from nonproxy list
+    let user_proxy = get_user_keywords("PROXY_KEYWORDS");
+
+    let keywords = match std::env::var("NONPROXY_KEYWORDS") {
+        Ok(k) => split_concat_with_default(k, default_keywords),
+        Err(_) => default_keywords,
+    };
+    // Remove keywords that user explicitly put in proxy list (user config takes priority)
+    let keywords: Vec<String> = keywords
+        .into_iter()
+        .filter(|k| !user_proxy.iter().any(|p| p.contains(k) || k.contains(p)))
+        .collect();
+    tracing::info!("`NONPROXY_KEYWORDS` is `{keywords:?}`");
+    keywords
 });
 
 #[derive(Debug)]
@@ -273,6 +304,16 @@ fn parse_keywords(keywords: Vec<String>) -> Vec<ParsedProxyKeyWord> {
         .collect()
 }
 
+/// PROXY_KEYWORDS: Sites that should use proxy.
+///
+/// User configuration priority logic:
+/// 1. Load default keywords based on reverse_geo mode (FOREIGN_KEYWORDS or CN_KEYWORDS)
+/// 2. If user set PROXY_KEYWORDS env var, use user's config (with %DEFAULT% expansion)
+/// 3. Remove any keywords that user explicitly put in NONPROXY_KEYWORDS
+///    This ensures user's explicit direct-connect preference takes priority
+///
+/// Example: If default has "google" in proxy, but user adds "google" to nonproxy_keywords,
+/// "google" will be removed from proxy list to respect user's choice.
 #[cfg(feature = "auto-proxy")]
 pub static PROXY_KEYWORDS: Lazy<Vec<ParsedProxyKeyWord>> = Lazy::new(|| {
     // Swap defaults in reverse-geo mode
@@ -281,19 +322,20 @@ pub static PROXY_KEYWORDS: Lazy<Vec<ParsedProxyKeyWord>> = Lazy::new(|| {
     } else {
         FOREIGN_KEYWORDS.clone()
     };
-    match std::env::var("PROXY_KEYWORDS") {
-        Ok(k) => {
-            let keywords = split_concat_with_default(k, default_keywords);
-            tracing::info!("`PROXY_KEYWORDS` is `{keywords:?}`");
-            parse_keywords(keywords)
-        }
-        Err(_) => {
-            tracing::info!(
-                "No ENV:`PROXY_KEYWORDS` provided,we use default keywords:{default_keywords:?}"
-            );
-            parse_keywords(default_keywords)
-        }
-    }
+    // Get user's nonproxy_keywords to exclude from proxy list
+    let user_nonproxy = get_user_keywords("NONPROXY_KEYWORDS");
+
+    let keywords = match std::env::var("PROXY_KEYWORDS") {
+        Ok(k) => split_concat_with_default(k, default_keywords),
+        Err(_) => default_keywords,
+    };
+    // Remove keywords that user explicitly put in nonproxy list (user config takes priority)
+    let keywords: Vec<String> = keywords
+        .into_iter()
+        .filter(|k| !user_nonproxy.iter().any(|n| n.contains(k) || k.contains(n)))
+        .collect();
+    tracing::info!("`PROXY_KEYWORDS` is `{keywords:?}`");
+    parse_keywords(keywords)
 });
 
 pub static NEED_CODEC_IP: Lazy<Vec<String>> = Lazy::new(|| {

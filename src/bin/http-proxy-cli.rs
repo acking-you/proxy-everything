@@ -5,13 +5,17 @@ use clap::Parser;
 use http_proxy::client::start_client;
 use http_proxy::config::{CLIENT_PORT, DEFAULT_KEY, SERVER_HOST, SERVER_PORT, init_tracing};
 use mimalloc_rust::GlobalMiMalloc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sysproxy::Sysproxy;
+
+const CONFIG_FILE_NAME: &str = "config.toml";
+const DATA_DIR_NAME: &str = "http-proxy-cli-config";
+const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../../config.template.toml");
 
 #[global_allocator]
 static GLOBAL_MIMALLOC: GlobalMiMalloc = GlobalMiMalloc;
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default)]
 struct Config {
     server_host: Option<String>,
     server_port: Option<u16>,
@@ -23,7 +27,6 @@ struct Config {
     msg_key: Option<bool>,
     reverse_geo: Option<bool>,
     set_system_proxy: Option<bool>,
-    /// If true, restore original proxy settings on exit; if false, disable proxy (default: false)
     restore_proxy_on_exit: Option<bool>,
 }
 
@@ -34,6 +37,89 @@ impl Config {
         toml::from_str(&content)
             .with_context(|| format!("Failed to parse config file '{}'", path.display()))
     }
+
+    fn save(&self, path: &PathBuf) -> Result<()> {
+        let content = toml::to_string_pretty(self)
+            .context("Failed to serialize config")?;
+        std::fs::write(path, content)
+            .with_context(|| format!("Failed to write config file '{}'", path.display()))
+    }
+
+    /// Create config from CLI args (only non-default values)
+    fn from_cli(cli: &Cli) -> Self {
+        Self {
+            server_host: cli.server_host.clone(),
+            server_port: cli.server_port,
+            client_port: cli.client_port,
+            secret_key: cli.secret_key.clone(),
+            nonproxy_keywords: cli.nonproxy_keywords.as_ref().map(|s| s.split(',').map(String::from).collect()),
+            proxy_keywords: cli.proxy_keywords.as_ref().map(|s| s.split(',').map(String::from).collect()),
+            need_codec_ip: cli.need_codec_ip.as_ref().map(|s| s.split(',').map(String::from).collect()),
+            msg_key: if cli.msg_key { Some(true) } else { None },
+            reverse_geo: if cli.reverse_geo { Some(true) } else { None },
+            set_system_proxy: if cli.set_system_proxy { Some(true) } else { None },
+            restore_proxy_on_exit: None,
+        }
+    }
+
+    /// Check if CLI has any meaningful args
+    fn cli_has_args(cli: &Cli) -> bool {
+        cli.server_host.is_some()
+            || cli.server_port.is_some()
+            || cli.client_port.is_some()
+            || cli.secret_key.is_some()
+            || cli.msg_key
+            || cli.reverse_geo
+            || cli.set_system_proxy
+    }
+}
+
+/// Get the directory where the executable is located
+fn get_exe_dir() -> Option<PathBuf> {
+    std::env::current_exe().ok()?.parent().map(|p| p.to_path_buf())
+}
+
+/// Get home directory
+fn get_home_dir() -> Option<PathBuf> {
+    dirs::home_dir()
+}
+
+/// Get data directory: ~/http-proxy-cli/
+fn get_data_dir() -> Result<PathBuf> {
+    let home = get_home_dir().context("Failed to get home directory")?;
+    let data_dir = home.join(DATA_DIR_NAME);
+    if !data_dir.exists() {
+        std::fs::create_dir_all(&data_dir)
+            .with_context(|| format!("Failed to create data directory '{}'", data_dir.display()))?;
+    }
+    Ok(data_dir)
+}
+
+/// Find config file: exe dir > data dir
+fn find_config() -> Option<PathBuf> {
+    // 1. Check exe directory
+    if let Some(exe_dir) = get_exe_dir() {
+        let config_path = exe_dir.join(CONFIG_FILE_NAME);
+        if config_path.exists() {
+            return Some(config_path);
+        }
+    }
+
+    // 2. Check data directory ~/http-proxy-cli/
+    if let Ok(data_dir) = get_data_dir() {
+        let config_path = data_dir.join(CONFIG_FILE_NAME);
+        if config_path.exists() {
+            return Some(config_path);
+        }
+    }
+
+    None
+}
+
+/// Get default config path (data dir)
+fn get_default_config_path() -> Result<PathBuf> {
+    let data_dir = get_data_dir()?;
+    Ok(data_dir.join(CONFIG_FILE_NAME))
 }
 
 #[derive(Parser)]
@@ -126,11 +212,30 @@ fn restore_system_proxy(original: Sysproxy) {
 async fn main() -> Result<()> {
     let cli: Cli = Cli::parse();
 
-    // Load config file if specified
+    // Load config based on scenario:
+    // 1. -f specified: use that file
+    // 2. Config exists: load it
+    // 3. CLI has args: save args to config and run
+    // 4. No config, no args: generate template and exit
     let config = if let Some(ref path) = cli.config {
         Config::load(path)?
+    } else if let Some(path) = find_config() {
+        Config::load(&path)?
+    } else if Config::cli_has_args(&cli) {
+        // Save CLI args to config file
+        let config = Config::from_cli(&cli);
+        let config_path = get_default_config_path()?;
+        config.save(&config_path)?;
+        eprintln!("Config saved to: {}", config_path.display());
+        config
     } else {
-        Config::default()
+        // No config, no args: generate template
+        let config_path = get_default_config_path()?;
+        std::fs::write(&config_path, DEFAULT_CONFIG_TEMPLATE)
+            .with_context(|| format!("Failed to create config at '{}'", config_path.display()))?;
+        eprintln!("Generated config template: {}", config_path.display());
+        eprintln!("Please edit the config file and run again.");
+        return Ok(());
     };
 
     // Priority: CLI args > config file > env vars > defaults

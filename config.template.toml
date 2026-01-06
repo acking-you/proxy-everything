@@ -1,0 +1,38 @@
+# HTTP Proxy CLI Configuration
+
+# [Required] Proxy server address
+server_host = "your-server.com"
+
+# Proxy server port (default: 1081)
+server_port = 1081
+
+# Local client port (default: 7890)
+client_port = 7890
+
+# [Optional] Encryption key (must be exactly 32 bytes)
+# secret_key = ""
+
+# [Optional] Reverse geo-proxy: CN sites use proxy, foreign sites direct
+# reverse_geo = false
+
+# [Optional] Auto set system proxy on start
+# set_system_proxy = false
+
+# [Optional] On exit: false = disable proxy, true = restore original
+# restore_proxy_on_exit = false
+
+# [Optional] Enable random message key
+# msg_key = false
+
+# [Optional] Custom proxy keywords - sites that should use proxy
+# If set, this OVERRIDES the default list completely
+# Default: tiktok, youtube, google, reddit, chatgpt, twitter, facebook,
+#          bilibili.tv, github, docker, scholar.google
+# proxy_keywords = ["google", "youtube", "github"]
+
+# [Optional] Custom nonproxy keywords - sites that should connect directly
+# If set, this OVERRIDES the default list completely
+# Default: chaoxing, bilibili, bili, xigua, byte, douyin, cnblogs, qq.com,
+#          jd.com, retiehe, meituan, jianguoyun, taobao.com, csdn, juejin,
+#          baidu, zhihu, ximalaya, cn
+# nonproxy_keywords = ["bilibili", "baidu", "qq.com"]
