@@ -18,8 +18,9 @@ reverse_geo = false
 # [Optional] Auto set system proxy on start
 set_system_proxy = false
 
-# [Optional] On exit: false = disable proxy, true = restore original
-# restore_proxy_on_exit = false
+# [Optional] On exit (Ctrl+C): restore system proxy settings
+# Set to true to restore original proxy settings when exiting
+restore_proxy_on_exit = false
 
 # [Optional] Enable random message key
 # msg_key = false
