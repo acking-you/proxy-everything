@@ -69,11 +69,19 @@ fn set_system_proxy(port: u16) -> Option<Sysproxy> {
     Some(original)
 }
 
-fn restore_system_proxy(original: Sysproxy) {
-    if let Err(e) = original.set_system_proxy() {
-        tracing::error!("Failed to restore system proxy: {e}");
+fn disable_system_proxy(original: Sysproxy) {
+    // Always disable proxy on exit, don't just restore original
+    // (original might have proxy enabled from a previous unclean shutdown)
+    let disabled = Sysproxy {
+        enable: false,
+        host: original.host,
+        port: original.port,
+        bypass: original.bypass,
+    };
+    if let Err(e) = disabled.set_system_proxy() {
+        tracing::error!("Failed to disable system proxy: {e}");
     } else {
-        tracing::info!("System proxy restored");
+        tracing::info!("System proxy disabled");
     }
 }
 
@@ -116,6 +124,8 @@ async fn main() {
         None
     };
 
+    // start_client handles Ctrl+C/SIGTERM via GracefulShutdownManager
+    // and returns after graceful shutdown completes
     if cli.msg_key {
         start_client::<true>("0.0.0.0", *CLIENT_PORT).await.unwrap();
     } else {
@@ -124,7 +134,8 @@ async fn main() {
             .unwrap();
     }
 
+    // Disable system proxy after graceful shutdown
     if let Some(original) = original_proxy {
-        restore_system_proxy(original);
+        disable_system_proxy(original);
     }
 }
