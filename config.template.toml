@@ -13,10 +13,10 @@ client_port = 7890
 # secret_key = ""
 
 # [Optional] Reverse geo-proxy: CN sites use proxy, foreign sites direct
-# reverse_geo = false
+reverse_geo = false
 
 # [Optional] Auto set system proxy on start
-# set_system_proxy = false
+set_system_proxy = false
 
 # [Optional] On exit: false = disable proxy, true = restore original
 # restore_proxy_on_exit = false

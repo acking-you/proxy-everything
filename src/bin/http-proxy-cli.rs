@@ -10,6 +10,7 @@ use sysproxy::Sysproxy;
 
 const CONFIG_FILE_NAME: &str = "config.toml";
 const DATA_DIR_NAME: &str = "http-proxy-cli-config";
+/// Default config template embedded at compile time from config.template.toml
 const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../../config.template.toml");
 
 #[global_allocator]
