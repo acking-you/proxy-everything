@@ -45,7 +45,6 @@
 //! - `non-proxy-cache.txt`: Hosts that should connect directly
 
 use std::env;
-use std::num::ParseIntError;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -53,49 +52,19 @@ use dashmap::DashMap;
 use flume::{Receiver, Sender};
 use hashbrown::HashSet;
 use snafu::{OptionExt, ResultExt, Snafu};
+
 #[derive(Debug, Snafu)]
 pub enum Error {
-    #[snafu(display("Connect ip-api.com fails"))]
-    ConnectIpAPI { source: std::io::Error },
-    #[snafu(display("Write ip-api.com fails"))]
-    WriteIpAPI { source: std::io::Error },
-    #[snafu(display("Read ip-api.com response and parse fails"))]
-    ReadIpAPI { source: std::io::Error },
-    #[snafu(display("Serde ip info response to utf8 fails"))]
-    SerdeUtf8 { source: std::string::FromUtf8Error },
-    #[snafu(display("Ip api return fails! detail:{detail}"))]
-    IpAPINotWork { detail: String },
+    #[snafu(display("Geo query failed: {source}"))]
+    GeoQuery { source: crate::geo::GeoError },
     #[snafu(display("Cannot find user home! You must set `{var}` to your home path"))]
     NotFindHome { var: &'static str },
     #[snafu(display("Open proxy or non proxy file to `read|append|create` error!"))]
     OpenFile { source: std::io::Error },
     #[snafu(display("Read file to string error!"))]
     ReadFile { source: std::io::Error },
-    #[snafu(display("Read until error in parse http response"))]
-    ReadUntil { source: std::io::Error },
-    #[snafu(display("Read http response header error!"))]
-    ReadHttpHeader,
-    #[snafu(display("Read http response key error!"))]
-    ReadHttpKeyWithIO { source: std::io::Error },
-    #[snafu(display("Read http response key error!"))]
-    ReadHttpKey,
-    #[snafu(display("Read http response value error!"))]
-    ReadHttpValue,
-    #[snafu(display("Read http response body error! detail:{detail}"))]
-    ReadHttpBody { detail: &'static str },
-    #[snafu(display("Read http response body error!"))]
-    ReadHttpBodyWithIO { source: std::io::Error },
-    #[snafu(display("Get content length error when parse http response"))]
-    ContentLength { source: ParseIntError },
     #[snafu(display("Write ahead log not successful!"))]
     WAL { source: std::io::Error },
-    #[snafu(display("DNS Resolver fails with host:{host}!"))]
-    DNSResolver {
-        source: std::io::Error,
-        host: String,
-    },
-    #[snafu(display("DNS Record is empty!"))]
-    EmptyDNSRecord,
 }
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -107,125 +76,25 @@ pub enum ProxyStrategy {
 }
 
 use tokio::fs::OpenOptions;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex, RwLock};
 use tracing::info;
-use uni_stream::addr::get_ip_addrs;
 
 use crate::config::REVERSE_GEO_PROXY;
+use crate::geo::query_geo_single;
 use crate::util::{QueryIpTaskId, TaskId, TaskIdGenerator};
 
-async fn get_http_body(stream: TcpStream) -> Result<String> {
-    let mut reader = BufReader::new(stream);
-    let mut buf = Vec::new();
-    // read header
-    reader
-        .read_until(b'\n', &mut buf)
-        .await
-        .context(ReadUntilSnafu)?;
-    if *buf.last().context(ReadHttpHeaderSnafu)? != b'\n' {
-        ReadHttpHeaderSnafu {}.fail()?;
-    }
-    buf.clear();
-    let mut body_length = None;
-    // read key
-    let is_eof = loop {
-        let n = reader
-            .read_until(b'\n', &mut buf)
-            .await
-            .context(ReadUntilSnafu)?;
-        if n == 0 {
-            break true;
-        }
-        if *buf.last().context(ReadHttpKeySnafu)? != b'\n' {
-            ReadHttpKeySnafu {}.fail()?;
-        }
-        if buf.len() == 2 && buf[0] == b'\r' && buf[1] == b'\n' {
-            break false;
-        }
-        let (idx, _) = buf
-            .iter()
-            .enumerate()
-            .find(|&(_, &c)| c == b':')
-            .context(ReadHttpKeySnafu)?;
-        let key = std::str::from_utf8(&buf[..idx])
-            .map_err(|_| Error::ReadHttpKey)?
-            .trim();
-        if idx + 1 >= buf.len() {
-            ReadHttpValueSnafu {}.fail()?;
-        }
-        let value = std::str::from_utf8(&buf[idx + 1..])
-            .map_err(|_| Error::ReadHttpValue)?
-            .trim();
-        if key == "Content-Length" || key == "content-length" {
-            body_length = Some(value.parse::<usize>().context(ContentLengthSnafu)?);
-        }
-        buf.clear();
-    };
-    // read body
-    if is_eof {
-        ReadHttpBodySnafu {
-            detail: "Body not received but EOF",
-        }
-        .fail()?;
-    }
-    if body_length.is_none() {
-        ReadHttpBodySnafu {
-            detail: "Content-Length not received,",
-        }
-        .fail()?;
-    }
-    buf.resize(body_length.expect("checked by `body_length.is_none()`"), 0);
-    reader
-        .read_exact(&mut buf)
-        .await
-        .context(ReadHttpBodyWithIOSnafu)?;
-    String::from_utf8(buf).context(SerdeUtf8Snafu)
-}
-
+/// Query country code and convert to proxy strategy.
 pub async fn get_country_code(host: impl AsRef<str>) -> Result<ProxyStrategy> {
-    let ip_api_addr = get_ip_addrs("ip-api.com")
+    let country_code = query_geo_single(host.as_ref())
         .await
-        .with_context(|_| DNSResolverSnafu {
-            host: host.as_ref().to_string(),
-        })?
-        .first()
-        .context(EmptyDNSRecordSnafu)?
-        .to_owned();
-    let mut stream = TcpStream::connect((ip_api_addr, 80))
-        .await
-        .context(ConnectIpAPISnafu)?;
-    let ipaddr = uni_stream::addr::get_ip_addrs(host.as_ref())
-        .await
-        .with_context(|_| DNSResolverSnafu {
-            host: host.as_ref().to_string(),
-        })?
-        .into_iter()
-        .next()
-        .context(EmptyDNSRecordSnafu)?;
-    let req = format!("GET /line/{} HTTP/1.1\r\nHost: qq.com\r\n\r\n", ipaddr);
-    stream
-        .write_all(req.as_bytes())
-        .await
-        .context(WriteIpAPISnafu)?;
-    let text = get_http_body(stream).await?;
-    tracing::info!("Host({}) ipapi body info:{}", host.as_ref(), text);
-    if text.contains("China") {
-        return Ok(ProxyStrategy::Direct);
+        .context(GeoQuerySnafu)?;
+    tracing::info!("Host({}) country code: {}", host.as_ref(), country_code);
+    match country_code.as_str() {
+        "CN" => Ok(ProxyStrategy::Direct),
+        "SG" | "US" | "TW" | "HK" | "MO" | "JP" | "IN" => Ok(ProxyStrategy::Proxy),
+        _ => Ok(ProxyStrategy::Proxy),
     }
-    let mut lines = text.lines();
-    if !lines.any(|line| line == "success") {
-        return Err(Error::IpAPINotWork { detail: text });
-    }
-    for line in lines {
-        match line {
-            "CN" => return Ok(ProxyStrategy::Direct),
-            "SG" | "US" | "TW" | "HK" | "Macau" | "JP" | "IN" => return Ok(ProxyStrategy::Proxy),
-            _ => {}
-        }
-    }
-    Ok(ProxyStrategy::Proxy)
 }
 
 /// Apply reverse logic if REVERSE_GEO_PROXY is enabled.
@@ -264,7 +133,9 @@ async fn get_data_set_and_file(
     let data_dir = Path::new(&home_dir).join(DATA_DIR_NAME);
     // Create data directory if not exists
     if !data_dir.exists() {
-        tokio::fs::create_dir_all(&data_dir).await.context(OpenFileSnafu)?;
+        tokio::fs::create_dir_all(&data_dir)
+            .await
+            .context(OpenFileSnafu)?;
     }
     let path = data_dir.join(name.as_ref());
     let mut file = OpenOptions::new()
@@ -501,6 +372,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_country_code() {
+        unsafe {
+            env::set_var("USE_LOCAL_GEOIP", "yes");
+        }
         println!("{:?}", get_country_code("google.com").await.unwrap());
     }
 

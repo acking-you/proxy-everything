@@ -15,12 +15,11 @@ client_port = 7890
 # [Optional] Reverse geo-proxy: CN sites use proxy, foreign sites direct
 reverse_geo = false
 
-# [Optional] Auto set system proxy on start
-set_system_proxy = false
+# [Optional] Use local GeoIP database instead of ip-api.com API
+# use_local_geoip = false
 
-# [Optional] On exit (Ctrl+C): restore system proxy settings
-# Set to true to restore original proxy settings when exiting
-restore_proxy_on_exit = false
+# [Optional] Auto set system proxy on start (disabled on exit)
+set_system_proxy = false
 
 # [Optional] Enable random message key
 # msg_key = false

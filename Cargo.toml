@@ -38,6 +38,11 @@ sysproxy = { path = "deps/sysproxy-rs", optional = true }
 ratatui = { version = "0.29", optional = true }
 crossterm = { version = "0.28", optional = true }
 chrono = { version = "0.4", optional = true }
+maxminddb = "0.24"
+flate2 = "1.0"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+indicatif = { version = "0.17", optional = true }
+comfy-table = { version = "7", optional = true }
 
 [[bin]]
 name = "http-proxy-client"
@@ -61,7 +66,7 @@ required-features = ["tui"]
 [features]
 default = ["tokio", "auto-proxy", "cli-dep", "tui"]
 tokio = ["dep:tokio", "dep:tokio-util"]
-cli-dep = ["dep:clap", "dep:sysproxy", "dep:toml"]
+cli-dep = ["dep:clap", "dep:sysproxy", "dep:toml", "dep:crossterm", "dep:indicatif", "dep:comfy-table"]
 tui = ["dep:ratatui", "dep:crossterm", "dep:clap", "dep:chrono"]
 auto-proxy = [
     "dep:hashbrown",

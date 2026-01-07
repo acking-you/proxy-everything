@@ -416,8 +416,8 @@ pub async fn get_tcp_stream(host: &str, port: u16, detail: &'static str) -> Resu
     // required
     let ipaddr = match host.parse::<IpAddr>() {
         Ok(ip) => ip,
-        Err(e) => {
-            tracing::warn!("Parsing IpAddr error:{e} with host:`{host}`");
+        Err(_) => {
+            // Domain name, need DNS resolution
             uni_stream::addr::get_ip_addrs(host)
                 .await
                 .context(IoSnafu {
@@ -571,9 +571,12 @@ pub struct ClientProxyContext {
 fn get_provider<T: ProxierProviderType>(header: HeaderContext<'_>) -> Option<T::Provider> {
     let result = T::Provider::try_new(header);
     match result {
-        Ok(o) => Some(o),
+        Ok(o) => {
+            tracing::info!(protocol = T::PROXY_TYPE, "protocol matched");
+            Some(o)
+        }
         Err(e) => {
-            tracing::warn!(fails = T::PROXY_TYPE,get_proxy_provider_error = ?Report::from_error(e));
+            tracing::debug!(protocol = T::PROXY_TYPE, "protocol mismatch: {}", e);
             None
         }
     }
@@ -669,7 +672,13 @@ pub async fn run_client_with_listener<const NEED_CODEC: bool>(
     #[cfg(feature = "auto-proxy")]
     let sender = {
         let (tx, rx) = flume::bounded(DEFAULT_CHAN_CAP);
-        let task = async move { run_auto_proxy_by_country(rx).await };
+        let token = cancel_token.clone();
+        let task = async move {
+            tokio::select! {
+                _ = token.cancelled() => {}
+                _ = run_auto_proxy_by_country(rx) => {}
+            }
+        };
         if let Some(ref t) = tracker {
             t.spawn(task);
         } else {
@@ -684,6 +693,7 @@ pub async fn run_client_with_listener<const NEED_CODEC: bool>(
                 let Ok((stream, _)) = ret else {
                     continue;
                 };
+                let token = cancel_token.clone();
                 #[cfg(feature = "auto-proxy")]
                 let sender = sender.clone();
                 let task = client_proxy_background_task::<NEED_CODEC>(ClientProxyContext {
@@ -692,10 +702,16 @@ pub async fn run_client_with_listener<const NEED_CODEC: bool>(
                     #[cfg(feature = "auto-proxy")]
                     sender,
                 });
+                let wrapped_task = async move {
+                    tokio::select! {
+                        _ = token.cancelled() => {}
+                        _ = task => {}
+                    }
+                };
                 if let Some(ref t) = tracker {
-                    t.spawn(task);
+                    t.spawn(wrapped_task);
                 } else {
-                    tokio::spawn(task);
+                    tokio::spawn(wrapped_task);
                 }
             }
             _ = cancel_token.cancelled() => {
