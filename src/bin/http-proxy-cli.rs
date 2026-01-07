@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use crossterm::style::Stylize;
 use http_proxy::client::start_client;
 use http_proxy::config::{CLIENT_PORT, SERVER_HOST, SERVER_PORT, init_tracing};
 use mimalloc_rust::GlobalMiMalloc;
@@ -156,6 +157,9 @@ struct Cli {
     /// [optional] Reverse geo-proxy logic: CN sites use proxy, others direct
     #[arg(long, env = "REVERSE_GEO_PROXY")]
     reverse_geo: bool,
+    /// [optional] Use local GeoIP database instead of ip-api.com API
+    #[arg(long, env = "USE_LOCAL_GEOIP")]
+    use_local_geoip: bool,
     /// [optional] Set OS system proxy to local client port (Linux/macOS/Windows)
     #[arg(long)]
     set_system_proxy: bool,
@@ -235,10 +239,10 @@ async fn main() -> Result<()> {
         std::fs::write(&config_path, DEFAULT_CONFIG_TEMPLATE)
             .with_context(|| format!("Failed to create config at '{}'", config_path.display()))?;
         eprintln!();
-        eprintln!("Welcome to HTTP Proxy CLI!");
+        eprintln!("  {}", "Welcome to HTTP Proxy CLI!".cyan().bold());
         eprintln!();
-        eprintln!("Config file created at: {}", config_path.display());
-        eprintln!("Please edit the config file to set your server_host, then run again.");
+        eprintln!("  Config created: {}", config_path.display().to_string().white());
+        eprintln!("  Please edit and set {}, then run again.", "server_host".yellow());
         eprintln!();
         return Ok(());
     };
@@ -291,6 +295,9 @@ async fn main() -> Result<()> {
         if reverse_geo {
             std::env::set_var("REVERSE_GEO_PROXY", "true");
         }
+        if cli.use_local_geoip {
+            std::env::set_var("USE_LOCAL_GEOIP", "true");
+        }
     }
 
     // Check if secret key is configured (not using default)
@@ -308,25 +315,25 @@ async fn main() -> Result<()> {
 
     // Print startup banner
     eprintln!();
-    eprintln!("+------------------------------------------------------------+");
-    if config_valid {
-        eprintln!("|           HTTP Proxy CLI Started Successfully              |");
+    let title = if config_valid {
+        "HTTP Proxy CLI Started".green().bold()
     } else {
-        eprintln!("|           HTTP Proxy CLI Started Unsuccessfully            |");
-    }
-    eprintln!("+------------------------------------------------------------+");
-    eprintln!("|  Local Proxy    : 127.0.0.1:{:<28}|", client_port);
-    eprintln!("|  Remote Server  : {}:{:<28}|", remote_server, server_port);
-    eprintln!("|  Secret Key     : {:<39}|", if secret_key_configured { "configured" } else { "default (insecure)" });
-    eprintln!("|  Reverse Geo    : {:<39}|", if reverse_geo { "enabled" } else { "disabled" });
-    eprintln!("|  System Proxy   : {:<39}|", if do_set_system_proxy { "enabled" } else { "disabled" });
-    eprintln!("+------------------------------------------------------------+");
+        "HTTP Proxy CLI Started (Invalid Config)".red().bold()
+    };
+    eprintln!("  {}", title);
+    eprintln!("{}", "─".repeat(50).dark_grey());
+    eprintln!("  {:16} {}:{}", "Local Proxy".dark_grey(), "127.0.0.1".white(), client_port.to_string().cyan());
+    eprintln!("  {:16} {}:{}", "Remote Server".dark_grey(), remote_server.clone().white(), server_port.to_string().cyan());
+    eprintln!("  {:16} {}", "Secret Key".dark_grey(), if secret_key_configured { "configured".green() } else { "default (insecure)".red() });
+    eprintln!("  {:16} {}", "Reverse Geo".dark_grey(), if reverse_geo { "enabled".green() } else { "disabled".dark_grey() });
+    eprintln!("  {:16} {}", "System Proxy".dark_grey(), if do_set_system_proxy { "enabled".green() } else { "disabled".dark_grey() });
+    eprintln!("{}", "─".repeat(50).dark_grey());
     eprintln!();
 
     if !config_valid {
-        eprintln!("WARNING: server_host not configured properly!");
-        eprintln!("Please edit your config file and set a valid server_host.");
-        eprintln!("Config location: ~/http-proxy-cli-config/config.toml");
+        eprintln!("{} {}", "WARNING:".yellow().bold(), "server_host not configured properly!");
+        eprintln!("  Please edit your config file and set a valid server_host.");
+        eprintln!("  Config location: {}", "~/http-proxy-cli-config/config.toml".white());
         return Ok(());
     }
 

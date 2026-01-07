@@ -39,9 +39,13 @@ pub mod client;
 pub mod config;
 pub mod control;
 pub mod error;
+pub mod geo;
 pub mod metrics;
 pub mod nodes;
 pub mod server;
+
+#[cfg(feature = "tui")]
+pub mod tui;
 
 // ============================================================================
 // Internal modules
