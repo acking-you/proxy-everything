@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use crossterm::style::Stylize;
+use comfy_table::{presets, Cell, Color, Table};
 use http_proxy::client::start_client;
 use http_proxy::config::{CLIENT_PORT, SERVER_HOST, SERVER_PORT, init_tracing};
 use mimalloc_rust::GlobalMiMalloc;
@@ -238,12 +238,13 @@ async fn main() -> Result<()> {
         let config_path = get_default_config_path()?;
         std::fs::write(&config_path, DEFAULT_CONFIG_TEMPLATE)
             .with_context(|| format!("Failed to create config at '{}'", config_path.display()))?;
-        eprintln!();
-        eprintln!("  {}", "Welcome to HTTP Proxy CLI!".cyan().bold());
-        eprintln!();
-        eprintln!("  Config created: {}", config_path.display().to_string().white());
-        eprintln!("  Please edit and set {}, then run again.", "server_host".yellow());
-        eprintln!();
+
+        let mut table = Table::new();
+        table.load_preset(presets::UTF8_BORDERS_ONLY);
+        table.set_header(vec![Cell::new("Welcome to HTTP Proxy CLI!").fg(Color::Cyan)]);
+        table.add_row(vec![format!("Config created: {}", config_path.display())]);
+        table.add_row(vec!["Please edit and set server_host, then run again."]);
+        eprintln!("\n{table}\n");
         return Ok(());
     };
 
@@ -314,26 +315,51 @@ async fn main() -> Result<()> {
     let remote_server = SERVER_HOST.clone();
 
     // Print startup banner
-    eprintln!();
     let title = if config_valid {
-        "HTTP Proxy CLI Started".green().bold()
+        Cell::new("HTTP Proxy CLI Started").fg(Color::Green)
     } else {
-        "HTTP Proxy CLI Started (Invalid Config)".red().bold()
+        Cell::new("HTTP Proxy CLI Started (Invalid Config)").fg(Color::Red)
     };
-    eprintln!("  {}", title);
-    eprintln!("{}", "─".repeat(50).dark_grey());
-    eprintln!("  {:16} {}:{}", "Local Proxy".dark_grey(), "127.0.0.1".white(), client_port.to_string().cyan());
-    eprintln!("  {:16} {}:{}", "Remote Server".dark_grey(), remote_server.clone().white(), server_port.to_string().cyan());
-    eprintln!("  {:16} {}", "Secret Key".dark_grey(), if secret_key_configured { "configured".green() } else { "default (insecure)".red() });
-    eprintln!("  {:16} {}", "Reverse Geo".dark_grey(), if reverse_geo { "enabled".green() } else { "disabled".dark_grey() });
-    eprintln!("  {:16} {}", "System Proxy".dark_grey(), if do_set_system_proxy { "enabled".green() } else { "disabled".dark_grey() });
-    eprintln!("{}", "─".repeat(50).dark_grey());
-    eprintln!();
+
+    let status_cell = |enabled: bool| -> Cell {
+        if enabled {
+            Cell::new("enabled").fg(Color::Green)
+        } else {
+            Cell::new("disabled").fg(Color::DarkGrey)
+        }
+    };
+
+    let mut table = Table::new();
+    table.load_preset(presets::UTF8_FULL);
+    table.set_header(vec![title, Cell::new("")]);
+    table.add_row(vec![
+        Cell::new("Local Proxy"),
+        Cell::new(format!("127.0.0.1:{}", client_port)).fg(Color::Cyan),
+    ]);
+    table.add_row(vec![
+        Cell::new("Remote Server"),
+        Cell::new(format!("{}:{}", remote_server, server_port)).fg(Color::Cyan),
+    ]);
+    table.add_row(vec![
+        Cell::new("Secret Key"),
+        if secret_key_configured {
+            Cell::new("configured").fg(Color::Green)
+        } else {
+            Cell::new("default (insecure)").fg(Color::Red)
+        },
+    ]);
+    table.add_row(vec![Cell::new("Reverse Geo"), status_cell(reverse_geo)]);
+    table.add_row(vec![Cell::new("System Proxy"), status_cell(do_set_system_proxy)]);
+    eprintln!("\n{table}\n");
 
     if !config_valid {
-        eprintln!("{} {}", "WARNING:".yellow().bold(), "server_host not configured properly!");
-        eprintln!("  Please edit your config file and set a valid server_host.");
-        eprintln!("  Config location: {}", "~/http-proxy-cli-config/config.toml".white());
+        let mut warn_table = Table::new();
+        warn_table.load_preset(presets::UTF8_HORIZONTAL_ONLY);
+        warn_table.set_header(vec![Cell::new("⚠ WARNING").fg(Color::Yellow)]);
+        warn_table.add_row(vec!["server_host not configured properly!"]);
+        warn_table.add_row(vec!["Please edit your config file and set a valid server_host."]);
+        warn_table.add_row(vec!["Config location: ~/http-proxy-cli-config/config.toml"]);
+        eprintln!("{warn_table}\n");
         return Ok(());
     }
 
