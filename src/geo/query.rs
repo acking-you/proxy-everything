@@ -58,8 +58,6 @@ pub enum GeoError {
     OpenDb { source: maxminddb::MaxMindDBError },
     #[snafu(display("Failed to lookup IP: {source}"))]
     Lookup { source: maxminddb::MaxMindDBError },
-    #[snafu(display("Country code not found for IP"))]
-    NoCountry,
     #[snafu(display("JSON parse error: {detail}"))]
     JsonParse { detail: String },
     #[snafu(display("IO error: {source}"))]
@@ -205,7 +203,11 @@ async fn download_db(path: &PathBuf) -> Result<()> {
 
     // Decompress
     let pb = ProgressBar::new_spinner();
-    pb.set_style(ProgressStyle::default_spinner().template("{spinner:.cyan} {msg}").unwrap());
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.cyan} {msg}")
+            .unwrap(),
+    );
     pb.set_message("Decompressing...");
     pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
@@ -283,10 +285,20 @@ fn lookup_country_local(ip: IpAddr) -> Result<String> {
     let guard = DB_READER.lock().expect("DB_READER lock poisoned");
     let reader = guard.as_ref().ok_or(GeoError::DataDir)?;
     let city: maxminddb::geoip2::City = reader.lookup(ip).context(LookupSnafu)?;
-    city.country
-        .and_then(|c| c.iso_code)
-        .map(|s| s.to_string())
-        .ok_or(GeoError::NoCountry)
+
+    if let Some(code) = city.country.as_ref().and_then(|c| c.iso_code) {
+        return Ok(code.to_string());
+    }
+
+    // No country code found, log the city structure for debugging
+    tracing::warn!(
+        ip = %ip,
+        city = ?city.city,
+        continent = ?city.continent,
+        registered_country = ?city.registered_country,
+        "No country code found, using XX"
+    );
+    Ok("XX".to_string())
 }
 
 /// Query geo info for a single host using local database.
@@ -308,21 +320,33 @@ async fn query_geo_local(host: &str) -> Result<String> {
     lookup_country_local(ip)
 }
 
-/// Query geo info for multiple IPs using local database.
-async fn query_geo_batch_local(ips: &[impl AsRef<str>]) -> Result<HashMap<String, String>> {
+/// Query geo info for multiple hosts using local database.
+async fn query_geo_batch_local(hosts: &[impl AsRef<str>]) -> Result<HashMap<String, String>> {
     let mut result = HashMap::new();
-    if ips.is_empty() {
+    if hosts.is_empty() {
         return Ok(result);
     }
 
     // Ensure database exists
     ensure_db().await?;
 
-    for ip_str in ips {
-        if let Ok(ip) = ip_str.as_ref().parse::<IpAddr>() {
-            if let Ok(code) = lookup_country_local(ip) {
-                result.insert(ip_str.as_ref().to_string(), code);
+    for host in hosts {
+        let host_str = host.as_ref();
+        // Try parse as IP first, fallback to DNS resolution
+        let ip = if let Ok(ip) = host_str.parse::<IpAddr>() {
+            ip
+        } else if let Ok(addrs) = uni_stream::addr::get_ip_addrs(host_str).await {
+            if let Some(ip) = addrs.into_iter().next() {
+                ip
+            } else {
+                continue;
             }
+        } else {
+            continue;
+        };
+
+        if let Ok(code) = lookup_country_local(ip) {
+            result.insert(host_str.to_string(), code);
         }
     }
 
