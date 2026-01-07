@@ -35,6 +35,7 @@
 // Public modules
 // ============================================================================
 
+pub mod cli_config;
 pub mod client;
 pub mod config;
 pub mod control;

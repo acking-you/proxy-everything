@@ -828,15 +828,22 @@ pub async fn run_server_with_listener(
                 match result {
                     Ok((socket, peer_addr)) => {
                         let ctx = ctx.clone();
+                        let token = cancel_token.clone();
                         let task = async move {
                             if let Err(e) = handle_connect(socket, peer_addr, ctx).await {
                                 tracing::error!("connection error: {e}");
                             }
                         };
+                        let wrapped_task = async move {
+                            tokio::select! {
+                                _ = token.cancelled() => {}
+                                _ = task => {}
+                            }
+                        };
                         if let Some(ref t) = tracker {
-                            t.spawn(task);
+                            t.spawn(wrapped_task);
                         } else {
-                            tokio::spawn(task);
+                            tokio::spawn(wrapped_task);
                         }
                     }
                     Err(e) => {

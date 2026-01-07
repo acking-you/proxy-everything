@@ -2,127 +2,16 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use comfy_table::{presets, Cell, Color, Table};
+use comfy_table::{Cell, Color, Table, presets};
+use http_proxy::cli_config::{
+    Config, DEFAULT_CONFIG_TEMPLATE, SystemProxyGuard, find_config, get_default_config_path,
+};
 use http_proxy::client::start_client;
 use http_proxy::config::{CLIENT_PORT, SERVER_HOST, SERVER_PORT, init_tracing};
 use mimalloc_rust::GlobalMiMalloc;
-use serde::{Deserialize, Serialize};
-use sysproxy::Sysproxy;
-
-const CONFIG_FILE_NAME: &str = "config.toml";
-const DATA_DIR_NAME: &str = "http-proxy-cli-config";
-/// Default config template embedded at compile time from config.template.toml
-const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../../config.template.toml");
 
 #[global_allocator]
 static GLOBAL_MIMALLOC: GlobalMiMalloc = GlobalMiMalloc;
-
-#[derive(Debug, Deserialize, Serialize, Default)]
-struct Config {
-    server_host: Option<String>,
-    server_port: Option<u16>,
-    client_port: Option<u16>,
-    secret_key: Option<String>,
-    nonproxy_keywords: Option<Vec<String>>,
-    proxy_keywords: Option<Vec<String>>,
-    need_codec_ip: Option<Vec<String>>,
-    msg_key: Option<bool>,
-    reverse_geo: Option<bool>,
-    set_system_proxy: Option<bool>,
-    restore_proxy_on_exit: Option<bool>,
-}
-
-impl Config {
-    fn load(path: &PathBuf) -> Result<Self> {
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read config file '{}'", path.display()))?;
-        toml::from_str(&content)
-            .with_context(|| format!("Failed to parse config file '{}'", path.display()))
-    }
-
-    fn save(&self, path: &PathBuf) -> Result<()> {
-        let content = toml::to_string_pretty(self)
-            .context("Failed to serialize config")?;
-        std::fs::write(path, content)
-            .with_context(|| format!("Failed to write config file '{}'", path.display()))
-    }
-
-    /// Create config from CLI args (only non-default values)
-    fn from_cli(cli: &Cli) -> Self {
-        Self {
-            server_host: cli.server_host.clone(),
-            server_port: cli.server_port,
-            client_port: cli.client_port,
-            secret_key: cli.secret_key.clone(),
-            nonproxy_keywords: cli.nonproxy_keywords.as_ref().map(|s| s.split(',').map(String::from).collect()),
-            proxy_keywords: cli.proxy_keywords.as_ref().map(|s| s.split(',').map(String::from).collect()),
-            need_codec_ip: cli.need_codec_ip.as_ref().map(|s| s.split(',').map(String::from).collect()),
-            msg_key: if cli.msg_key { Some(true) } else { None },
-            reverse_geo: if cli.reverse_geo { Some(true) } else { None },
-            set_system_proxy: if cli.set_system_proxy { Some(true) } else { None },
-            restore_proxy_on_exit: None,
-        }
-    }
-
-    /// Check if CLI has any meaningful args
-    fn cli_has_args(cli: &Cli) -> bool {
-        cli.server_host.is_some()
-            || cli.server_port.is_some()
-            || cli.client_port.is_some()
-            || cli.secret_key.is_some()
-            || cli.msg_key
-            || cli.reverse_geo
-            || cli.set_system_proxy
-    }
-}
-
-/// Get the directory where the executable is located
-fn get_exe_dir() -> Option<PathBuf> {
-    std::env::current_exe().ok()?.parent().map(|p| p.to_path_buf())
-}
-
-/// Get home directory
-fn get_home_dir() -> Option<PathBuf> {
-    dirs::home_dir()
-}
-
-/// Get data directory: ~/http-proxy-cli/
-fn get_data_dir() -> Result<PathBuf> {
-    let home = get_home_dir().context("Failed to get home directory")?;
-    let data_dir = home.join(DATA_DIR_NAME);
-    if !data_dir.exists() {
-        std::fs::create_dir_all(&data_dir)
-            .with_context(|| format!("Failed to create data directory '{}'", data_dir.display()))?;
-    }
-    Ok(data_dir)
-}
-
-/// Find config file: exe dir > data dir
-fn find_config() -> Option<PathBuf> {
-    // 1. Check exe directory
-    if let Some(exe_dir) = get_exe_dir() {
-        let config_path = exe_dir.join(CONFIG_FILE_NAME);
-        if config_path.exists() {
-            return Some(config_path);
-        }
-    }
-
-    // 2. Check data directory ~/http-proxy-cli/
-    if let Ok(data_dir) = get_data_dir() {
-        let config_path = data_dir.join(CONFIG_FILE_NAME);
-        if config_path.exists() {
-            return Some(config_path);
-        }
-    }
-
-    None
-}
-
-/// Get default config path (data dir)
-fn get_default_config_path() -> Result<PathBuf> {
-    let data_dir = get_data_dir()?;
-    Ok(data_dir.join(CONFIG_FILE_NAME))
-}
 
 #[derive(Parser)]
 #[command(author = "L_B__", version, about, long_about = None)]
@@ -165,51 +54,46 @@ struct Cli {
     set_system_proxy: bool,
 }
 
-fn set_system_proxy(port: u16) -> Option<Sysproxy> {
-    if !Sysproxy::is_support() {
-        tracing::error!("System proxy is not supported on this platform");
-        return None;
-    }
-    let original = match Sysproxy::get_system_proxy() {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!("Failed to get current system proxy: {e}");
-            return None;
+impl Cli {
+    /// Create config from CLI args (only non-default values)
+    fn to_config(&self) -> Config {
+        Config {
+            server_host: self.server_host.clone(),
+            server_port: self.server_port,
+            client_port: self.client_port,
+            secret_key: self.secret_key.clone(),
+            nonproxy_keywords: self
+                .nonproxy_keywords
+                .as_ref()
+                .map(|s| s.split(',').map(String::from).collect()),
+            proxy_keywords: self
+                .proxy_keywords
+                .as_ref()
+                .map(|s| s.split(',').map(String::from).collect()),
+            need_codec_ip: self
+                .need_codec_ip
+                .as_ref()
+                .map(|s| s.split(',').map(String::from).collect()),
+            msg_key: if self.msg_key { Some(true) } else { None },
+            reverse_geo: if self.reverse_geo { Some(true) } else { None },
+            use_local_geoip: if self.use_local_geoip { Some(true) } else { None },
+            set_system_proxy: if self.set_system_proxy {
+                Some(true)
+            } else {
+                None
+            },
         }
-    };
-    let new_proxy = Sysproxy {
-        enable: true,
-        host: "127.0.0.1".into(),
-        port,
-        bypass: original.bypass.clone(),
-    };
-    if let Err(e) = new_proxy.set_system_proxy() {
-        tracing::error!("Failed to set system proxy: {e}");
-        return None;
     }
-    tracing::info!("System proxy set to 127.0.0.1:{port}");
-    Some(original)
-}
 
-fn disable_system_proxy(original: Sysproxy) {
-    let disabled = Sysproxy {
-        enable: false,
-        host: original.host,
-        port: original.port,
-        bypass: original.bypass,
-    };
-    if let Err(e) = disabled.set_system_proxy() {
-        tracing::error!("Failed to disable system proxy: {e}");
-    } else {
-        tracing::info!("System proxy disabled");
-    }
-}
-
-fn restore_system_proxy(original: Sysproxy) {
-    if let Err(e) = original.set_system_proxy() {
-        tracing::error!("Failed to restore system proxy: {e}");
-    } else {
-        tracing::info!("System proxy restored");
+    /// Check if CLI has any meaningful args
+    fn has_args(&self) -> bool {
+        self.server_host.is_some()
+            || self.server_port.is_some()
+            || self.client_port.is_some()
+            || self.secret_key.is_some()
+            || self.msg_key
+            || self.reverse_geo
+            || self.set_system_proxy
     }
 }
 
@@ -226,9 +110,9 @@ async fn main() -> Result<()> {
         Config::load(path)?
     } else if let Some(path) = find_config() {
         Config::load(&path)?
-    } else if Config::cli_has_args(&cli) {
+    } else if cli.has_args() {
         // Save CLI args to config file
-        let config = Config::from_cli(&cli);
+        let config = cli.to_config();
         let config_path = get_default_config_path()?;
         config.save(&config_path)?;
         eprintln!("Config saved to: {}", config_path.display());
@@ -241,7 +125,9 @@ async fn main() -> Result<()> {
 
         let mut table = Table::new();
         table.load_preset(presets::UTF8_BORDERS_ONLY);
-        table.set_header(vec![Cell::new("Welcome to HTTP Proxy CLI!").fg(Color::Cyan)]);
+        table.set_header(vec![
+            Cell::new("Welcome to HTTP Proxy CLI!").fg(Color::Cyan),
+        ]);
         table.add_row(vec![format!("Config created: {}", config_path.display())]);
         table.add_row(vec!["Please edit and set server_host, then run again."]);
         eprintln!("\n{table}\n");
@@ -253,12 +139,13 @@ async fn main() -> Result<()> {
         .server_host
         .or(config.server_host)
         .or_else(|| std::env::var("SERVER_HOST").ok())
-        .context("server_host is required. Use -s/--server-host, config file, or SERVER_HOST env var.")?;
+        .context(
+            "server_host is required. Use -s/--server-host, config file, or SERVER_HOST env var.",
+        )?;
 
     let msg_key = cli.msg_key || config.msg_key.unwrap_or(false);
     let reverse_geo = cli.reverse_geo || config.reverse_geo.unwrap_or(false);
     let do_set_system_proxy = cli.set_system_proxy || config.set_system_proxy.unwrap_or(false);
-    let restore_proxy_on_exit = config.restore_proxy_on_exit.unwrap_or(false);
 
     // SAFETY: Environment variables are set before any async code runs.
     // The tokio runtime hasn't started yet, so there are no other threads
@@ -296,7 +183,7 @@ async fn main() -> Result<()> {
         if reverse_geo {
             std::env::set_var("REVERSE_GEO_PROXY", "true");
         }
-        if cli.use_local_geoip {
+        if cli.use_local_geoip || config.use_local_geoip.unwrap_or(false) {
             std::env::set_var("USE_LOCAL_GEOIP", "true");
         }
     }
@@ -349,7 +236,10 @@ async fn main() -> Result<()> {
         },
     ]);
     table.add_row(vec![Cell::new("Reverse Geo"), status_cell(reverse_geo)]);
-    table.add_row(vec![Cell::new("System Proxy"), status_cell(do_set_system_proxy)]);
+    table.add_row(vec![
+        Cell::new("System Proxy"),
+        status_cell(do_set_system_proxy),
+    ]);
     eprintln!("\n{table}\n");
 
     if !config_valid {
@@ -357,14 +247,17 @@ async fn main() -> Result<()> {
         warn_table.load_preset(presets::UTF8_HORIZONTAL_ONLY);
         warn_table.set_header(vec![Cell::new("⚠ WARNING").fg(Color::Yellow)]);
         warn_table.add_row(vec!["server_host not configured properly!"]);
-        warn_table.add_row(vec!["Please edit your config file and set a valid server_host."]);
+        warn_table.add_row(vec![
+            "Please edit your config file and set a valid server_host.",
+        ]);
         warn_table.add_row(vec!["Config location: ~/http-proxy-cli-config/config.toml"]);
         eprintln!("{warn_table}\n");
         return Ok(());
     }
 
-    let original_proxy = if do_set_system_proxy {
-        set_system_proxy(client_port)
+    // RAII: proxy is disabled automatically when _guard is dropped
+    let _guard = if do_set_system_proxy {
+        SystemProxyGuard::new(client_port)
     } else {
         None
     };
@@ -372,17 +265,7 @@ async fn main() -> Result<()> {
     if msg_key {
         start_client::<true>("0.0.0.0", client_port).await.unwrap();
     } else {
-        start_client::<false>("0.0.0.0", client_port)
-            .await
-            .unwrap();
-    }
-
-    if let Some(original) = original_proxy {
-        if restore_proxy_on_exit {
-            restore_system_proxy(original);
-        } else {
-            disable_system_proxy(original);
-        }
+        start_client::<false>("0.0.0.0", client_port).await.unwrap();
     }
 
     Ok(())
