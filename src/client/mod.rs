@@ -372,7 +372,43 @@ pub async fn need_proxy(
     }
     match has_proxy_status {
         None => {
-            // start check by ip-api.com
+            // TODO: Performance optimization - migrate from flume to tokio::sync::mpsc
+            //
+            // Current problem:
+            // - Every connection sends a request through flume channel to background task
+            // - Background task checks cache and queries geo API if needed
+            // - This creates a bottleneck when many connections arrive simultaneously
+            // - flume lacks native batch receive (only drain/try_iter which are suboptimal)
+            //
+            // Migration plan:
+            // 1. Replace flume with tokio::sync::mpsc throughout auto_proxy module
+            // 2. Use recv_many(&mut VecDeque, limit) for efficient batch receiving:
+            //    - Single wake for multiple messages
+            //    - Single lock operation for batch
+            //    - Better memory locality (direct write to VecDeque)
+            // 3. Expose global cache as DashMap for fast-path lookup:
+            //    - Create PROXY_CACHE: OnceLock<Arc<DashMap<String, bool>>>
+            //    - Check cache here BEFORE sending to channel
+            //    - Cache hit = O(1) return, no channel overhead
+            // 4. Batch process cache misses:
+            //    - Collect multiple requests with recv_many()
+            //    - Deduplicate hosts
+            //    - Call query_geo_batch() instead of query_geo_single()
+            //    - Broadcast results to all waiting connections
+            //
+            // Benefits:
+            // - recv_many: 1 wake + 1 lock for N messages (vs N wakes + N locks)
+            // - Cache fast-path bypasses channel entirely
+            // - Batch geo API calls reduce HTTP requests
+            //
+            // Files to modify:
+            // - src/client/auto_proxy.rs: replace flume with tokio::mpsc, add global cache
+            // - src/client/mod.rs: add cache lookup before channel send
+            // - Cargo.toml: remove flume dependency
+            //
+            // Alternative: fork https://github.com/fereidani/kanal and add recv_many()
+            // kanal has better performance than tokio::mpsc but lacks batch receive API
+
             let (tx, rx) = flume::bounded(1);
             sender
                 .send_async((host.as_ref().to_string(), tx))
