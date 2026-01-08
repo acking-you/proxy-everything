@@ -12,7 +12,7 @@ set -e
 INSTANCE="${1:-proxy}"
 case "$INSTANCE" in
     proxy|relay)
-        shift
+        shift || true
         ;;
     start|stop|restart|update|logs|status|shell|init|help|--help|-h|all)
         INSTANCE="proxy"
@@ -20,7 +20,7 @@ case "$INSTANCE" in
     *)
         # Check if it's a custom instance name (not a command)
         if [[ "$1" =~ ^[a-zA-Z][a-zA-Z0-9_-]*$ ]] && [[ ! "$1" =~ ^(start|stop|restart|update|logs|status|shell|init)$ ]]; then
-            shift
+            shift || true
         else
             INSTANCE="proxy"
         fi
@@ -70,6 +70,12 @@ log_info()  { echo -e "${GREEN}[INFO]${NC} ${CYAN}[$INSTANCE]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} ${CYAN}[$INSTANCE]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} ${CYAN}[$INSTANCE]${NC} $1"; }
 
+confirm_port() {
+    local default_port="$1"
+    read -p "确认端口 [$default_port]: " input_port
+    echo "${input_port:-$default_port}"
+}
+
 check_config() {
     # In relay mode, TURELY_PROXY_SERVER must be set
     if [ "$INSTANCE" = "relay" ] && [ -z "$TURELY_PROXY_SERVER" ]; then
@@ -86,6 +92,9 @@ check_config() {
 
 do_start() {
     check_config
+
+    # 确认端口
+    PORT=$(confirm_port "$PORT")
 
     if docker ps -q -f name="^${CONTAINER}$" | grep -q .; then
         log_warn "Container '$CONTAINER' is already running"
@@ -135,19 +144,55 @@ do_restart() {
 }
 
 do_update() {
-    check_config
+    local container="${1:-$CONTAINER}"
 
-    log_info "Pulling latest image..."
-    docker pull "$IMAGE"
+    # 检查容器是否存在
+    if ! docker inspect "$container" &>/dev/null; then
+        log_error "Container '$container' not found"
+        exit 1
+    fi
 
-    log_info "Stopping old container..."
-    docker stop "$CONTAINER" 2>/dev/null || true
-    docker rm "$CONTAINER" 2>/dev/null || true
+    # 从 inspect 提取配置
+    local image=$(docker inspect --format '{{.Config.Image}}' "$container")
+    local name=$(docker inspect --format '{{.Name}}' "$container" | sed 's/^\///')
+    local restart=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$container")
+
+    # 提取端口映射
+    local ports=$(docker inspect --format '{{range $p, $conf := .HostConfig.PortBindings}}-p {{(index $conf 0).HostPort}}:{{$p}} {{end}}' "$container" | sed 's|/tcp||g')
+
+    # 提取挂载卷
+    local binds=$(docker inspect --format '{{range .HostConfig.Binds}}-v {{.}} {{end}}' "$container")
+
+    # 提取环境变量（过滤默认值）
+    local envs=""
+    while IFS= read -r env; do
+        [ -z "$env" ] && continue
+        case "$env" in
+            PATH=*|HOME=/http2-server/conf|SERVER_PORT=1081) continue ;;
+            *) envs="$envs -e $env" ;;
+        esac
+    done < <(docker inspect --format '{{range .Config.Env}}{{.}}{{"\n"}}{{end}}' "$container")
+
+    # 拉取新镜像
+    log_info "Pulling latest image: $image"
+    docker pull "$image"
+
+    # 停止并删除旧容器
+    log_info "Stopping container: $container"
+    docker stop "$container"
+    docker rm "$container"
+
+    # 构建并执行新命令
+    local docker_cmd="docker run -d --name $name"
+    [ "$restart" != "no" ] && [ -n "$restart" ] && docker_cmd="$docker_cmd --restart=$restart"
+    docker_cmd="$docker_cmd $ports $binds $envs $image"
 
     log_info "Starting new container..."
-    do_start
+    log_info "Command: $docker_cmd"
+    eval "$docker_cmd"
 
     log_info "Update complete!"
+    docker ps | grep "$name"
 }
 
 do_logs() {
@@ -238,6 +283,9 @@ EOF
 }
 
 do_init() {
+    # 确认端口
+    PORT=$(confirm_port "$PORT")
+
     if [ -f "$CONFIG_FILE" ]; then
         log_warn "Config file already exists: $CONFIG_FILE"
         cat "$CONFIG_FILE"
@@ -246,7 +294,7 @@ do_init() {
 
     case "$INSTANCE" in
         relay)
-            cat > "$CONFIG_FILE" << 'EOF'
+            cat > "$CONFIG_FILE" << EOF
 # Proxy Relay Instance Configuration
 # This instance runs in transparent relay mode
 
@@ -257,7 +305,7 @@ PROXY_IMAGE="ackingliu/http2-server:latest"
 PROXY_CONTAINER="proxy-relay"
 
 # Server port (relay typically uses different port)
-PROXY_PORT="11111"
+PROXY_PORT="$PORT"
 
 # Data directory
 PROXY_DATA_DIR="/opt/proxy-relay-data"
@@ -273,11 +321,11 @@ TURELY_PROXY_SERVER="your-real-proxy:1081"
 # CONTROL_ADMIN_TOKEN="your-admin-token"
 
 # Optional: Advertised address for node sync
-# NODE_ADVERTISE_ADDR="your-public-ip:11111"
+# NODE_ADVERTISE_ADDR="your-public-ip:$PORT"
 EOF
             ;;
         *)
-            cat > "$CONFIG_FILE" << 'EOF'
+            cat > "$CONFIG_FILE" << EOF
 # Proxy Server Configuration
 # This instance runs in normal proxy mode
 
@@ -288,7 +336,7 @@ PROXY_IMAGE="ackingliu/http2-server:latest"
 PROXY_CONTAINER="proxy-server"
 
 # Server port
-PROXY_PORT="1081"
+PROXY_PORT="$PORT"
 
 # Data directory
 PROXY_DATA_DIR="/opt/proxy-data"
@@ -300,7 +348,7 @@ SECRET_KEY="my-secret-key123my-secret-key123"
 # CONTROL_ADMIN_TOKEN="your-admin-token"
 
 # Optional: Advertised address for node sync
-# NODE_ADVERTISE_ADDR="your-public-ip:1081"
+# NODE_ADVERTISE_ADDR="your-public-ip:$PORT"
 
 # Optional: Enable relay mode (leave empty for normal proxy)
 # TURELY_PROXY_SERVER="upstream-proxy:1081"
@@ -320,7 +368,7 @@ case "$CMD" in
     start)   do_start ;;
     stop)    do_stop ;;
     restart) do_restart ;;
-    update)  do_update ;;
+    update)  do_update "$1" ;;
     logs)    do_logs "$1" ;;
     status)  do_status ;;
     shell)   do_shell ;;
