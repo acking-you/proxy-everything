@@ -239,7 +239,7 @@ async fn test_control_client_recent_connections() {
             .expect("Failed to connect control client");
 
         let connections = ctrl
-            .get_recent_connections(None, 10)
+            .get_recent_connections(None)
             .await
             .expect("Failed to get connections");
 
@@ -284,7 +284,7 @@ async fn test_metrics_with_real_traffic() {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Verify metrics
-        let connections = server.metrics().get_recent_connections(10);
+        let connections = server.metrics().get_recent_connections(100);
         assert!(!connections.is_empty(), "Should have recorded connections");
 
         let conn = &connections[0];
