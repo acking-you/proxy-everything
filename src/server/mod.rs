@@ -449,13 +449,32 @@ fn format_ip_addr(ip: IpAddr, port: u16) -> String {
     }
 }
 
-fn detect_peer_ip() -> Option<IpAddr> {
+fn detect_local_ip() -> Option<IpAddr> {
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
     // This does not send packets, but lets the OS pick an outbound interface.
     socket.connect("8.8.8.8:80").ok()?;
-    let peer_addr = socket.peer_addr().ok()?;
-    let ip = peer_addr.ip();
+    let local_addr = socket.local_addr().ok()?;
+    let ip = local_addr.ip();
     if ip.is_unspecified() { None } else { Some(ip) }
+}
+
+/// Detect public IP by querying external services.
+fn detect_public_ip() -> Option<IpAddr> {
+    const SERVICES: &[&str] = &[
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+        "https://icanhazip.com",
+    ];
+
+    let agent = ureq::Agent::new_with_defaults();
+    for url in SERVICES {
+        if let Ok(body) = agent.get(*url).call().and_then(|mut r| r.body_mut().read_to_string()) {
+            if let Ok(ip) = body.trim().parse::<IpAddr>() {
+                return Some(ip);
+            }
+        }
+    }
+    None
 }
 
 fn parse_addr_list(raw: &str) -> Vec<String> {
@@ -934,9 +953,13 @@ pub async fn start_server(host: impl AsRef<str> + Debug, port: u16) {
     if let Some(addr) = auto_advertise_addr(host.as_ref(), port) {
         self_addrs.push(addr);
     }
-    // Only use peer-detected IP if no other addresses are set
-    if let Some(peer_ip) = detect_peer_ip() {
-        self_addrs.push(format_ip_addr(peer_ip, port));
+    // Detect public IP, fallback to local IP if network fails
+    if let Some(ip) = detect_public_ip() {
+        tracing::info!("Detected public IP: {}", ip);
+        self_addrs.push(format_ip_addr(ip, port));
+    } else if let Some(ip) = detect_local_ip() {
+        tracing::warn!("Failed to detect public IP, using local IP: {}", ip);
+        self_addrs.push(format_ip_addr(ip, port));
     }
     let mut unique = Vec::new();
     for addr in self_addrs {
