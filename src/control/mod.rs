@@ -95,9 +95,9 @@ pub enum ControlOp {
 
     // Metrics queries
     GetRealtimeStats,
-    GetRecentConnections { limit: u32 },
-    GetTimeBuckets { granularity: Granularity, count: u32 },
-    GetTopN { category: TopCategory, limit: u32 },
+    GetRecentConnections,
+    GetTimeBuckets { granularity: Granularity },
+    GetTopN { category: TopCategory },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -284,9 +284,20 @@ impl ControlClient {
                 op: ControlOp::ListNodes,
             })
             .await?;
+        if !resp.ok {
+            return Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: resp.error.unwrap_or_else(|| "list nodes failed".to_string()),
+                },
+            });
+        }
         match resp.result {
             Some(ControlResult::Nodes { nodes }) => Ok(nodes),
-            _ => Ok(vec![]),
+            _ => Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: "unexpected response type for list_nodes".to_string(),
+                },
+            }),
         }
     }
 
@@ -300,26 +311,48 @@ impl ControlClient {
                 op: ControlOp::GetRealtimeStats,
             })
             .await?;
+        if !resp.ok {
+            return Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: resp.error.unwrap_or_else(|| "get realtime stats failed".to_string()),
+                },
+            });
+        }
         match resp.result {
             Some(ControlResult::RealtimeStats { stats }) => Ok(Some(stats)),
-            _ => Ok(None),
+            None => Ok(None),
+            _ => Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: "unexpected response type for get_realtime_stats".to_string(),
+                },
+            }),
         }
     }
 
     pub async fn get_recent_connections(
         &mut self,
         token: Option<String>,
-        limit: u32,
     ) -> Result<Vec<ConnectionRecord>> {
         let resp = self
             .request(ControlRequest {
                 token,
-                op: ControlOp::GetRecentConnections { limit },
+                op: ControlOp::GetRecentConnections,
             })
             .await?;
+        if !resp.ok {
+            return Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: resp.error.unwrap_or_else(|| "get recent connections failed".to_string()),
+                },
+            });
+        }
         match resp.result {
             Some(ControlResult::Connections { connections }) => Ok(connections),
-            _ => Ok(vec![]),
+            _ => Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: "unexpected response type for get_recent_connections".to_string(),
+                },
+            }),
         }
     }
 
@@ -327,17 +360,27 @@ impl ControlClient {
         &mut self,
         token: Option<String>,
         granularity: Granularity,
-        count: u32,
     ) -> Result<Vec<TimeBucket>> {
         let resp = self
             .request(ControlRequest {
                 token,
-                op: ControlOp::GetTimeBuckets { granularity, count },
+                op: ControlOp::GetTimeBuckets { granularity },
             })
             .await?;
+        if !resp.ok {
+            return Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: resp.error.unwrap_or_else(|| "get time buckets failed".to_string()),
+                },
+            });
+        }
         match resp.result {
             Some(ControlResult::TimeBuckets { buckets }) => Ok(buckets),
-            _ => Ok(vec![]),
+            _ => Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: "unexpected response type for get_time_buckets".to_string(),
+                },
+            }),
         }
     }
 
@@ -345,17 +388,27 @@ impl ControlClient {
         &mut self,
         token: Option<String>,
         category: TopCategory,
-        limit: u32,
     ) -> Result<Vec<TopNEntry>> {
         let resp = self
             .request(ControlRequest {
                 token,
-                op: ControlOp::GetTopN { category, limit },
+                op: ControlOp::GetTopN { category },
             })
             .await?;
+        if !resp.ok {
+            return Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: resp.error.unwrap_or_else(|| "get top n failed".to_string()),
+                },
+            });
+        }
         match resp.result {
             Some(ControlResult::TopN { entries }) => Ok(entries),
-            _ => Ok(vec![]),
+            _ => Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: "unexpected response type for get_top_n".to_string(),
+                },
+            }),
         }
     }
 

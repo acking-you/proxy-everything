@@ -80,7 +80,9 @@ async fn main() -> std::io::Result<()> {
     });
 
     // Trigger initial fetch
-    let _ = cmd_tx.send(DataCommand::Refresh).await;
+    if cmd_tx.send(DataCommand::Refresh).await.is_err() {
+        state.error = Some("Data fetcher task died".to_string());
+    }
 
     // Auto-refresh timer
     let refresh_interval = Duration::from_secs(cli_arc.refresh);
@@ -107,7 +109,9 @@ async fn main() -> std::io::Result<()> {
                         })
                         .collect();
                     if !uncached_ips.is_empty() {
-                        let _ = cmd_tx.send(DataCommand::QueryGeo(uncached_ips)).await;
+                        if cmd_tx.send(DataCommand::QueryGeo(uncached_ips)).await.is_err() {
+                            state.error = Some("Failed to send geo query command".to_string());
+                        }
                     }
 
                     if let Some(addr) = server_addr {
@@ -149,6 +153,23 @@ async fn main() -> std::io::Result<()> {
                 if key.kind == KeyEventKind::Press {
                     if state.show_add_dialog {
                         handle_add_dialog_input(&mut state, key.code, &cmd_tx).await;
+                    } else if state.show_filter {
+                        match key.code {
+                            KeyCode::Esc => {
+                                state.show_filter = false;
+                            }
+                            KeyCode::Enter => {
+                                state.show_filter = false;
+                                state.page_offset = 0;
+                            }
+                            KeyCode::Backspace => {
+                                state.filter_input.pop();
+                            }
+                            KeyCode::Char(c) => {
+                                state.filter_input.push(c);
+                            }
+                            _ => {}
+                        }
                     } else if state.switching {
                         if key.code == KeyCode::Esc {
                             state.switching = false;
@@ -162,9 +183,11 @@ async fn main() -> std::io::Result<()> {
                             }
                             KeyCode::Tab | KeyCode::Right => {
                                 state.tab_index = (state.tab_index + 1) % TAB_COUNT;
+                                state.page_offset = 0;
                             }
                             KeyCode::BackTab | KeyCode::Left => {
                                 state.tab_index = (state.tab_index + TAB_COUNT - 1) % TAB_COUNT;
+                                state.page_offset = 0;
                             }
                             KeyCode::Up => {
                                 if state.selected_node > 0 {
@@ -186,10 +209,15 @@ async fn main() -> std::io::Result<()> {
                             KeyCode::Char('d') if state.tab_index == 0 => {
                                 if let Some(data) = &state.data {
                                     if let Some(node) = data.nodes.get(state.selected_node) {
-                                        let _ = cmd_tx
+                                        if cmd_tx
                                             .send(DataCommand::RemoveNode(node.node_id.clone()))
-                                            .await;
-                                        state.loading = true;
+                                            .await
+                                            .is_err()
+                                        {
+                                            state.error = Some("Failed to send remove node command".to_string());
+                                        } else {
+                                            state.loading = true;
+                                        }
                                     }
                                 }
                             }
@@ -197,17 +225,34 @@ async fn main() -> std::io::Result<()> {
                                 if let Some(data) = &state.data {
                                     if let Some(node) = data.nodes.get(state.selected_node) {
                                         let addr = node.addr.clone();
-                                        let _ = cmd_tx
+                                        if cmd_tx
                                             .send(DataCommand::SwitchServer(addr.clone()))
-                                            .await;
-                                        state.switching = true;
-                                        state.switch_target = Some(addr);
+                                            .await
+                                            .is_err()
+                                        {
+                                            state.error = Some("Failed to send switch server command".to_string());
+                                        } else {
+                                            state.switching = true;
+                                            state.switch_target = Some(addr);
+                                        }
                                     }
                                 }
                             }
                             KeyCode::Char('r') => {
-                                let _ = cmd_tx.send(DataCommand::Refresh).await;
-                                state.loading = true;
+                                if cmd_tx.send(DataCommand::Refresh).await.is_err() {
+                                    state.error = Some("Failed to send refresh command".to_string());
+                                } else {
+                                    state.loading = true;
+                                }
+                            }
+                            KeyCode::Char('/') if state.tab_index == 2 || state.tab_index == 3 => {
+                                state.show_filter = true;
+                            }
+                            KeyCode::PageUp if state.tab_index == 2 || state.tab_index == 3 => {
+                                state.page_offset = state.page_offset.saturating_sub(state.page_size);
+                            }
+                            KeyCode::PageDown if state.tab_index == 2 || state.tab_index == 3 => {
+                                state.page_offset += state.page_size;
                             }
                             _ => {}
                         }
@@ -218,9 +263,12 @@ async fn main() -> std::io::Result<()> {
 
         // Auto-refresh
         if last_refresh.elapsed() >= refresh_interval && !state.loading && !state.switching {
-            let _ = cmd_tx.send(DataCommand::Refresh).await;
-            state.loading = true;
-            last_refresh = std::time::Instant::now();
+            if cmd_tx.send(DataCommand::Refresh).await.is_err() {
+                state.error = Some("Failed to send auto-refresh command".to_string());
+            } else {
+                state.loading = true;
+                last_refresh = std::time::Instant::now();
+            }
         }
     }
 

@@ -31,16 +31,24 @@ pub fn parse_addr(addr: &str) -> Result<(String, u16), String> {
     Ok((parts[1].to_string(), port))
 }
 
-/// Format bytes into human-readable string.
+/// Format bytes into human-readable string with proper units.
 pub fn format_bytes(bytes: u64) -> String {
-    if bytes >= 1024 * 1024 * 1024 {
-        format!("{:.1}G", bytes as f64 / 1024.0 / 1024.0 / 1024.0)
-    } else if bytes >= 1024 * 1024 {
-        format!("{:.1}M", bytes as f64 / 1024.0 / 1024.0)
-    } else if bytes >= 1024 {
-        format!("{:.1}K", bytes as f64 / 1024.0)
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    const TB: f64 = GB * 1024.0;
+
+    let b = bytes as f64;
+    if b >= TB {
+        format!("{:.2} TB", b / TB)
+    } else if b >= GB {
+        format!("{:.2} GB", b / GB)
+    } else if b >= MB {
+        format!("{:.2} MB", b / MB)
+    } else if b >= KB {
+        format!("{:.2} KB", b / KB)
     } else {
-        format!("{}B", bytes)
+        format!("{} B", bytes)
     }
 }
 
@@ -57,9 +65,12 @@ pub async fn handle_add_dialog_input(state: &mut AppState, key: KeyCode, cmd_tx:
             } else if !addr.contains(':') {
                 state.add_node_error = Some("Format: host:port".to_string());
             } else {
-                let _ = cmd_tx.send(DataCommand::AddNode(addr)).await;
-                state.show_add_dialog = false;
-                state.loading = true;
+                if cmd_tx.send(DataCommand::AddNode(addr)).await.is_err() {
+                    state.add_node_error = Some("Failed to send add node command".to_string());
+                } else {
+                    state.show_add_dialog = false;
+                    state.loading = true;
+                }
             }
         }
         KeyCode::Backspace => {

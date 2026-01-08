@@ -55,9 +55,9 @@ pub enum GeoError {
     #[snafu(display("Failed to write GeoIP database: {source}"))]
     WriteDb { source: std::io::Error },
     #[snafu(display("Failed to open GeoIP database: {source}"))]
-    OpenDb { source: maxminddb::MaxMindDBError },
+    OpenDb { source: maxminddb::MaxMindDbError },
     #[snafu(display("Failed to lookup IP: {source}"))]
-    Lookup { source: maxminddb::MaxMindDBError },
+    Lookup { source: maxminddb::MaxMindDbError },
     #[snafu(display("JSON parse error: {detail}"))]
     JsonParse { detail: String },
     #[snafu(display("IO error: {source}"))]
@@ -284,9 +284,10 @@ fn lookup_country_local(ip: IpAddr) -> Result<String> {
     get_reader()?;
     let guard = DB_READER.lock().expect("DB_READER lock poisoned");
     let reader = guard.as_ref().ok_or(GeoError::DataDir)?;
-    let city: maxminddb::geoip2::City = reader.lookup(ip).context(LookupSnafu)?;
+    let result = reader.lookup(ip).context(LookupSnafu)?;
+    let city: maxminddb::geoip2::City = result.decode().context(LookupSnafu)?.ok_or(GeoError::DataDir)?;
 
-    if let Some(code) = city.country.as_ref().and_then(|c| c.iso_code) {
+    if let Some(code) = city.country.iso_code {
         return Ok(code.to_string());
     }
 
