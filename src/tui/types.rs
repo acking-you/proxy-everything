@@ -64,6 +64,12 @@ pub struct AppState {
     // Geo cache
     pub geo_cache: HashMap<String, String>,
     pub geo_error: Option<String>,
+    // Pagination
+    pub page_offset: usize,
+    pub page_size: usize,
+    // Filter
+    pub filter_input: String,
+    pub show_filter: bool,
 }
 
 impl AppState {
@@ -83,6 +89,10 @@ impl AppState {
             anim_frame: 0,
             geo_cache: HashMap::new(),
             geo_error: None,
+            page_offset: 0,
+            page_size: 20,
+            filter_input: String::new(),
+            show_filter: false,
         }
     }
 }

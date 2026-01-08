@@ -24,30 +24,51 @@ pub async fn data_fetcher_task(
             DataCommand::Shutdown => break,
             DataCommand::Refresh => {
                 let result = fetch_data(&cli, &session_key, &mut client).await;
-                let _ = data_tx
+                if data_tx
                     .send(result.map(|d| DataResult::Data(d, None)))
-                    .await;
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Main loop closed, exiting data fetcher");
+                    break;
+                }
             }
             DataCommand::AddNode(addr) => {
                 let result = add_node(&cli, &session_key, &mut client, &addr).await;
                 if let Err(e) = result {
-                    let _ = data_tx.send(Err(e)).await;
+                    if data_tx.send(Err(e)).await.is_err() {
+                        tracing::warn!("Main loop closed, exiting data fetcher");
+                        break;
+                    }
                 } else {
                     let result = fetch_data(&cli, &session_key, &mut client).await;
-                    let _ = data_tx
+                    if data_tx
                         .send(result.map(|d| DataResult::Data(d, None)))
-                        .await;
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!("Main loop closed, exiting data fetcher");
+                        break;
+                    }
                 }
             }
             DataCommand::RemoveNode(node_id) => {
                 let result = remove_node(&cli, &session_key, &mut client, &node_id).await;
                 if let Err(e) = result {
-                    let _ = data_tx.send(Err(e)).await;
+                    if data_tx.send(Err(e)).await.is_err() {
+                        tracing::warn!("Main loop closed, exiting data fetcher");
+                        break;
+                    }
                 } else {
                     let result = fetch_data(&cli, &session_key, &mut client).await;
-                    let _ = data_tx
+                    if data_tx
                         .send(result.map(|d| DataResult::Data(d, None)))
-                        .await;
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!("Main loop closed, exiting data fetcher");
+                        break;
+                    }
                 }
             }
             DataCommand::SwitchServer(addr) => {
@@ -55,16 +76,25 @@ pub async fn data_fetcher_task(
                 match result {
                     Ok(data) => {
                         client = None;
-                        let _ = data_tx.send(Ok(DataResult::Data(data, Some(addr)))).await;
+                        if data_tx.send(Ok(DataResult::Data(data, Some(addr)))).await.is_err() {
+                            tracing::warn!("Main loop closed, exiting data fetcher");
+                            break;
+                        }
                     }
                     Err(e) => {
-                        let _ = data_tx.send(Err(e)).await;
+                        if data_tx.send(Err(e)).await.is_err() {
+                            tracing::warn!("Main loop closed, exiting data fetcher");
+                            break;
+                        }
                     }
                 }
             }
             DataCommand::QueryGeo(ips) => match query_geo_batch(&ips).await {
                 Ok(result) => {
-                    let _ = data_tx.send(Ok(DataResult::Geo(result))).await;
+                    if data_tx.send(Ok(DataResult::Geo(result))).await.is_err() {
+                        tracing::warn!("Main loop closed, exiting data fetcher");
+                        break;
+                    }
                 }
                 Err(e) => {
                     tracing::error!("Geo query failed: {}", e);
@@ -72,7 +102,10 @@ pub async fn data_fetcher_task(
                         "Geo query failed: {}. Try --use-local-geoip for offline lookup.",
                         e
                     );
-                    let _ = data_tx.send(Ok(DataResult::GeoError(msg))).await;
+                    if data_tx.send(Ok(DataResult::GeoError(msg))).await.is_err() {
+                        tracing::warn!("Main loop closed, exiting data fetcher");
+                        break;
+                    }
                 }
             },
         }
@@ -117,17 +150,17 @@ async fn fetch_data_inner(
         .map_err(|e| e.to_string())?;
 
     data.connections = client
-        .get_recent_connections(cli.token.clone(), 50)
+        .get_recent_connections(cli.token.clone())
         .await
         .map_err(|e| e.to_string())?;
 
     data.buckets = client
-        .get_time_buckets(cli.token.clone(), Granularity::Minute, 10)
+        .get_time_buckets(cli.token.clone(), Granularity::Minute)
         .await
         .map_err(|e| e.to_string())?;
 
     let top_hosts = client
-        .get_top_n(cli.token.clone(), TopCategory::Hosts, 10)
+        .get_top_n(cli.token.clone(), TopCategory::Hosts)
         .await
         .map_err(|e| e.to_string())?;
     data.top_hosts = top_hosts
@@ -136,7 +169,7 @@ async fn fetch_data_inner(
         .collect();
 
     let top_ips = client
-        .get_top_n(cli.token.clone(), TopCategory::Ips, 10)
+        .get_top_n(cli.token.clone(), TopCategory::Ips)
         .await
         .map_err(|e| e.to_string())?;
     data.top_ips = top_ips
@@ -163,17 +196,17 @@ async fn switch_server(addr: &str, session_key: &Option<String>) -> Result<Fetch
         .map_err(|e| e.to_string())?;
 
     data.connections = client
-        .get_recent_connections(None, 50)
+        .get_recent_connections(None)
         .await
         .map_err(|e| e.to_string())?;
 
     data.buckets = client
-        .get_time_buckets(None, Granularity::Minute, 10)
+        .get_time_buckets(None, Granularity::Minute)
         .await
         .map_err(|e| e.to_string())?;
 
     let top_hosts = client
-        .get_top_n(None, TopCategory::Hosts, 10)
+        .get_top_n(None, TopCategory::Hosts)
         .await
         .map_err(|e| e.to_string())?;
     data.top_hosts = top_hosts
@@ -182,7 +215,7 @@ async fn switch_server(addr: &str, session_key: &Option<String>) -> Result<Fetch
         .collect();
 
     let top_ips = client
-        .get_top_n(None, TopCategory::Ips, 10)
+        .get_top_n(None, TopCategory::Ips)
         .await
         .map_err(|e| e.to_string())?;
     data.top_ips = top_ips

@@ -48,8 +48,8 @@ pub fn draw_ui(f: &mut Frame, state: &mut AppState) {
         match state.tab_index {
             0 => draw_nodes_tab(f, chunks[1], data, state.selected_node, &state.geo_cache),
             1 => draw_realtime_tab(f, chunks[1], data),
-            2 => draw_connections_tab(f, chunks[1], data),
-            3 => draw_topn_tab(f, chunks[1], data),
+            2 => draw_connections_tab(f, chunks[1], data, state),
+            3 => draw_topn_tab(f, chunks[1], data, state),
             _ => {}
         }
     } else {
@@ -63,10 +63,10 @@ pub fn draw_ui(f: &mut Frame, state: &mut AppState) {
     } else if let Some(geo_err) = &state.geo_error {
         Span::styled(format!("⚠ {}", geo_err), Style::default().fg(Color::Yellow))
     } else {
-        let help = if state.tab_index == 0 {
-            format!("q:quit  ←→:tabs  ↑↓:select  Enter:switch  a:add  d:delete  r:refresh{}", loading_indicator)
-        } else {
-            format!("q:quit  ←→:tabs  r:refresh{}", loading_indicator)
+        let help = match state.tab_index {
+            0 => format!("q:quit  ←→:tabs  ↑↓:select  Enter:switch  a:add  d:delete  r:refresh{}", loading_indicator),
+            2 | 3 => format!("q:quit  ←→:tabs  /:filter  PgUp/PgDn:page  r:refresh{}", loading_indicator),
+            _ => format!("q:quit  ←→:tabs  r:refresh{}", loading_indicator),
         };
         Span::styled(help, Style::default().fg(Color::DarkGray))
     };
@@ -74,6 +74,10 @@ pub fn draw_ui(f: &mut Frame, state: &mut AppState) {
 
     if state.show_add_dialog {
         draw_add_dialog(f, state);
+    }
+
+    if state.show_filter {
+        draw_filter_dialog(f, state);
     }
 }
 
@@ -152,6 +156,35 @@ fn draw_add_dialog(f: &mut Frame, state: &AppState) {
         Block::default()
             .borders(Borders::ALL)
             .title("Add Node (Enter to confirm, Esc to cancel)")
+            .style(Style::default().bg(Color::DarkGray)),
+    );
+    f.render_widget(dialog, dialog_area);
+}
+
+fn draw_filter_dialog(f: &mut Frame, state: &AppState) {
+    let area = f.area();
+    let dialog_width = 50;
+    let dialog_height = 5;
+    let x = (area.width.saturating_sub(dialog_width)) / 2;
+    let y = (area.height.saturating_sub(dialog_height)) / 2;
+    let dialog_area = Rect::new(x, y, dialog_width, dialog_height);
+
+    f.render_widget(Clear, dialog_area);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(format!("  Filter: {}_", state.filter_input)),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Enter to apply, Esc to cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let dialog = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Filter by domain")
             .style(Style::default().bg(Color::DarkGray)),
     );
     f.render_widget(dialog, dialog_area);
@@ -257,9 +290,11 @@ fn draw_realtime_tab(f: &mut Frame, area: Rect, data: &FetchedData) {
                 disk_percent
             )),
             Line::from(format!(
-                "Disk IO: R:{} W:{}",
-                format_bytes(rt.sys_disk_read_bytes),
-                format_bytes(rt.sys_disk_write_bytes)
+                "Net: ↓{}/s ↑{}/s (Total: ↓{} ↑{})",
+                format_bytes(rt.sys_net_recv_rate),
+                format_bytes(rt.sys_net_sent_rate),
+                format_bytes(rt.sys_net_recv_bytes),
+                format_bytes(rt.sys_net_sent_bytes)
             )),
         ]
     } else {
@@ -296,14 +331,27 @@ fn draw_realtime_tab(f: &mut Frame, area: Rect, data: &FetchedData) {
     );
 }
 
-fn draw_connections_tab(f: &mut Frame, area: Rect, data: &FetchedData) {
+fn draw_connections_tab(f: &mut Frame, area: Rect, data: &FetchedData, state: &AppState) {
+    // Filter connections
+    let filtered: Vec<_> = if state.filter_input.is_empty() {
+        data.connections.iter().collect()
+    } else {
+        let filter = state.filter_input.to_lowercase();
+        data.connections
+            .iter()
+            .filter(|c| c.dest_host.to_lowercase().contains(&filter))
+            .collect()
+    };
+
+    let total = filtered.len();
+    let start = state.page_offset.min(total.saturating_sub(1));
+    let end = (start + state.page_size).min(total);
+
     let header = Row::new(vec!["Time", "Client IP", "Destination", "↑", "↓", "ms"])
         .style(Style::default().fg(Color::Yellow));
 
-    let rows: Vec<Row> = data
-        .connections
+    let rows: Vec<Row> = filtered[start..end]
         .iter()
-        .take(20)
         .map(|c| {
             let ts = chrono::DateTime::from_timestamp_millis(c.started_at_ms)
                 .map(|dt| dt.format("%H:%M:%S").to_string())
@@ -319,55 +367,84 @@ fn draw_connections_tab(f: &mut Frame, area: Rect, data: &FetchedData) {
         })
         .collect();
 
+    let title = if state.filter_input.is_empty() {
+        format!("Connections [{}-{}/{}]", start + 1, end, total)
+    } else {
+        format!("Connections [{}-{}/{}] filter: {}", start + 1, end, total, state.filter_input)
+    };
+
     let table = Table::new(
         rows,
         [
             Constraint::Length(10),
             Constraint::Length(15),
             Constraint::Min(20),
-            Constraint::Length(8),
-            Constraint::Length(8),
+            Constraint::Length(10),
+            Constraint::Length(10),
             Constraint::Length(6),
         ],
     )
     .header(header)
-    .block(Block::default().borders(Borders::ALL).title("Recent Connections"));
+    .block(Block::default().borders(Borders::ALL).title(title));
     f.render_widget(table, area);
 }
 
-fn draw_topn_tab(f: &mut Frame, area: Rect, data: &FetchedData) {
+fn draw_topn_tab(f: &mut Frame, area: Rect, data: &FetchedData, state: &AppState) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
-    // Top Hosts
-    let host_items: Vec<ListItem> = data
-        .top_hosts
+    // Filter and paginate hosts
+    let filtered_hosts: Vec<_> = if state.filter_input.is_empty() {
+        data.top_hosts.iter().collect()
+    } else {
+        let filter = state.filter_input.to_lowercase();
+        data.top_hosts
+            .iter()
+            .filter(|(host, _)| host.to_lowercase().contains(&filter))
+            .collect()
+    };
+    let total_hosts = filtered_hosts.len();
+    let start_h = state.page_offset.min(total_hosts.saturating_sub(1));
+    let end_h = (start_h + state.page_size).min(total_hosts);
+
+    let host_items: Vec<ListItem> = filtered_hosts[start_h..end_h]
         .iter()
         .enumerate()
         .map(|(i, (host, bytes))| {
-            ListItem::new(format!("{}. {} ({})", i + 1, host, format_bytes(*bytes)))
+            ListItem::new(format!("{}. {} ({})", start_h + i + 1, host, format_bytes(*bytes)))
         })
         .collect();
+
+    let host_title = if state.filter_input.is_empty() {
+        format!("Top Hosts [{}-{}/{}]", start_h + 1, end_h, total_hosts)
+    } else {
+        format!("Top Hosts [{}-{}/{}] filter: {}", start_h + 1, end_h, total_hosts, state.filter_input)
+    };
     f.render_widget(
         List::new(host_items)
-            .block(Block::default().borders(Borders::ALL).title("Top Hosts")),
+            .block(Block::default().borders(Borders::ALL).title(host_title)),
         chunks[0],
     );
 
-    // Top IPs
-    let ip_items: Vec<ListItem> = data
-        .top_ips
+    // Top IPs (no filter, just pagination)
+    let total_ips = data.top_ips.len();
+    let start_i = state.page_offset.min(total_ips.saturating_sub(1));
+    let end_i = (start_i + state.page_size).min(total_ips);
+
+    let ip_items: Vec<ListItem> = data.top_ips[start_i..end_i]
         .iter()
         .enumerate()
         .map(|(i, (ip, bytes))| {
-            ListItem::new(format!("{}. {} ({})", i + 1, ip, format_bytes(*bytes)))
+            ListItem::new(format!("{}. {} ({})", start_i + i + 1, ip, format_bytes(*bytes)))
         })
         .collect();
+
+    let ip_title = format!("Top IPs [{}-{}/{}]", start_i + 1, end_i, total_ips);
     f.render_widget(
         List::new(ip_items)
-            .block(Block::default().borders(Borders::ALL).title("Top IPs")),
+            .block(Block::default().borders(Borders::ALL).title(ip_title)),
         chunks[1],
     );
 }

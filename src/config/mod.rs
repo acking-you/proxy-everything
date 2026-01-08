@@ -20,10 +20,10 @@ pub fn init_tracing() {
 pub fn gen_random_key() -> String {
     const CHARSET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let random_string: String = (0..32)
         .map(|_| {
-            let idx = rng.gen_range(0..CHARSET.len());
+            let idx = rng.random_range(0..CHARSET.len());
             CHARSET[idx] as char
         })
         .collect();

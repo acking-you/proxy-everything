@@ -374,26 +374,26 @@ fn handle_control_request(request: ControlRequest, ctx: Arc<ServerContext>) -> C
                 result: Some(ControlResult::RealtimeStats { stats }),
             }
         }
-        ControlOp::GetRecentConnections { limit } => {
-            let connections = ctx.metrics.get_recent_connections(limit as usize);
+        ControlOp::GetRecentConnections => {
+            let connections = ctx.metrics.get_recent_connections(100);
             ControlResponse {
                 ok: true,
                 error: None,
                 result: Some(ControlResult::Connections { connections }),
             }
         }
-        ControlOp::GetTimeBuckets { granularity, count } => {
-            let buckets = ctx.metrics.get_time_buckets(granularity, count as usize);
+        ControlOp::GetTimeBuckets { granularity } => {
+            let buckets = ctx.metrics.get_time_buckets(granularity, 60);
             ControlResponse {
                 ok: true,
                 error: None,
                 result: Some(ControlResult::TimeBuckets { buckets }),
             }
         }
-        ControlOp::GetTopN { category, limit } => {
+        ControlOp::GetTopN { category } => {
             let entries = ctx
                 .metrics
-                .get_top_n(category, limit as usize)
+                .get_top_n(category, 100)
                 .into_iter()
                 .map(|(key, stats)| TopNEntry { key, stats })
                 .collect();
@@ -430,7 +430,10 @@ fn auto_advertise_addr(host: &str, port: u16) -> Option<String> {
         return None;
     }
     if host == "localhost" {
-        return Some(format_ip_addr(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port));
+        return Some(format_ip_addr(
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            port,
+        ));
     }
     let ip = host.parse::<IpAddr>().ok()?;
     if ip.is_unspecified() {
@@ -450,13 +453,28 @@ fn detect_local_ip() -> Option<IpAddr> {
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
     // This does not send packets, but lets the OS pick an outbound interface.
     socket.connect("8.8.8.8:80").ok()?;
-    let local = socket.local_addr().ok()?;
-    let ip = local.ip();
-    if ip.is_unspecified() {
-        None
-    } else {
-        Some(ip)
+    let local_addr = socket.local_addr().ok()?;
+    let ip = local_addr.ip();
+    if ip.is_unspecified() { None } else { Some(ip) }
+}
+
+/// Detect public IP by querying external services.
+fn detect_public_ip() -> Option<IpAddr> {
+    const SERVICES: &[&str] = &[
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+        "https://icanhazip.com",
+    ];
+
+    let agent = ureq::Agent::new_with_defaults();
+    for url in SERVICES {
+        if let Ok(body) = agent.get(*url).call().and_then(|mut r| r.body_mut().read_to_string()) {
+            if let Ok(ip) = body.trim().parse::<IpAddr>() {
+                return Some(ip);
+            }
+        }
     }
+    None
 }
 
 fn parse_addr_list(raw: &str) -> Vec<String> {
@@ -584,11 +602,12 @@ async fn handle_connect_inner(
     // In relay mode, skip header decryption
     if TURELY_PROXY_SERVER.is_some() {
         let truely_proxy_server = TURELY_PROXY_SERVER.as_ref().unwrap();
-        let truely_proxy_stream = TcpStream::connect(truely_proxy_server)
-            .await
-            .context(IoSnafu {
-                detail: format!("Connect to truely_proxy_server:{}", truely_proxy_server),
-            })?;
+        let truely_proxy_stream =
+            TcpStream::connect(truely_proxy_server)
+                .await
+                .context(IoSnafu {
+                    detail: format!("Connect to truely_proxy_server:{}", truely_proxy_server),
+                })?;
         let (r, w) = truely_proxy_stream.into_split();
         let (server_reader, mut server_writer) = (AsyncReader::new(r), AsyncWriter::new(w));
         set_data_size(&mut server_writer, msg_len)
@@ -603,7 +622,14 @@ async fn handle_connect_inner(
         let result =
             proxy_with_metrics_normal(client_reader, server_reader, client_writer, server_writer)
                 .await;
-        record_connection(&ctx, &peer_ip, &format!("relay:{}", truely_proxy_server), 0, started_at_ms, &result);
+        record_connection(
+            &ctx,
+            &peer_ip,
+            &format!("relay:{}", truely_proxy_server),
+            0,
+            started_at_ms,
+            &result,
+        );
         return result.map(|_| ());
     }
 
@@ -672,11 +698,17 @@ async fn handle_connect_inner(
         )
         .await
     } else {
-        proxy_with_metrics_normal(client_reader, server_reader, client_writer, server_writer)
-            .await
+        proxy_with_metrics_normal(client_reader, server_reader, client_writer, server_writer).await
     };
 
-    record_connection(&ctx, &peer_ip, &dest_host, dest_port, started_at_ms, &result);
+    record_connection(
+        &ctx,
+        &peer_ip,
+        &dest_host,
+        dest_port,
+        started_at_ms,
+        &result,
+    );
     result.map(|_| ())
 }
 
@@ -690,7 +722,16 @@ fn record_connection(
 ) {
     let stats = match result {
         Ok(stats) => *stats,
-        Err(_) => TransferStats::default(),
+        Err(e) => {
+            tracing::error!(
+                "connection to {}:{} from {} failed: {}",
+                dest_host,
+                dest_port,
+                peer_ip,
+                e
+            );
+            TransferStats::default()
+        }
     };
     let ended_at_ms = current_time_ms();
     let duration_ms = (ended_at_ms - started_at_ms).max(0);
@@ -755,16 +796,24 @@ pub async fn run_server_with_listener(
     let stats_cancel = cancel_token.clone();
     tokio::spawn(async move {
         use crate::metrics::SystemStats;
-        use sysinfo::{Disks, Pid, ProcessesToUpdate, System};
+        use sysinfo::{Disks, Networks, Pid, ProcessesToUpdate, System};
         let pid = Pid::from_u32(std::process::id());
         let mut sys = System::new_all();
         let mut disks = Disks::new_with_refreshed_list();
+        let mut networks = Networks::new_with_refreshed_list();
         // Initial refresh for CPU baseline
         sys.refresh_cpu_all();
+        sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+
+        // Track previous network bytes for rate calculation
+        let mut prev_net_recv: u64 = 0;
+        let mut prev_net_sent: u64 = 0;
+        let interval_secs: u64 = 5;
+
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         loop {
             tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(interval_secs)) => {
                     // Refresh process stats
                     sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
                     if let Some(proc) = sys.process(pid) {
@@ -774,7 +823,8 @@ pub async fn run_server_with_listener(
                     // Refresh system stats
                     sys.refresh_cpu_all();
                     sys.refresh_memory();
-                    disks.refresh();
+                    disks.refresh(true);
+                    networks.refresh(true);
 
                     // Calculate system CPU (average of all cores)
                     let cpu_percent = sys.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>()
@@ -785,21 +835,33 @@ pub async fn run_server_with_listener(
                         (used + d.total_space() - d.available_space(), total + d.total_space())
                     });
 
-                    // Disk IO (cumulative, from /proc/diskstats on Linux)
-                    let (disk_read, disk_write) = sys.processes()
-                        .get(&pid)
-                        .map(|p| {
-                            let disk = p.disk_usage();
-                            (disk.total_read_bytes, disk.total_written_bytes)
-                        })
-                        .unwrap_or((0, 0));
+                    // Network IO (sum of all interfaces)
+                    let (net_recv, net_sent) = networks.iter().fold((0u64, 0u64), |(recv, sent), (_, data)| {
+                        (recv + data.total_received(), sent + data.total_transmitted())
+                    });
+
+                    // Calculate rates (bytes/sec)
+                    let recv_rate = if prev_net_recv > 0 {
+                        net_recv.saturating_sub(prev_net_recv) / interval_secs
+                    } else {
+                        0
+                    };
+                    let sent_rate = if prev_net_sent > 0 {
+                        net_sent.saturating_sub(prev_net_sent) / interval_secs
+                    } else {
+                        0
+                    };
+                    prev_net_recv = net_recv;
+                    prev_net_sent = net_sent;
 
                     metrics_for_stats.update_system_stats(SystemStats {
                         cpu_percent,
                         memory_used: sys.used_memory(),
                         memory_total: sys.total_memory(),
-                        disk_read_bytes: disk_read,
-                        disk_write_bytes: disk_write,
+                        net_recv_bytes: net_recv,
+                        net_sent_bytes: net_sent,
+                        net_recv_rate: recv_rate,
+                        net_sent_rate: sent_rate,
                         disk_used,
                         disk_total,
                     });
@@ -891,8 +953,13 @@ pub async fn start_server(host: impl AsRef<str> + Debug, port: u16) {
     if let Some(addr) = auto_advertise_addr(host.as_ref(), port) {
         self_addrs.push(addr);
     }
-    if let Some(local_ip) = detect_local_ip() {
-        self_addrs.push(format_ip_addr(local_ip, port));
+    // Detect public IP, fallback to local IP if network fails
+    if let Some(ip) = detect_public_ip() {
+        tracing::info!("Detected public IP: {}", ip);
+        self_addrs.push(format_ip_addr(ip, port));
+    } else if let Some(ip) = detect_local_ip() {
+        tracing::warn!("Failed to detect public IP, using local IP: {}", ip);
+        self_addrs.push(format_ip_addr(ip, port));
     }
     let mut unique = Vec::new();
     for addr in self_addrs {
@@ -910,9 +977,7 @@ pub async fn start_server(host: impl AsRef<str> + Debug, port: u16) {
             tracing::warn!("save nodes failed: {err}");
         }
         if NODE_ADVERTISE_ADDR.is_none() {
-            tracing::warn!(
-                "NODE_ADVERTISE_ADDR not set, using detected addresses for node sync"
-            );
+            tracing::warn!("NODE_ADVERTISE_ADDR not set, using detected addresses for node sync");
         }
         Some(node_id)
     } else {
