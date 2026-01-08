@@ -194,7 +194,7 @@ pub enum ProxyError {
     #[snafu(display("Client: failed to send auto-proxy request for `{uri}`"))]
     SendAutoProxy {
         uri: String,
-        source: flume::SendError<crate::client::auto_proxy::SendItem>,
+        source: kanal::SendError,
     },
 
     /// Failed to receive auto-proxy response.
@@ -202,7 +202,7 @@ pub enum ProxyError {
     #[snafu(display("Client: failed to receive auto-proxy response for `{uri}`"))]
     RecvAutoProxy {
         uri: String,
-        source: flume::RecvError,
+        source: kanal::ReceiveError,
     },
 
     /// Cannot proxy localhost.

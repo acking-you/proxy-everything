@@ -707,17 +707,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "flume"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e139bc46ca777eb5efaf62df0ab8cc5fd400866427e56c68b22e414e53bd3be"
-dependencies = [
- "futures-core",
- "futures-sink",
- "spin",
-]
-
-[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -963,11 +952,11 @@ dependencies = [
  "dashmap",
  "dirs",
  "flate2",
- "flume 0.12.0",
  "futures",
  "hashbrown 0.16.1",
  "indexmap",
  "indicatif",
+ "kanal",
  "lru",
  "maxminddb",
  "mimalloc-rust",
@@ -1345,6 +1334,16 @@ checksum = "464a3709c7f55f1f721e5389aa6ea4e3bc6aba669353300af094b29ffbdde1d8"
 dependencies = [
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "kanal"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e3953adf0cd667798b396c2fa13552d6d9b3269d7dd1154c4c416442d1ff574"
+dependencies = [
+ "futures-core",
+ "lock_api",
 ]
 
 [[package]]
@@ -3081,7 +3080,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9277a6681b049c380d50f06f6498f0d62ad3443328e56f40f260493986bd1932"
 dependencies = [
  "bytes",
- "flume 0.11.1",
+ "flume",
  "futures",
  "hashbrown 0.14.5",
  "once_cell",

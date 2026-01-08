@@ -279,14 +279,14 @@ async fn handle_control_session(
 }
 
 fn handle_control_request(request: ControlRequest, ctx: Arc<ServerContext>) -> ControlResponse {
-    if let Some(expected) = ctx.admin_token.as_ref() {
-        if request.token.as_deref() != Some(expected.as_str()) {
-            return ControlResponse {
-                ok: false,
-                error: Some("unauthorized".to_string()),
-                result: None,
-            };
-        }
+    if let Some(expected) = ctx.admin_token.as_ref()
+        && request.token.as_deref() != Some(expected.as_str())
+    {
+        return ControlResponse {
+            ok: false,
+            error: Some("unauthorized".to_string()),
+            result: None,
+        };
     }
 
     match request.op {
@@ -468,10 +468,10 @@ fn detect_public_ip() -> Option<IpAddr> {
 
     let agent = ureq::Agent::new_with_defaults();
     for url in SERVICES {
-        if let Ok(body) = agent.get(*url).call().and_then(|mut r| r.body_mut().read_to_string()) {
-            if let Ok(ip) = body.trim().parse::<IpAddr>() {
-                return Some(ip);
-            }
+        if let Ok(body) = agent.get(*url).call().and_then(|mut r| r.body_mut().read_to_string())
+            && let Ok(ip) = body.trim().parse::<IpAddr>()
+        {
+            return Some(ip);
         }
     }
     None

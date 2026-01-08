@@ -108,10 +108,10 @@ async fn main() -> std::io::Result<()> {
                             }
                         })
                         .collect();
-                    if !uncached_ips.is_empty() {
-                        if cmd_tx.send(DataCommand::QueryGeo(uncached_ips)).await.is_err() {
-                            state.error = Some("Failed to send geo query command".to_string());
-                        }
+                    if !uncached_ips.is_empty()
+                        && cmd_tx.send(DataCommand::QueryGeo(uncached_ips)).await.is_err()
+                    {
+                        state.error = Some("Failed to send geo query command".to_string());
                     }
 
                     if let Some(addr) = server_addr {
@@ -148,115 +148,114 @@ async fn main() -> std::io::Result<()> {
         terminal.draw(|f| draw_ui(f, &mut state))?;
 
         // Handle input
-        if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    if state.show_add_dialog {
-                        handle_add_dialog_input(&mut state, key.code, &cmd_tx).await;
-                    } else if state.show_filter {
-                        match key.code {
-                            KeyCode::Esc => {
-                                state.show_filter = false;
-                            }
-                            KeyCode::Enter => {
-                                state.show_filter = false;
-                                state.page_offset = 0;
-                            }
-                            KeyCode::Backspace => {
-                                state.filter_input.pop();
-                            }
-                            KeyCode::Char(c) => {
-                                state.filter_input.push(c);
-                            }
-                            _ => {}
-                        }
-                    } else if state.switching {
-                        if key.code == KeyCode::Esc {
-                            state.switching = false;
-                            state.switch_target = None;
-                        }
-                    } else {
-                        match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => {
-                                let _ = cmd_tx.send(DataCommand::Shutdown).await;
-                                break;
-                            }
-                            KeyCode::Tab | KeyCode::Right => {
-                                state.tab_index = (state.tab_index + 1) % TAB_COUNT;
-                                state.page_offset = 0;
-                            }
-                            KeyCode::BackTab | KeyCode::Left => {
-                                state.tab_index = (state.tab_index + TAB_COUNT - 1) % TAB_COUNT;
-                                state.page_offset = 0;
-                            }
-                            KeyCode::Up => {
-                                if state.selected_node > 0 {
-                                    state.selected_node -= 1;
-                                }
-                            }
-                            KeyCode::Down => {
-                                if let Some(data) = &state.data {
-                                    if state.selected_node + 1 < data.nodes.len() {
-                                        state.selected_node += 1;
-                                    }
-                                }
-                            }
-                            KeyCode::Char('a') if state.tab_index == 0 => {
-                                state.show_add_dialog = true;
-                                state.add_node_input.clear();
-                                state.add_node_error = None;
-                            }
-                            KeyCode::Char('d') if state.tab_index == 0 => {
-                                if let Some(data) = &state.data {
-                                    if let Some(node) = data.nodes.get(state.selected_node) {
-                                        if cmd_tx
-                                            .send(DataCommand::RemoveNode(node.node_id.clone()))
-                                            .await
-                                            .is_err()
-                                        {
-                                            state.error = Some("Failed to send remove node command".to_string());
-                                        } else {
-                                            state.loading = true;
-                                        }
-                                    }
-                                }
-                            }
-                            KeyCode::Enter if state.tab_index == 0 => {
-                                if let Some(data) = &state.data {
-                                    if let Some(node) = data.nodes.get(state.selected_node) {
-                                        let addr = node.addr.clone();
-                                        if cmd_tx
-                                            .send(DataCommand::SwitchServer(addr.clone()))
-                                            .await
-                                            .is_err()
-                                        {
-                                            state.error = Some("Failed to send switch server command".to_string());
-                                        } else {
-                                            state.switching = true;
-                                            state.switch_target = Some(addr);
-                                        }
-                                    }
-                                }
-                            }
-                            KeyCode::Char('r') => {
-                                if cmd_tx.send(DataCommand::Refresh).await.is_err() {
-                                    state.error = Some("Failed to send refresh command".to_string());
-                                } else {
-                                    state.loading = true;
-                                }
-                            }
-                            KeyCode::Char('/') if state.tab_index == 2 || state.tab_index == 3 => {
-                                state.show_filter = true;
-                            }
-                            KeyCode::PageUp if state.tab_index == 2 || state.tab_index == 3 => {
-                                state.page_offset = state.page_offset.saturating_sub(state.page_size);
-                            }
-                            KeyCode::PageDown if state.tab_index == 2 || state.tab_index == 3 => {
-                                state.page_offset += state.page_size;
-                            }
-                            _ => {}
+        if event::poll(Duration::from_millis(50))?
+            && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            if state.show_add_dialog {
+                handle_add_dialog_input(&mut state, key.code, &cmd_tx).await;
+            } else if state.show_filter {
+                match key.code {
+                    KeyCode::Esc => {
+                        state.show_filter = false;
+                    }
+                    KeyCode::Enter => {
+                        state.show_filter = false;
+                        state.page_offset = 0;
+                    }
+                    KeyCode::Backspace => {
+                        state.filter_input.pop();
+                    }
+                    KeyCode::Char(c) => {
+                        state.filter_input.push(c);
+                    }
+                    _ => {}
+                }
+            } else if state.switching {
+                if key.code == KeyCode::Esc {
+                    state.switching = false;
+                    state.switch_target = None;
+                }
+            } else {
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => {
+                        let _ = cmd_tx.send(DataCommand::Shutdown).await;
+                        break;
+                    }
+                    KeyCode::Tab | KeyCode::Right => {
+                        state.tab_index = (state.tab_index + 1) % TAB_COUNT;
+                        state.page_offset = 0;
+                    }
+                    KeyCode::BackTab | KeyCode::Left => {
+                        state.tab_index = (state.tab_index + TAB_COUNT - 1) % TAB_COUNT;
+                        state.page_offset = 0;
+                    }
+                    KeyCode::Up => {
+                        if state.selected_node > 0 {
+                            state.selected_node -= 1;
                         }
                     }
+                    KeyCode::Down => {
+                        if let Some(data) = &state.data
+                            && state.selected_node + 1 < data.nodes.len()
+                        {
+                            state.selected_node += 1;
+                        }
+                    }
+                    KeyCode::Char('a') if state.tab_index == 0 => {
+                        state.show_add_dialog = true;
+                        state.add_node_input.clear();
+                        state.add_node_error = None;
+                    }
+                    KeyCode::Char('d') if state.tab_index == 0 => {
+                        if let Some(data) = &state.data
+                            && let Some(node) = data.nodes.get(state.selected_node)
+                        {
+                            if cmd_tx
+                                .send(DataCommand::RemoveNode(node.node_id.clone()))
+                                .await
+                                .is_err()
+                            {
+                                state.error = Some("Failed to send remove node command".to_string());
+                            } else {
+                                state.loading = true;
+                            }
+                        }
+                    }
+                    KeyCode::Enter if state.tab_index == 0 => {
+                        if let Some(data) = &state.data
+                            && let Some(node) = data.nodes.get(state.selected_node)
+                        {
+                            let addr = node.addr.clone();
+                            if cmd_tx
+                                .send(DataCommand::SwitchServer(addr.clone()))
+                                .await
+                                .is_err()
+                            {
+                                state.error = Some("Failed to send switch server command".to_string());
+                            } else {
+                                state.switching = true;
+                                state.switch_target = Some(addr);
+                            }
+                        }
+                    }
+                    KeyCode::Char('r') => {
+                        if cmd_tx.send(DataCommand::Refresh).await.is_err() {
+                            state.error = Some("Failed to send refresh command".to_string());
+                        } else {
+                            state.loading = true;
+                        }
+                    }
+                    KeyCode::Char('/') if state.tab_index == 2 || state.tab_index == 3 => {
+                        state.show_filter = true;
+                    }
+                    KeyCode::PageUp if state.tab_index == 2 || state.tab_index == 3 => {
+                        state.page_offset = state.page_offset.saturating_sub(state.page_size);
+                    }
+                    KeyCode::PageDown if state.tab_index == 2 || state.tab_index == 3 => {
+                        state.page_offset += state.page_size;
+                    }
+                    _ => {}
                 }
             }
         }

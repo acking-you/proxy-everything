@@ -176,10 +176,10 @@ where
         let msg_len = match get_data_size(&mut self.reader).await {
             Ok(len) => len,
             Err(e) => {
-                if let ProxyError::ProtocolIo { source, .. } = &e {
-                    if source.kind() == std::io::ErrorKind::UnexpectedEof {
-                        return Ok(None);
-                    }
+                if let ProxyError::ProtocolIo { source, .. } = &e
+                    && source.kind() == std::io::ErrorKind::UnexpectedEof
+                {
+                    return Ok(None);
                 }
                 return Err(ControlError::Protocol { source: e });
             }

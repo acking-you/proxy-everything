@@ -49,8 +49,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use flume::{Receiver, Sender};
 use hashbrown::HashSet;
+use kanal::{AsyncReceiver, AsyncSender};
 use snafu::{OptionExt, ResultExt, Snafu};
 
 #[derive(Debug, Snafu)]
@@ -111,9 +111,9 @@ fn apply_reverse(strategy: ProxyStrategy) -> ProxyStrategy {
 }
 
 pub type IpAddress = String;
-pub type SendItem = (IpAddress, Sender<bool>);
-pub type SenderChan = Sender<SendItem>;
-pub type ReceiverChan = Receiver<SendItem>;
+pub type SendItem = (IpAddress, AsyncSender<bool>);
+pub type SenderChan = AsyncSender<SendItem>;
+pub type ReceiverChan = AsyncReceiver<SendItem>;
 
 /// Data directory name for storing cache files.
 /// All cache files are stored in ~/http-proxy-cli-config/ to consolidate
@@ -168,7 +168,7 @@ struct TaskContext {
     proxy_file: SharedFile,
     non_proxy_file: SharedFile,
     host: String,
-    notifier: Sender<bool>,
+    notifier: AsyncSender<bool>,
     tasks: TaskMap,
 }
 
@@ -208,7 +208,7 @@ pub async fn run_auto_proxy_by_country(receiver: ReceiverChan) {
     let tasks = Arc::new(DashMap::new());
     let mut query_task_id = QueryIpTaskId::new();
     loop {
-        let (host, notifier) = match receiver.recv_async().await {
+        let (host, notifier) = match receiver.recv().await {
             Ok(v) => v,
             Err(e) => {
                 tracing::error!(channel_msg_error = ?e);
@@ -246,16 +246,16 @@ pub async fn run_auto_proxy_by_country(receiver: ReceiverChan) {
     }
 }
 
-async fn cached_send(notifier: Sender<bool>, need_proxy: bool, host: &str) {
-    if let Err(e) = notifier.send_async(need_proxy).await {
+async fn cached_send(notifier: AsyncSender<bool>, need_proxy: bool, host: &str) {
+    if let Err(e) = notifier.send(need_proxy).await {
         tracing::error!(cached_proxy = need_proxy,proxy_host=host ,notifier_send_error = ?e);
     } else {
         tracing::info!(cached_proxy = need_proxy, proxy_host = host);
     }
 }
 
-async fn cache_miss_send(notifier: Sender<bool>, need_proxy: bool, host: &str) {
-    if let Err(e) = notifier.send_async(need_proxy).await {
+async fn cache_miss_send(notifier: AsyncSender<bool>, need_proxy: bool, host: &str) {
+    if let Err(e) = notifier.send(need_proxy).await {
         tracing::error!(cache_miss = need_proxy,proxy_host = host,notifier_send_error = ?e);
     } else {
         tracing::info!(cached_proxy = need_proxy, proxy_host = host);

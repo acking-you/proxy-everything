@@ -56,7 +56,7 @@ use std::fmt::{Debug, Display};
 use std::net::IpAddr;
 
 #[cfg(feature = "auto-proxy")]
-use auto_proxy::{SendItem, SenderChan, run_auto_proxy_by_country};
+use auto_proxy::{SenderChan, run_auto_proxy_by_country};
 use snafu::{OptionExt, Report, ResultExt, Snafu};
 use tokio::io::AsyncReadExt;
 #[cfg(feature = "tokio")]
@@ -70,12 +70,12 @@ use self::socks::{SocksError, SocksProxierProvider};
 use crate::codec::{AsyncReader, AsyncReaderWriterRef, AsyncWriter};
 use crate::config::{NEED_CODEC_IP, gen_random_key};
 use crate::util::{GracefulShutdownManager, GracefulShutdownManagerImpl};
-use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
 use crate::{
     Aes256GcmCryption, MyAsyncWriteExt, ProxyHeader, client_proxy_with_cryptor_codec,
     proxy_with_norlmal_codec, set_data_size,
 };
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 #[derive(Debug, Snafu)]
 pub enum ClientError {
@@ -106,13 +106,13 @@ pub enum ClientError {
     #[snafu(display("URI(`{uri}`) Send item for auto proxy error"))]
     SendAutoProxy {
         uri: String,
-        source: flume::SendError<SendItem>,
+        source: kanal::SendError,
     },
     #[cfg(feature = "auto-proxy")]
     #[snafu(display("URI(`{uri}`) Recv item form auto proxy error"))]
     ReciveAutoProxy {
         uri: String,
-        source: flume::RecvError,
+        source: kanal::ReceiveError,
     },
     #[cfg(feature = "auto-proxy")]
     #[snafu(display("Can't proxy localhost!!! Host(`127.0.0.1:{port}`)"))]
@@ -409,19 +409,16 @@ pub async fn need_proxy(
             // Alternative: fork https://github.com/fereidani/kanal and add recv_many()
             // kanal has better performance than tokio::mpsc but lacks batch receive API
 
-            let (tx, rx) = flume::bounded(1);
+            let (tx, rx) = kanal::bounded_async(1);
             sender
-                .send_async((host.as_ref().to_string(), tx))
+                .send((host.as_ref().to_string(), tx))
                 .await
                 .with_context(|_| SendAutoProxySnafu {
                     uri: get_uri(host.as_ref(), port),
                 })?;
-            match rx
-                .recv_async()
-                .await
-                .with_context(|_| ReciveAutoProxySnafu {
-                    uri: get_uri(host.as_ref(), port),
-                }) {
+            match rx.recv().await.with_context(|_| ReciveAutoProxySnafu {
+                uri: get_uri(host.as_ref(), port),
+            }) {
                 Ok(v) => {
                     if v {
                         Ok(ProxyStatus::NorlmalProxy)
@@ -707,7 +704,7 @@ pub async fn run_client_with_listener<const NEED_CODEC: bool>(
 ) {
     #[cfg(feature = "auto-proxy")]
     let sender = {
-        let (tx, rx) = flume::bounded(DEFAULT_CHAN_CAP);
+        let (tx, rx) = kanal::bounded_async(DEFAULT_CHAN_CAP);
         let token = cancel_token.clone();
         let task = async move {
             tokio::select! {

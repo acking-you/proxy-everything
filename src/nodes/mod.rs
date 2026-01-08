@@ -168,9 +168,7 @@ impl NodeStore {
 
         // Atomic write: write to temp file then rename
         let temp_path = self.file_path.with_extension("json.tmp");
-        if let Err(e) = std::fs::write(&temp_path, &content) {
-            return Err(e);
-        }
+        std::fs::write(&temp_path, &content)?;
         if let Err(e) = std::fs::rename(&temp_path, &self.file_path) {
             // Clean up temp file on rename failure
             let _ = std::fs::remove_file(&temp_path);
@@ -254,10 +252,10 @@ impl NodeStore {
                 continue;
             }
             // Update last_seen if newer
-            if let Some(existing) = store.get(&peer.node_id) {
-                if existing.last_seen_ms > peer.last_seen_ms {
-                    peer.last_seen_ms = existing.last_seen_ms;
-                }
+            if let Some(existing) = store.get(&peer.node_id)
+                && existing.last_seen_ms > peer.last_seen_ms
+            {
+                peer.last_seen_ms = existing.last_seen_ms;
             }
             store.insert(peer.node_id.clone(), peer);
         }

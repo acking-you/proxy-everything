@@ -137,24 +137,22 @@ async fn fetch_data_inner(
     cli: &Cli,
     mut client: ControlClient,
 ) -> Result<(FetchedData, ControlClient), String> {
-    let mut data = FetchedData::default();
-
-    data.nodes = client
+    let nodes = client
         .list_nodes(cli.token.clone())
         .await
         .map_err(|e| e.to_string())?;
 
-    data.realtime = client
+    let realtime = client
         .get_realtime_stats(cli.token.clone())
         .await
         .map_err(|e| e.to_string())?;
 
-    data.connections = client
+    let connections = client
         .get_recent_connections(cli.token.clone())
         .await
         .map_err(|e| e.to_string())?;
 
-    data.buckets = client
+    let buckets = client
         .get_time_buckets(cli.token.clone(), Granularity::Minute)
         .await
         .map_err(|e| e.to_string())?;
@@ -163,7 +161,7 @@ async fn fetch_data_inner(
         .get_top_n(cli.token.clone(), TopCategory::Hosts)
         .await
         .map_err(|e| e.to_string())?;
-    data.top_hosts = top_hosts
+    let top_hosts = top_hosts
         .into_iter()
         .map(|e| (e.key, e.stats.bytes_up + e.stats.bytes_down))
         .collect();
@@ -172,10 +170,19 @@ async fn fetch_data_inner(
         .get_top_n(cli.token.clone(), TopCategory::Ips)
         .await
         .map_err(|e| e.to_string())?;
-    data.top_ips = top_ips
+    let top_ips = top_ips
         .into_iter()
         .map(|e| (e.key, e.stats.bytes_up + e.stats.bytes_down))
         .collect();
+
+    let data = FetchedData {
+        nodes,
+        realtime,
+        connections,
+        buckets,
+        top_hosts,
+        top_ips,
+    };
 
     Ok((data, client))
 }
@@ -186,21 +193,19 @@ async fn switch_server(addr: &str, session_key: &Option<String>) -> Result<Fetch
         .await
         .map_err(|e| e.to_string())?;
 
-    let mut data = FetchedData::default();
+    let nodes = client.list_nodes(None).await.map_err(|e| e.to_string())?;
 
-    data.nodes = client.list_nodes(None).await.map_err(|e| e.to_string())?;
-
-    data.realtime = client
+    let realtime = client
         .get_realtime_stats(None)
         .await
         .map_err(|e| e.to_string())?;
 
-    data.connections = client
+    let connections = client
         .get_recent_connections(None)
         .await
         .map_err(|e| e.to_string())?;
 
-    data.buckets = client
+    let buckets = client
         .get_time_buckets(None, Granularity::Minute)
         .await
         .map_err(|e| e.to_string())?;
@@ -209,7 +214,7 @@ async fn switch_server(addr: &str, session_key: &Option<String>) -> Result<Fetch
         .get_top_n(None, TopCategory::Hosts)
         .await
         .map_err(|e| e.to_string())?;
-    data.top_hosts = top_hosts
+    let top_hosts = top_hosts
         .into_iter()
         .map(|e| (e.key, e.stats.bytes_up + e.stats.bytes_down))
         .collect();
@@ -218,12 +223,19 @@ async fn switch_server(addr: &str, session_key: &Option<String>) -> Result<Fetch
         .get_top_n(None, TopCategory::Ips)
         .await
         .map_err(|e| e.to_string())?;
-    data.top_ips = top_ips
+    let top_ips = top_ips
         .into_iter()
         .map(|e| (e.key, e.stats.bytes_up + e.stats.bytes_down))
         .collect();
 
-    Ok(data)
+    Ok(FetchedData {
+        nodes,
+        realtime,
+        connections,
+        buckets,
+        top_hosts,
+        top_ips,
+    })
 }
 
 async fn add_node(

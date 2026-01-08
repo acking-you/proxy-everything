@@ -157,11 +157,11 @@ impl ShardData {
     ) {
         let hour_ts = (minute_bucket.timestamp_ms / 3_600_000) * 3_600_000;
 
-        if let Some(last) = self.hour_buckets.back_mut() {
-            if last.timestamp_ms == hour_ts {
-                last.merge(&minute_bucket);
-                return;
-            }
+        if let Some(last) = self.hour_buckets.back_mut()
+            && last.timestamp_ms == hour_ts
+        {
+            last.merge(&minute_bucket);
+            return;
         }
 
         let mut new_bucket = minute_bucket;
@@ -178,11 +178,11 @@ impl ShardData {
     fn aggregate_to_day(&mut self, hour_bucket: TimeBucket, max_day_buckets: usize) {
         let day_ts = (hour_bucket.timestamp_ms / 86_400_000) * 86_400_000;
 
-        if let Some(last) = self.day_buckets.back_mut() {
-            if last.timestamp_ms == day_ts {
-                last.merge(&hour_bucket);
-                return;
-            }
+        if let Some(last) = self.day_buckets.back_mut()
+            && last.timestamp_ms == day_ts
+        {
+            last.merge(&hour_bucket);
+            return;
         }
 
         let mut new_bucket = hour_bucket;

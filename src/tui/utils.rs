@@ -64,13 +64,11 @@ pub async fn handle_add_dialog_input(state: &mut AppState, key: KeyCode, cmd_tx:
                 state.add_node_error = Some("Address cannot be empty".to_string());
             } else if !addr.contains(':') {
                 state.add_node_error = Some("Format: host:port".to_string());
+            } else if cmd_tx.send(DataCommand::AddNode(addr)).await.is_err() {
+                state.add_node_error = Some("Failed to send add node command".to_string());
             } else {
-                if cmd_tx.send(DataCommand::AddNode(addr)).await.is_err() {
-                    state.add_node_error = Some("Failed to send add node command".to_string());
-                } else {
-                    state.show_add_dialog = false;
-                    state.loading = true;
-                }
+                state.show_add_dialog = false;
+                state.loading = true;
             }
         }
         KeyCode::Backspace => {
