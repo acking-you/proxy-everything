@@ -3,15 +3,22 @@
 //! This module provides a C-compatible interface for mobile apps to use the proxy client.
 //! It reuses the existing client module logic.
 
-use std::ffi::{CStr, c_char, c_int};
+use std::ffi::{CStr, CString, c_char, c_int};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
 
 use crate::client::run_client_with_listener;
+
+/// Log callback function type.
+/// level: 0=trace, 1=debug, 2=info, 3=warn, 4=error
+pub type LogCallback = extern "C" fn(level: c_int, message: *const c_char);
+
+/// Global log callback
+static LOG_CALLBACK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 
 /// Opaque handle to the proxy client.
 pub struct ProxyHandle {
@@ -43,6 +50,88 @@ pub struct ProxyConfig {
     pub reverse_geo: c_int,  // 0 = CN direct, 1 = CN proxy
 }
 
+/// Set log callback function.
+///
+/// # Safety
+/// `callback` must be a valid function pointer or null to disable logging.
+#[unsafe(no_mangle)]
+pub extern "C" fn proxy_set_log_callback(callback: Option<LogCallback>) {
+    let ptr = callback.map(|f| f as *mut ()).unwrap_or(ptr::null_mut());
+    LOG_CALLBACK.store(ptr, Ordering::SeqCst);
+}
+
+/// Internal function to send log to callback
+fn send_log(level: c_int, message: &str) {
+    let ptr = LOG_CALLBACK.load(Ordering::SeqCst);
+    if !ptr.is_null()
+        && let Ok(c_msg) = CString::new(message)
+    {
+        let callback: LogCallback = unsafe { std::mem::transmute(ptr) };
+        callback(level, c_msg.as_ptr());
+    }
+}
+
+/// Custom tracing layer that forwards logs to FFI callback
+struct FfiLogLayer;
+
+impl<S> tracing_subscriber::Layer<S> for FfiLogLayer
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let level = match *event.metadata().level() {
+            tracing::Level::TRACE => 0,
+            tracing::Level::DEBUG => 1,
+            tracing::Level::INFO => 2,
+            tracing::Level::WARN => 3,
+            tracing::Level::ERROR => 4,
+        };
+
+        // Format the event message
+        let mut visitor = MessageVisitor::default();
+        event.record(&mut visitor);
+        let message = format!(
+            "[{}] {}",
+            event.metadata().target(),
+            visitor.message.unwrap_or_default()
+        );
+        send_log(level, &message);
+    }
+}
+
+#[derive(Default)]
+struct MessageVisitor {
+    message: Option<String>,
+}
+
+impl tracing::field::Visit for MessageVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.message = Some(format!("{:?}", value));
+        } else if self.message.is_none() {
+            self.message = Some(format!("{}: {:?}", field.name(), value));
+        } else {
+            let msg = self.message.take().unwrap();
+            self.message = Some(format!("{}, {}: {:?}", msg, field.name(), value));
+        }
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.message = Some(value.to_string());
+        } else if self.message.is_none() {
+            self.message = Some(format!("{}: {}", field.name(), value));
+        } else {
+            let msg = self.message.take().unwrap();
+            self.message = Some(format!("{}, {}: {}", msg, field.name(), value));
+        }
+    }
+}
+
 /// Create a new proxy handle.
 ///
 /// # Safety
@@ -52,7 +141,7 @@ pub extern "C" fn proxy_create() -> *mut ProxyHandle {
     let runtime = match Runtime::new() {
         Ok(rt) => rt,
         Err(e) => {
-            tracing::error!("Failed to create runtime: {}", e);
+            send_log(4, &format!("Failed to create runtime: {}", e));
             return ptr::null_mut();
         }
     };
@@ -98,7 +187,7 @@ pub unsafe extern "C" fn proxy_start(
 
     // Validate session key length (must be 32 bytes for AES-256)
     if session_key.len() != 32 {
-        tracing::error!("Session key must be 32 bytes, got {}", session_key.len());
+        send_log(4, &format!("Session key must be 32 bytes, got {}", session_key.len()));
         return ProxyResult::InvalidParam;
     }
 
@@ -205,17 +294,25 @@ pub unsafe extern "C" fn proxy_is_running(handle: *const ProxyHandle) -> c_int {
     }
 }
 
-/// Initialize logging.
+/// Initialize logging with FFI callback support.
 ///
 /// # Safety
 /// Can be called multiple times safely.
 #[unsafe(no_mangle)]
 pub extern "C" fn proxy_init_logging() {
-    use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
 
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::from_default_env().add_directive("http_proxy=info".parse().unwrap()),
+    let _ = tracing_subscriber::registry()
+        .with(FfiLogLayer)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stdout)
+                .with_filter(
+                    tracing_subscriber::EnvFilter::from_default_env()
+                        .add_directive("http_proxy=info".parse().unwrap()),
+                ),
         )
         .try_init();
 }
