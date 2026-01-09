@@ -82,11 +82,9 @@ fn send_log(level: c_int, message: &str) {
 /// # Safety
 /// `s` must be a valid pointer returned from a log callback, or null.
 #[unsafe(no_mangle)]
-pub extern "C" fn proxy_free_string(s: *mut c_char) {
+pub unsafe extern "C" fn proxy_free_string(s: *mut c_char) {
     if !s.is_null() {
-        unsafe {
-            drop(CString::from_raw(s));
-        }
+        unsafe { drop(CString::from_raw(s)) };
     }
 }
 
