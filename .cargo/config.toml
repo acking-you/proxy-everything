@@ -1,0 +1,12 @@
+# Android targets: use panic=abort to avoid libunwind dependency
+[target.aarch64-linux-android]
+rustflags = ["-C", "panic=abort"]
+
+[target.armv7-linux-androideabi]
+rustflags = ["-C", "panic=abort"]
+
+[target.x86_64-linux-android]
+rustflags = ["-C", "panic=abort"]
+
+[target.i686-linux-android]
+rustflags = ["-C", "panic=abort"]
