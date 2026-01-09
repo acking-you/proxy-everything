@@ -250,11 +250,18 @@ pub unsafe extern "C" fn proxy_start(
         }
         if reverse_geo {
             std::env::set_var("REVERSE_GEO_PROXY", "true");
+        } else {
+            std::env::remove_var("REVERSE_GEO_PROXY");
         }
         if let Some(ref ips) = need_codec_ips {
             std::env::set_var("NEED_CODEC_IP", ips.join(","));
+        } else {
+            std::env::remove_var("NEED_CODEC_IP");
         }
     }
+
+    // Reload runtime config to pick up new environment variables
+    crate::config::runtime::reload_from_env();
 
     // Build ClientConfig for runtime options
     let client_config = ClientConfig {

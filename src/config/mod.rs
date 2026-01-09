@@ -1,5 +1,7 @@
 use once_cell::sync::Lazy;
+use parking_lot::RwLock;
 use rand::Rng;
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{Layer, fmt};
 
@@ -38,6 +40,158 @@ fn parse_bool_env(var: &str, default: bool) -> bool {
             "1" | "true" | "yes" | "on"
         ),
         Err(_) => default,
+    }
+}
+
+/// Runtime-updatable configuration for FFI
+pub mod runtime {
+    use super::*;
+
+    // Atomic values for simple types
+    static SERVER_PORT_RT: AtomicU16 = AtomicU16::new(1081);
+    static CLIENT_PORT_RT: AtomicU16 = AtomicU16::new(1080);
+    #[cfg(feature = "auto-proxy")]
+    static REVERSE_GEO_RT: AtomicBool = AtomicBool::new(false);
+
+    // RwLock for complex types
+    static SERVER_HOST_RT: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(String::new()));
+    static NEED_CODEC_IP_RT: Lazy<RwLock<Vec<String>>> = Lazy::new(|| RwLock::new(Vec::new()));
+    #[cfg(feature = "auto-proxy")]
+    static PROXY_KEYWORDS_RT: Lazy<RwLock<Vec<ParsedProxyKeyWord>>> =
+        Lazy::new(|| RwLock::new(Vec::new()));
+    #[cfg(feature = "auto-proxy")]
+    static NONPROXY_KEYWORDS_RT: Lazy<RwLock<Vec<String>>> = Lazy::new(|| RwLock::new(Vec::new()));
+
+    // Flag to check if runtime config is initialized
+    static INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+    /// Initialize runtime config from environment variables (called once at startup)
+    pub fn init_from_env() {
+        if INITIALIZED.swap(true, Ordering::SeqCst) {
+            return; // Already initialized
+        }
+        reload_from_env();
+    }
+
+    /// Reload runtime config from environment variables (can be called multiple times)
+    pub fn reload_from_env() {
+        // Server port
+        if let Ok(port) = std::env::var("SERVER_PORT") {
+            if let Ok(p) = port.parse::<u16>() {
+                SERVER_PORT_RT.store(p, Ordering::SeqCst);
+            }
+        }
+
+        // Client port
+        if let Ok(port) = std::env::var("CLIENT_PORT") {
+            if let Ok(p) = port.parse::<u16>() {
+                CLIENT_PORT_RT.store(p, Ordering::SeqCst);
+            }
+        }
+
+        // Server host
+        if let Ok(host) = std::env::var("SERVER_HOST") {
+            *SERVER_HOST_RT.write() = host;
+        }
+
+        // Reverse geo
+        #[cfg(feature = "auto-proxy")]
+        {
+            let reverse = parse_bool_env("REVERSE_GEO_PROXY", false);
+            REVERSE_GEO_RT.store(reverse, Ordering::SeqCst);
+        }
+
+        // Need codec IPs
+        let default_codec_ip = vec![
+            "64.23.159.180".to_string(),
+            server_host(),
+        ];
+        if let Ok(v) = std::env::var("NEED_CODEC_IP") {
+            *NEED_CODEC_IP_RT.write() = split_concat_with_default(v, default_codec_ip);
+        } else {
+            *NEED_CODEC_IP_RT.write() = default_codec_ip;
+        }
+
+        // Proxy/nonproxy keywords (depend on reverse_geo)
+        #[cfg(feature = "auto-proxy")]
+        {
+            let reverse = reverse_geo();
+            let default_proxy = if reverse {
+                CN_KEYWORDS.clone()
+            } else {
+                FOREIGN_KEYWORDS.clone()
+            };
+            let default_nonproxy = if reverse {
+                FOREIGN_KEYWORDS.clone()
+            } else {
+                CN_KEYWORDS.clone()
+            };
+
+            // Proxy keywords
+            let proxy_kw = if let Ok(v) = std::env::var("PROXY_KEYWORDS") {
+                split_concat_with_default(v, default_proxy)
+            } else {
+                default_proxy
+            };
+            *PROXY_KEYWORDS_RT.write() = parse_keywords(proxy_kw);
+
+            // Nonproxy keywords
+            let nonproxy_kw = if let Ok(v) = std::env::var("NONPROXY_KEYWORDS") {
+                split_concat_with_default(v, default_nonproxy)
+            } else {
+                default_nonproxy
+            };
+            *NONPROXY_KEYWORDS_RT.write() = nonproxy_kw;
+        }
+
+        tracing::info!(
+            "Runtime config reloaded: server={}:{}, local_port={}, reverse_geo={}",
+            server_host(),
+            server_port(),
+            client_port(),
+            cfg!(feature = "auto-proxy").then(|| reverse_geo()).unwrap_or(false)
+        );
+    }
+
+    pub fn server_port() -> u16 {
+        SERVER_PORT_RT.load(Ordering::SeqCst)
+    }
+
+    pub fn client_port() -> u16 {
+        CLIENT_PORT_RT.load(Ordering::SeqCst)
+    }
+
+    pub fn server_host() -> String {
+        let host = SERVER_HOST_RT.read();
+        if host.is_empty() {
+            "127.0.0.1".to_string()
+        } else {
+            host.clone()
+        }
+    }
+
+    #[cfg(feature = "auto-proxy")]
+    pub fn reverse_geo() -> bool {
+        REVERSE_GEO_RT.load(Ordering::SeqCst)
+    }
+
+    #[cfg(not(feature = "auto-proxy"))]
+    pub fn reverse_geo() -> bool {
+        false
+    }
+
+    pub fn need_codec_ips() -> Vec<String> {
+        NEED_CODEC_IP_RT.read().clone()
+    }
+
+    #[cfg(feature = "auto-proxy")]
+    pub fn proxy_keywords() -> Vec<ParsedProxyKeyWord> {
+        PROXY_KEYWORDS_RT.read().clone()
+    }
+
+    #[cfg(feature = "auto-proxy")]
+    pub fn nonproxy_keywords() -> Vec<String> {
+        NONPROXY_KEYWORDS_RT.read().clone()
     }
 }
 
@@ -300,7 +454,7 @@ pub static NONPROXY_KEYWORDS: Lazy<Vec<String>> = Lazy::new(|| {
     keywords
 });
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ParsedProxyKeyWord {
     pub name_server: String,
     pub proxy_server: Option<String>,

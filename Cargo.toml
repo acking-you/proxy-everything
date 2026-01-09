@@ -51,6 +51,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 indicatif = { version = "0.18", optional = true }
 comfy-table = { version = "7", optional = true }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+parking_lot = "0.12.5"
 
 [[bin]]
 name = "http-proxy-server"

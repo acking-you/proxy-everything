@@ -80,7 +80,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex, RwLock};
 use tracing::info;
 
-use crate::config::REVERSE_GEO_PROXY;
+use crate::config::runtime;
 use crate::geo::query_geo_single;
 use crate::util::{QueryIpTaskId, TaskId, TaskIdGenerator};
 
@@ -100,7 +100,7 @@ pub async fn get_country_code(host: impl AsRef<str>) -> Result<ProxyStrategy> {
 /// Apply reverse logic if REVERSE_GEO_PROXY is enabled.
 #[inline]
 fn apply_reverse(strategy: ProxyStrategy) -> ProxyStrategy {
-    if *REVERSE_GEO_PROXY {
+    if runtime::reverse_geo() {
         match strategy {
             ProxyStrategy::Proxy => ProxyStrategy::Direct,
             ProxyStrategy::Direct => ProxyStrategy::Proxy,
@@ -312,7 +312,7 @@ async fn check_proxy(context: TaskContext) {
                 Err(e) => {
                     tracing::error!(task_id, host, receive_exist_task_error = ?e);
                     // On error: proxy in normal mode, direct in reverse mode
-                    cache_miss_send(notifier, !*REVERSE_GEO_PROXY, &host).await;
+                    cache_miss_send(notifier, !runtime::reverse_geo(), &host).await;
                 }
             }
             return;
@@ -326,7 +326,7 @@ async fn check_proxy(context: TaskContext) {
         Err(e) => {
             tracing::error!(task_id,host,get_country_code_error = ?snafu::Report::from_error(e));
             // On error: proxy in normal mode, direct in reverse mode
-            !*REVERSE_GEO_PROXY
+            !runtime::reverse_geo()
         }
     };
     cache_miss_send(notifier, need_proxy, &host).await;
