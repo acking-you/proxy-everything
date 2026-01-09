@@ -44,7 +44,7 @@ check_targets() {
 # Build for iOS device (arm64)
 build_device() {
     log_info "Building for iOS device (aarch64-apple-ios)..."
-    cargo build --lib --release --target aarch64-apple-ios --features ios --no-default-features
+    RUSTFLAGS="--cfg ios_build" cargo rustc --lib --release --target aarch64-apple-ios --features ios --no-default-features -- --crate-type=staticlib
 
     mkdir -p "$OUTPUT_DIR/device"
     cp "$PROJECT_DIR/target/aarch64-apple-ios/release/libhttp_proxy.a" "$OUTPUT_DIR/device/"
@@ -54,7 +54,7 @@ build_device() {
 # Build for iOS simulator (arm64)
 build_simulator() {
     log_info "Building for iOS simulator (aarch64-apple-ios-sim)..."
-    cargo build --lib --release --target aarch64-apple-ios-sim --features ios --no-default-features
+    RUSTFLAGS="--cfg ios_build" cargo rustc --lib --release --target aarch64-apple-ios-sim --features ios --no-default-features -- --crate-type=staticlib
 
     mkdir -p "$OUTPUT_DIR/simulator"
     cp "$PROJECT_DIR/target/aarch64-apple-ios-sim/release/libhttp_proxy.a" "$OUTPUT_DIR/simulator/"

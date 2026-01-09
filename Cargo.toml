@@ -87,4 +87,5 @@ serial_test = "3"
 
 [lib]
 name = "http_proxy"
-crate-type = ["lib", "staticlib"]
+# Note: For iOS builds, use `cargo build --lib` with target aarch64-apple-ios
+# The staticlib is generated via build script, not here (to avoid CI issues)
