@@ -248,7 +248,7 @@ async fn handle_connection(
 
     // Send proxy header
     let proxy_header = ProxyHeader {
-        host: target_host.clone().into(),
+        host: target_host.clone(),
         port: target_port,
         key: Some(msg_key.clone().into()),
     };
