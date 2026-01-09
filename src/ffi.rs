@@ -71,7 +71,22 @@ fn send_log(level: c_int, message: &str) {
         && let Ok(c_msg) = CString::new(message)
     {
         let callback: LogCallback = unsafe { std::mem::transmute(ptr) };
-        callback(level, c_msg.as_ptr());
+        // Leak the string - caller must free it via proxy_free_string
+        let leaked = c_msg.into_raw();
+        callback(level, leaked);
+    }
+}
+
+/// Free a string allocated by the library (e.g., from log callback).
+///
+/// # Safety
+/// `s` must be a valid pointer returned from a log callback, or null.
+#[unsafe(no_mangle)]
+pub extern "C" fn proxy_free_string(s: *mut c_char) {
+    if !s.is_null() {
+        unsafe {
+            drop(CString::from_raw(s));
+        }
     }
 }
 
