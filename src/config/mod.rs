@@ -102,10 +102,7 @@ pub mod runtime {
         }
 
         // Need codec IPs
-        let default_codec_ip = vec![
-            "64.23.159.180".to_string(),
-            server_host(),
-        ];
+        let default_codec_ip = vec!["64.23.159.180".to_string(), server_host()];
         if let Ok(v) = std::env::var("NEED_CODEC_IP") {
             *NEED_CODEC_IP_RT.write() = split_concat_with_default(v, default_codec_ip);
         } else {
@@ -149,7 +146,9 @@ pub mod runtime {
             server_host(),
             server_port(),
             client_port(),
-            cfg!(feature = "auto-proxy").then(|| reverse_geo()).unwrap_or(false)
+            cfg!(feature = "auto-proxy")
+                .then(|| reverse_geo())
+                .unwrap_or(false)
         );
     }
 
@@ -268,14 +267,12 @@ pub static CONTROL_SESSION_KEY: Lazy<Option<String>> =
 
 /// Reverse geo-proxy logic: if true, CN sites use proxy, others direct.
 #[cfg(feature = "auto-proxy")]
-pub static REVERSE_GEO_PROXY: Lazy<bool> =
-    Lazy::new(|| parse_bool_env("REVERSE_GEO_PROXY", false));
+pub static REVERSE_GEO_PROXY: Lazy<bool> = Lazy::new(|| parse_bool_env("REVERSE_GEO_PROXY", false));
 
 /// Use local GeoIP database instead of ip-api.com API.
 /// When enabled, will auto-download GeoLite2-City.mmdb if not exists.
 #[cfg(feature = "auto-proxy")]
-pub static USE_LOCAL_GEOIP: Lazy<bool> =
-    Lazy::new(|| parse_bool_env("USE_LOCAL_GEOIP", false));
+pub static USE_LOCAL_GEOIP: Lazy<bool> = Lazy::new(|| parse_bool_env("USE_LOCAL_GEOIP", false));
 
 /// Advertised address for node sync (e.g., "1.2.3.4:1081").
 pub static NODE_ADVERTISE_ADDR: Lazy<Option<String>> = Lazy::new(|| {
