@@ -45,7 +45,7 @@
 //! - `non-proxy-cache.txt`: Hosts that should connect directly
 
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -124,13 +124,18 @@ const DATA_DIR_NAME: &str = "http-proxy-cli-config";
 /// Creates the data directory if it doesn't exist.
 async fn get_data_set_and_file(
     name: impl AsRef<str>,
+    custom_dir: Option<&Path>,
 ) -> Result<(HashSet<String>, tokio::fs::File)> {
-    let home_dir = if cfg!(windows) {
-        env::var_os("USERPROFILE").context(NotFindHomeSnafu { var: "USERPROFILE" })?
+    let data_dir = if let Some(dir) = custom_dir {
+        dir.to_path_buf()
     } else {
-        env::var_os("HOME").context(NotFindHomeSnafu { var: "HOME" })?
+        let home_dir = if cfg!(windows) {
+            env::var_os("USERPROFILE").context(NotFindHomeSnafu { var: "USERPROFILE" })?
+        } else {
+            env::var_os("HOME").context(NotFindHomeSnafu { var: "HOME" })?
+        };
+        Path::new(&home_dir).join(DATA_DIR_NAME)
     };
-    let data_dir = Path::new(&home_dir).join(DATA_DIR_NAME);
     // Create data directory if not exists
     if !data_dir.exists() {
         tokio::fs::create_dir_all(&data_dir)
@@ -173,8 +178,9 @@ struct TaskContext {
 }
 
 #[tracing::instrument(skip_all)]
-pub async fn run_auto_proxy_by_country(receiver: ReceiverChan) {
-    let (non_proxy_set, non_proxy_file) = match get_data_set_and_file(NON_PROXY_FILE_NAME).await {
+pub async fn run_auto_proxy_by_country(receiver: ReceiverChan, cache_dir: Option<PathBuf>) {
+    let cache_dir_ref = cache_dir.as_deref();
+    let (non_proxy_set, non_proxy_file) = match get_data_set_and_file(NON_PROXY_FILE_NAME, cache_dir_ref).await {
         Ok(v) => {
             info!("`non_proxy_set`:{:?}", v.0);
             v
@@ -187,7 +193,7 @@ pub async fn run_auto_proxy_by_country(receiver: ReceiverChan) {
             return;
         }
     };
-    let (proxy_set, proxy_file) = match get_data_set_and_file(PROXY_FILE_NAME).await {
+    let (proxy_set, proxy_file) = match get_data_set_and_file(PROXY_FILE_NAME, cache_dir_ref).await {
         Ok(v) => {
             info!("`proxy_set`:{:?}", v.0);
             v

@@ -48,6 +48,10 @@ pub mod server;
 #[cfg(feature = "tui")]
 pub mod tui;
 
+// FFI module (C-compatible interface for cross-platform integration)
+#[cfg(feature = "ffi")]
+pub mod ffi;
+
 // ============================================================================
 // Internal modules
 // ============================================================================

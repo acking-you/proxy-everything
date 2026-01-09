@@ -1,0 +1,367 @@
+//! C FFI interface for cross-platform integration.
+//!
+//! This module provides a C-compatible interface for external applications to use the proxy client.
+//! It reuses the existing client module logic.
+
+use std::ffi::{CStr, CString, c_char, c_int};
+use std::path::PathBuf;
+use std::ptr;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+
+use tokio::net::TcpListener;
+use tokio::runtime::Runtime;
+use tokio_util::sync::CancellationToken;
+
+use crate::client::{ClientConfig, run_client_with_listener};
+
+/// Log callback function type.
+/// level: 0=trace, 1=debug, 2=info, 3=warn, 4=error
+pub type LogCallback = extern "C" fn(level: c_int, message: *const c_char);
+
+/// Global log callback
+static LOG_CALLBACK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+
+/// Opaque handle to the proxy client.
+pub struct ProxyHandle {
+    runtime: Runtime,
+    cancel_token: Option<CancellationToken>,
+    running: AtomicBool,
+}
+
+/// Result codes for FFI functions.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyResult {
+    Ok = 0,
+    InvalidParam = -1,
+    ConnectionFailed = -2,
+    RuntimeError = -3,
+    AlreadyRunning = -4,
+    NotRunning = -5,
+}
+
+/// Proxy configuration passed from Swift/Kotlin.
+#[repr(C)]
+pub struct ProxyConfig {
+    pub server_host: *const c_char,
+    pub server_port: u16,
+    pub local_port: u16,
+    pub session_key: *const c_char,  // can be null to use default key
+    pub auto_proxy: c_int,  // 0 = disabled, 1 = enabled
+    pub reverse_geo: c_int, // 0 = CN direct, 1 = CN proxy
+    pub cache_dir: *const c_char,  // cache directory for auto-proxy (required on mobile)
+    pub need_codec_ips: *const c_char,  // comma-separated IPs (default: null = empty list)
+    pub force_codec: c_int,  // default: 0 = only specified IPs use codec
+}
+
+/// Set log callback function.
+///
+/// # Safety
+/// `callback` must be a valid function pointer or null to disable logging.
+#[unsafe(no_mangle)]
+pub extern "C" fn proxy_set_log_callback(callback: Option<LogCallback>) {
+    let ptr = callback.map(|f| f as *mut ()).unwrap_or(ptr::null_mut());
+    LOG_CALLBACK.store(ptr, Ordering::SeqCst);
+}
+
+/// Internal function to send log to callback
+fn send_log(level: c_int, message: &str) {
+    let ptr = LOG_CALLBACK.load(Ordering::SeqCst);
+    if !ptr.is_null()
+        && let Ok(c_msg) = CString::new(message)
+    {
+        let callback: LogCallback = unsafe { std::mem::transmute(ptr) };
+        callback(level, c_msg.as_ptr());
+    }
+}
+
+/// Custom tracing layer that forwards logs to FFI callback
+struct FfiLogLayer;
+
+impl<S> tracing_subscriber::Layer<S> for FfiLogLayer
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let level = match *event.metadata().level() {
+            tracing::Level::TRACE => 0,
+            tracing::Level::DEBUG => 1,
+            tracing::Level::INFO => 2,
+            tracing::Level::WARN => 3,
+            tracing::Level::ERROR => 4,
+        };
+
+        // Format the event message
+        let mut visitor = MessageVisitor::default();
+        event.record(&mut visitor);
+        let message = format!(
+            "[{}] {}",
+            event.metadata().target(),
+            visitor.message.unwrap_or_default()
+        );
+        send_log(level, &message);
+    }
+}
+
+#[derive(Default)]
+struct MessageVisitor {
+    message: Option<String>,
+}
+
+impl tracing::field::Visit for MessageVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.message = Some(format!("{:?}", value));
+        } else if self.message.is_none() {
+            self.message = Some(format!("{}: {:?}", field.name(), value));
+        } else if let Some(msg) = self.message.take() {
+            self.message = Some(format!("{}, {}: {:?}", msg, field.name(), value));
+        }
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.message = Some(value.to_string());
+        } else if self.message.is_none() {
+            self.message = Some(format!("{}: {}", field.name(), value));
+        } else if let Some(msg) = self.message.take() {
+            self.message = Some(format!("{}, {}: {}", msg, field.name(), value));
+        }
+    }
+}
+
+/// Create a new proxy handle.
+///
+/// # Safety
+/// Returns a pointer to ProxyHandle that must be freed with `proxy_destroy`.
+#[unsafe(no_mangle)]
+pub extern "C" fn proxy_create() -> *mut ProxyHandle {
+    let runtime = match Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            send_log(4, &format!("Failed to create runtime: {}", e));
+            return ptr::null_mut();
+        }
+    };
+
+    Box::into_raw(Box::new(ProxyHandle {
+        runtime,
+        cancel_token: None,
+        running: AtomicBool::new(false),
+    }))
+}
+
+/// Start the proxy with the given configuration.
+///
+/// # Safety
+/// - `handle` must be a valid pointer from `proxy_create`
+/// - `config` fields must be valid C strings
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_start(
+    handle: *mut ProxyHandle,
+    config: *const ProxyConfig,
+) -> ProxyResult {
+    if handle.is_null() || config.is_null() {
+        return ProxyResult::InvalidParam;
+    }
+
+    let handle = unsafe { &mut *handle };
+    let config = unsafe { &*config };
+
+    if handle.running.load(Ordering::SeqCst) {
+        return ProxyResult::AlreadyRunning;
+    }
+
+    // Parse config
+    let server_host = match unsafe { CStr::from_ptr(config.server_host) }.to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => return ProxyResult::InvalidParam,
+    };
+
+    // session_key is optional, use default if null
+    let session_key = if config.session_key.is_null() {
+        None
+    } else {
+        match unsafe { CStr::from_ptr(config.session_key) }.to_str() {
+            Ok(s) if s.len() == 32 => Some(s.to_string()),
+            Ok(s) => {
+                send_log(
+                    4,
+                    &format!("Session key must be 32 bytes, got {}", s.len()),
+                );
+                return ProxyResult::InvalidParam;
+            }
+            Err(_) => return ProxyResult::InvalidParam,
+        }
+    };
+
+    // cache_dir is optional
+    let cache_dir = if config.cache_dir.is_null() {
+        None
+    } else {
+        match unsafe { CStr::from_ptr(config.cache_dir) }.to_str() {
+            Ok(s) if !s.is_empty() => Some(PathBuf::from(s)),
+            _ => None,
+        }
+    };
+
+    // need_codec_ips: null or empty = empty list (no codec IPs), otherwise comma-separated
+    let need_codec_ips = if config.need_codec_ips.is_null() {
+        Some(vec![])  // default: empty list
+    } else {
+        match unsafe { CStr::from_ptr(config.need_codec_ips) }.to_str() {
+            Ok(s) if !s.is_empty() => {
+                Some(s.split(',').map(|ip| ip.trim().to_string()).collect())
+            }
+            _ => Some(vec![]),  // empty string = empty list
+        }
+    };
+
+    let server_port = config.server_port;
+    let local_port = config.local_port;
+    let reverse_geo = config.reverse_geo != 0;
+    let enable_auto_proxy = config.auto_proxy != 0;
+    let force_codec = config.force_codec != 0;
+
+    // Set environment variables for config that uses static Lazy
+    // SAFETY: Called before spawning async tasks
+    unsafe {
+        std::env::set_var("SERVER_HOST", &server_host);
+        std::env::set_var("SERVER_PORT", server_port.to_string());
+        if let Some(ref key) = session_key {
+            std::env::set_var("SECRET_KEY", key);
+        }
+        if reverse_geo {
+            std::env::set_var("REVERSE_GEO_PROXY", "true");
+        }
+        if let Some(ref ips) = need_codec_ips {
+            std::env::set_var("NEED_CODEC_IP", ips.join(","));
+        }
+    }
+
+    // Build ClientConfig for runtime options
+    let client_config = ClientConfig {
+        enable_auto_proxy,
+        cache_dir,
+    };
+
+    let cancel_token = CancellationToken::new();
+    handle.cancel_token = Some(cancel_token.clone());
+    handle.running.store(true, Ordering::SeqCst);
+
+    // Spawn proxy task using existing client logic
+    handle.runtime.spawn(async move {
+        tracing::info!(
+            "Starting proxy: local:{} -> {}:{} (reverse_geo={}, auto_proxy={}, force_codec={})",
+            local_port,
+            server_host,
+            server_port,
+            reverse_geo,
+            enable_auto_proxy,
+            force_codec
+        );
+
+        let listener = match TcpListener::bind(("127.0.0.1", local_port)).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!("Failed to bind listener: {}", e);
+                return;
+            }
+        };
+
+        // Use force_codec to determine NEED_CODEC constant
+        if force_codec {
+            run_client_with_listener::<true>(listener, cancel_token, None, Some(client_config)).await;
+        } else {
+            run_client_with_listener::<false>(listener, cancel_token, None, Some(client_config)).await;
+        }
+
+        tracing::info!("Proxy stopped");
+    });
+
+    ProxyResult::Ok
+}
+
+/// Stop the proxy.
+///
+/// # Safety
+/// `handle` must be a valid pointer from `proxy_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_stop(handle: *mut ProxyHandle) -> ProxyResult {
+    if handle.is_null() {
+        return ProxyResult::InvalidParam;
+    }
+
+    let handle = unsafe { &mut *handle };
+
+    if !handle.running.load(Ordering::SeqCst) {
+        return ProxyResult::NotRunning;
+    }
+
+    if let Some(token) = handle.cancel_token.take() {
+        token.cancel();
+        handle.running.store(false, Ordering::SeqCst);
+        ProxyResult::Ok
+    } else {
+        ProxyResult::NotRunning
+    }
+}
+
+/// Destroy the proxy handle and free resources.
+///
+/// # Safety
+/// `handle` must be a valid pointer from `proxy_create` and must not be used after this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_destroy(handle: *mut ProxyHandle) {
+    if !handle.is_null() {
+        let handle = unsafe { Box::from_raw(handle) };
+        if let Some(token) = &handle.cancel_token {
+            token.cancel();
+        }
+        drop(handle);
+    }
+}
+
+/// Check if proxy is running.
+///
+/// # Safety
+/// `handle` must be a valid pointer from `proxy_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_is_running(handle: *const ProxyHandle) -> c_int {
+    if handle.is_null() {
+        return 0;
+    }
+    let handle = unsafe { &*handle };
+    if handle.running.load(Ordering::SeqCst) {
+        1
+    } else {
+        0
+    }
+}
+
+/// Initialize logging with FFI callback support.
+///
+/// # Safety
+/// Can be called multiple times safely.
+#[unsafe(no_mangle)]
+pub extern "C" fn proxy_init_logging() {
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let _ = tracing_subscriber::registry()
+        .with(FfiLogLayer)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stdout)
+                .with_filter(
+                    tracing_subscriber::EnvFilter::from_default_env()
+                        .add_directive("http_proxy=info".parse().expect("valid directive")),
+                ),
+        )
+        .try_init();
+}
