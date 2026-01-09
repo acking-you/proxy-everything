@@ -54,6 +54,7 @@ pub mod socks;
 use std::borrow::Cow;
 use std::fmt::{Debug, Display};
 use std::net::IpAddr;
+use std::path::PathBuf;
 
 #[cfg(feature = "auto-proxy")]
 use auto_proxy::{SenderChan, run_auto_proxy_by_country};
@@ -150,6 +151,13 @@ pub fn change_msg_key(
 
 pub type Result<T> = std::result::Result<T, ClientError>;
 
+/// Runtime configuration for client
+#[derive(Debug, Clone, Default)]
+pub struct ClientConfig {
+    pub enable_auto_proxy: bool,
+    pub cache_dir: Option<PathBuf>,
+}
+
 pub trait Forwarder {
     fn forward(self) -> impl std::future::Future<Output = Result<()>> + Send;
 }
@@ -163,7 +171,8 @@ pub struct HeaderContext<'a> {
 pub struct ProxyContext<'a> {
     /// header buffer for response [only http proxy use]
     buffer: &'a [u8],
-    sender: &'a SenderChan,
+    #[cfg(feature = "auto-proxy")]
+    sender: Option<&'a SenderChan>,
     /// TODO: let this stream abstract
     stream: TcpStream,
 }
@@ -270,7 +279,7 @@ pub struct ServerConnection {
 ///
 /// * `host` - Target hostname or IP
 /// * `port` - Target port
-/// * `sender` - Channel for auto-proxy queries
+/// * `sender` - Channel for auto-proxy queries (None = always proxy)
 /// * `msg_key` - Optional pre-configured session key
 ///
 /// # Returns
@@ -280,35 +289,38 @@ pub struct ServerConnection {
 pub async fn resolve_server_connection(
     host: &str,
     port: u16,
-    sender: &SenderChan,
+    sender: Option<&SenderChan>,
     msg_key: Option<Cow<'static, str>>,
 ) -> Result<ServerConnection> {
     use crate::config::{SERVER_HOST, SERVER_PORT};
 
-    match need_proxy(host, port, sender).await? {
-        ProxyStatus::NorlmalProxy => {}
-        ProxyStatus::NoProxy(detail) => {
-            return Ok(ServerConnection {
-                stream: get_tcp_stream(host, port, detail).await?,
-                need_proxy: false,
-                msg_key,
-            });
-        }
-        ProxyStatus::NeedSpecialProxy(proxy_server) => {
-            let msg_key = change_msg_key(proxy_server.as_str(), msg_key);
-            return Ok(ServerConnection {
-                stream: get_tcp_proxy_stream(
-                    host,
-                    port,
-                    &proxy_server,
-                    *SERVER_PORT,
-                    msg_key.clone(),
-                    "[PROXY] special proxy",
-                )
-                .await?,
-                need_proxy: true,
-                msg_key,
-            });
+    // If sender is None (auto-proxy disabled), always use proxy
+    if let Some(sender) = sender {
+        match need_proxy(host, port, sender).await? {
+            ProxyStatus::NorlmalProxy => {}
+            ProxyStatus::NoProxy(detail) => {
+                return Ok(ServerConnection {
+                    stream: get_tcp_stream(host, port, detail).await?,
+                    need_proxy: false,
+                    msg_key,
+                });
+            }
+            ProxyStatus::NeedSpecialProxy(proxy_server) => {
+                let msg_key = change_msg_key(proxy_server.as_str(), msg_key);
+                return Ok(ServerConnection {
+                    stream: get_tcp_proxy_stream(
+                        host,
+                        port,
+                        &proxy_server,
+                        *SERVER_PORT,
+                        msg_key.clone(),
+                        "[PROXY] special proxy",
+                    )
+                    .await?,
+                    need_proxy: true,
+                    msg_key,
+                });
+            }
         }
     }
 
@@ -597,7 +609,7 @@ pub struct ClientProxyContext {
     stream: TcpStream,
     msg_key: Option<String>,
     #[cfg(feature = "auto-proxy")]
-    sender: SenderChan,
+    sender: Option<SenderChan>,
 }
 
 #[inline]
@@ -643,7 +655,7 @@ pub async fn handle_client(mut context: ClientProxyContext) -> Result<()> {
     let proxy_context = ProxyContext {
         buffer: header,
         #[cfg(feature = "auto-proxy")]
-        sender: &context.sender,
+        sender: context.sender.as_ref(),
         stream: context.stream,
     };
 
@@ -701,15 +713,20 @@ pub async fn run_client_with_listener<const NEED_CODEC: bool>(
     listener: TcpListener,
     cancel_token: CancellationToken,
     tracker: Option<TaskTracker>,
+    config: Option<ClientConfig>,
 ) {
+    let enable_auto_proxy = config.as_ref().map(|c| c.enable_auto_proxy).unwrap_or(true);
+    let cache_dir = config.as_ref().and_then(|c| c.cache_dir.clone());
+
     #[cfg(feature = "auto-proxy")]
-    let sender = {
+    let sender: Option<SenderChan> = if enable_auto_proxy {
         let (tx, rx) = kanal::bounded_async(DEFAULT_CHAN_CAP);
         let token = cancel_token.clone();
+        let cache_dir = cache_dir.clone();
         let task = async move {
             tokio::select! {
                 _ = token.cancelled() => {}
-                _ = run_auto_proxy_by_country(rx) => {}
+                _ = run_auto_proxy_by_country(rx, cache_dir) => {}
             }
         };
         if let Some(ref t) = tracker {
@@ -717,7 +734,9 @@ pub async fn run_client_with_listener<const NEED_CODEC: bool>(
         } else {
             tokio::spawn(task);
         }
-        tx
+        Some(tx)
+    } else {
+        None
     };
 
     loop {
@@ -772,7 +791,7 @@ pub async fn start_client<const NEED_CODEC: bool>(
     let cancel_token = manager.cancellation_token();
     let tracker = manager.tracker().clone();
 
-    run_client_with_listener::<NEED_CODEC>(listener, cancel_token, Some(tracker)).await;
+    run_client_with_listener::<NEED_CODEC>(listener, cancel_token, Some(tracker), None).await;
 
     tracing::info!("graceful shutdown, waiting for tasks to complete...");
     manager.wait().await;

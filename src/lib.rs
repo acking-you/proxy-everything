@@ -48,8 +48,8 @@ pub mod server;
 #[cfg(feature = "tui")]
 pub mod tui;
 
-// FFI module for iOS/mobile integration (C-compatible interface)
-#[cfg(feature = "ios")]
+// FFI module (C-compatible interface for cross-platform integration)
+#[cfg(feature = "ffi")]
 pub mod ffi;
 
 // ============================================================================

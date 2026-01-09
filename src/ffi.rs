@@ -1,9 +1,10 @@
-//! C FFI interface for iOS/mobile integration.
+//! C FFI interface for cross-platform integration.
 //!
-//! This module provides a C-compatible interface for mobile apps to use the proxy client.
+//! This module provides a C-compatible interface for external applications to use the proxy client.
 //! It reuses the existing client module logic.
 
 use std::ffi::{CStr, CString, c_char, c_int};
+use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
@@ -11,7 +12,7 @@ use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
 
-use crate::client::run_client_with_listener;
+use crate::client::{ClientConfig, run_client_with_listener};
 
 /// Log callback function type.
 /// level: 0=trace, 1=debug, 2=info, 3=warn, 4=error
@@ -45,9 +46,12 @@ pub struct ProxyConfig {
     pub server_host: *const c_char,
     pub server_port: u16,
     pub local_port: u16,
-    pub session_key: *const c_char,
-    pub auto_proxy: c_int,   // 0 = disabled, 1 = enabled
-    pub reverse_geo: c_int,  // 0 = CN direct, 1 = CN proxy
+    pub session_key: *const c_char,  // can be null to use default key
+    pub auto_proxy: c_int,  // 0 = disabled, 1 = enabled
+    pub reverse_geo: c_int, // 0 = CN direct, 1 = CN proxy
+    pub cache_dir: *const c_char,  // cache directory for auto-proxy (required on mobile)
+    pub need_codec_ips: *const c_char,  // comma-separated IPs (default: null = empty list)
+    pub force_codec: c_int,  // default: 0 = only specified IPs use codec
 }
 
 /// Set log callback function.
@@ -114,8 +118,7 @@ impl tracing::field::Visit for MessageVisitor {
             self.message = Some(format!("{:?}", value));
         } else if self.message.is_none() {
             self.message = Some(format!("{}: {:?}", field.name(), value));
-        } else {
-            let msg = self.message.take().unwrap();
+        } else if let Some(msg) = self.message.take() {
             self.message = Some(format!("{}, {}: {:?}", msg, field.name(), value));
         }
     }
@@ -125,8 +128,7 @@ impl tracing::field::Visit for MessageVisitor {
             self.message = Some(value.to_string());
         } else if self.message.is_none() {
             self.message = Some(format!("{}: {}", field.name(), value));
-        } else {
-            let msg = self.message.take().unwrap();
+        } else if let Some(msg) = self.message.take() {
             self.message = Some(format!("{}, {}: {}", msg, field.name(), value));
         }
     }
@@ -180,31 +182,72 @@ pub unsafe extern "C" fn proxy_start(
         Err(_) => return ProxyResult::InvalidParam,
     };
 
-    let session_key = match unsafe { CStr::from_ptr(config.session_key) }.to_str() {
-        Ok(s) => s.to_string(),
-        Err(_) => return ProxyResult::InvalidParam,
+    // session_key is optional, use default if null
+    let session_key = if config.session_key.is_null() {
+        None
+    } else {
+        match unsafe { CStr::from_ptr(config.session_key) }.to_str() {
+            Ok(s) if s.len() == 32 => Some(s.to_string()),
+            Ok(s) => {
+                send_log(
+                    4,
+                    &format!("Session key must be 32 bytes, got {}", s.len()),
+                );
+                return ProxyResult::InvalidParam;
+            }
+            Err(_) => return ProxyResult::InvalidParam,
+        }
     };
 
-    // Validate session key length (must be 32 bytes for AES-256)
-    if session_key.len() != 32 {
-        send_log(4, &format!("Session key must be 32 bytes, got {}", session_key.len()));
-        return ProxyResult::InvalidParam;
-    }
+    // cache_dir is optional
+    let cache_dir = if config.cache_dir.is_null() {
+        None
+    } else {
+        match unsafe { CStr::from_ptr(config.cache_dir) }.to_str() {
+            Ok(s) if !s.is_empty() => Some(PathBuf::from(s)),
+            _ => None,
+        }
+    };
+
+    // need_codec_ips: null or empty = empty list (no codec IPs), otherwise comma-separated
+    let need_codec_ips = if config.need_codec_ips.is_null() {
+        Some(vec![])  // default: empty list
+    } else {
+        match unsafe { CStr::from_ptr(config.need_codec_ips) }.to_str() {
+            Ok(s) if !s.is_empty() => {
+                Some(s.split(',').map(|ip| ip.trim().to_string()).collect())
+            }
+            _ => Some(vec![]),  // empty string = empty list
+        }
+    };
 
     let server_port = config.server_port;
     let local_port = config.local_port;
     let reverse_geo = config.reverse_geo != 0;
+    let enable_auto_proxy = config.auto_proxy != 0;
+    let force_codec = config.force_codec != 0;
 
-    // Set environment variables for client module
-    // SAFETY: Called before spawning async tasks, single-threaded at this point
+    // Set environment variables for config that uses static Lazy
+    // SAFETY: Called before spawning async tasks
     unsafe {
         std::env::set_var("SERVER_HOST", &server_host);
         std::env::set_var("SERVER_PORT", server_port.to_string());
-        std::env::set_var("SECRET_KEY", &session_key);
+        if let Some(ref key) = session_key {
+            std::env::set_var("SECRET_KEY", key);
+        }
         if reverse_geo {
             std::env::set_var("REVERSE_GEO_PROXY", "true");
         }
+        if let Some(ref ips) = need_codec_ips {
+            std::env::set_var("NEED_CODEC_IP", ips.join(","));
+        }
     }
+
+    // Build ClientConfig for runtime options
+    let client_config = ClientConfig {
+        enable_auto_proxy,
+        cache_dir,
+    };
 
     let cancel_token = CancellationToken::new();
     handle.cancel_token = Some(cancel_token.clone());
@@ -213,11 +256,13 @@ pub unsafe extern "C" fn proxy_start(
     // Spawn proxy task using existing client logic
     handle.runtime.spawn(async move {
         tracing::info!(
-            "Starting proxy: local:{} -> {}:{} (reverse_geo={})",
+            "Starting proxy: local:{} -> {}:{} (reverse_geo={}, auto_proxy={}, force_codec={})",
             local_port,
             server_host,
             server_port,
-            reverse_geo
+            reverse_geo,
+            enable_auto_proxy,
+            force_codec
         );
 
         let listener = match TcpListener::bind(("127.0.0.1", local_port)).await {
@@ -228,8 +273,12 @@ pub unsafe extern "C" fn proxy_start(
             }
         };
 
-        // Use existing client logic with NEED_CODEC=true for encrypted proxy
-        run_client_with_listener::<true>(listener, cancel_token, None).await;
+        // Use force_codec to determine NEED_CODEC constant
+        if force_codec {
+            run_client_with_listener::<true>(listener, cancel_token, None, Some(client_config)).await;
+        } else {
+            run_client_with_listener::<false>(listener, cancel_token, None, Some(client_config)).await;
+        }
 
         tracing::info!("Proxy stopped");
     });
@@ -311,7 +360,7 @@ pub extern "C" fn proxy_init_logging() {
                 .with_writer(std::io::stdout)
                 .with_filter(
                     tracing_subscriber::EnvFilter::from_default_env()
-                        .add_directive("http_proxy=info".parse().unwrap()),
+                        .add_directive("http_proxy=info".parse().expect("valid directive")),
                 ),
         )
         .try_init();

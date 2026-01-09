@@ -5,6 +5,10 @@ edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[lib]
+name = "http_proxy"
+crate-type = ["lib", "staticlib", "cdylib"]
+
 [dependencies]
 tokio = { version = "1", features = ["full"], optional = true }
 tokio-util = { version = "0.7.18", features = ["full"], optional = true }
@@ -49,9 +53,6 @@ comfy-table = { version = "7", optional = true }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [[bin]]
-name = "http-proxy-client"
-path = "src/bin/client-bin.rs"
-[[bin]]
 name = "http-proxy-server"
 path = "src/bin/server-bin.rs"
 [[bin]]
@@ -64,7 +65,7 @@ path = "src/bin/proxy-tui.rs"
 required-features = ["tui"]
 
 [features]
-default = ["tokio", "auto-proxy", "cli-dep", "tui"]
+default = ["tokio", "auto-proxy", "cli-dep", "tui", "ffi"]
 tokio = ["dep:tokio", "dep:tokio-util"]
 cli-dep = [
     "dep:clap",
@@ -75,7 +76,7 @@ cli-dep = [
     "dep:comfy-table",
 ]
 tui = ["dep:ratatui", "dep:crossterm", "dep:clap", "dep:chrono"]
-ios = ["tokio", "dep:toml"]
+ffi = ["tokio", "dep:toml"]
 auto-proxy = [
     "dep:hashbrown",
     "dep:kanal",

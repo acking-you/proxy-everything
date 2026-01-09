@@ -9,45 +9,57 @@ permissions:
   contents: write
 
 jobs:
-  build-and-deploy:
-    name: Build and upload
+  build-binaries:
+    name: Build binaries
     runs-on: ${{ matrix.os }}
 
     strategy:
       fail-fast: false
       matrix:
-        # You can add more, for any target you'd like!
         include:
+          # Linux x86_64
           - build: x86_64-linux-musl
             os: ubuntu-latest
             target: x86_64-unknown-linux-musl
 
+          # Linux ARM64
+          - build: aarch64-linux-musl
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+
+          # Linux ARMv7
           - build: armv7-linux-musl
             os: ubuntu-latest
             target: armv7-unknown-linux-musleabi
 
+          # Linux s390x
           - build: s390x-linux-gnu
             os: ubuntu-latest
             target: s390x-unknown-linux-gnu
 
+          # macOS x86_64
           - build: x86_64-macos
-            os: macos-15-intel
+            os: macos-13
             target: x86_64-apple-darwin
 
+          # macOS ARM64
           - build: aarch64-macos
             os: macos-latest
             target: aarch64-apple-darwin
 
+          # Windows x86_64
           - build: x86_64-windows-msvc
             os: windows-latest
             target: x86_64-pc-windows-msvc
 
-          - build: aarch64-unknown-linux-musl
-            os: ubuntu-latest
-            target: aarch64-unknown-linux-musl
+          # Windows ARM64
+          - build: aarch64-windows-msvc
+            os: windows-latest
+            target: aarch64-pc-windows-msvc
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           submodules: true
 
@@ -63,106 +75,231 @@ jobs:
       - name: Build http-proxy-server
         uses: actions-rs/cargo@v1
         with:
-          use-cross: ${{ !contains(matrix.os, 'macos') }}
+          use-cross: ${{ !contains(matrix.os, 'macos') && !contains(matrix.os, 'windows') }}
           command: build
           args: --bin http-proxy-server --verbose --release --target ${{ matrix.target }}
-
-      - name: Build http-proxy-client
-        uses: actions-rs/cargo@v1
-        with:
-          use-cross: ${{ !contains(matrix.os, 'macos') }}
-          command: build
-          args: --bin http-proxy-client --verbose --release --target ${{ matrix.target }}
 
       - name: Build http-proxy-cli
         uses: actions-rs/cargo@v1
         with:
-          use-cross: ${{ !contains(matrix.os, 'macos') }}
+          use-cross: ${{ !contains(matrix.os, 'macos') && !contains(matrix.os, 'windows') }}
           command: build
           args: --bin http-proxy-cli --features cli-dep --verbose --release --target ${{ matrix.target }}
 
-      - name: Archive http-proxy-cli
+      - name: Archive binaries
         shell: bash
         run: |
-          # Replace with the name of your binary
-          binary_name="http-proxy-cli"
+          for binary_name in http-proxy-cli http-proxy-server; do
+            dirname="$binary_name-${{ env.VERSION }}-${{ matrix.target }}"
+            mkdir -p "$dirname"
+            if [ "${{ matrix.os }}" = "windows-latest" ]; then
+              cp "target/${{ matrix.target }}/release/$binary_name.exe" "$dirname/" 2>/dev/null || true
+            else
+              cp "target/${{ matrix.target }}/release/$binary_name" "$dirname/" 2>/dev/null || true
+            fi
+          done
 
-          dirname="$binary_name-${{ env.VERSION }}-${{ matrix.target }}"
-          mkdir "$dirname"
+          # Create archives
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            mv "target/${{ matrix.target }}/release/$binary_name.exe" "$dirname"
+            for binary_name in http-proxy-cli http-proxy-server; do
+              dirname="$binary_name-${{ env.VERSION }}-${{ matrix.target }}"
+              if [ -d "$dirname" ] && [ "$(ls -A $dirname)" ]; then
+                7z a "$dirname.zip" "$dirname"
+              fi
+            done
           else
-            mv "target/${{ matrix.target }}/release/$binary_name" "$dirname"
+            for binary_name in http-proxy-cli http-proxy-server; do
+              dirname="$binary_name-${{ env.VERSION }}-${{ matrix.target }}"
+              if [ -d "$dirname" ] && [ "$(ls -A $dirname)" ]; then
+                tar -czf "$dirname.tar.gz" "$dirname"
+              fi
+            done
           fi
 
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            7z a "$dirname.zip" "$dirname"
-            echo "CLI_ASSET=$dirname.zip" >> $GITHUB_ENV
-          else
-            tar -czf "$dirname.tar.gz" "$dirname"
-            echo "CLI_ASSET=$dirname.tar.gz" >> $GITHUB_ENV
-          fi
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.target }}
+          path: |
+            *.tar.gz
+            *.zip
 
-      - name: Archive http-proxy-client
+  build-ffi-libs:
+    name: Build FFI libraries
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64
+          - build: x86_64-linux-gnu
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+
+          # Linux ARM64
+          - build: aarch64-linux-gnu
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+
+          # macOS x86_64
+          - build: x86_64-macos
+            os: macos-13
+            target: x86_64-apple-darwin
+
+          # macOS ARM64
+          - build: aarch64-macos
+            os: macos-latest
+            target: aarch64-apple-darwin
+
+          # iOS ARM64
+          - build: aarch64-ios
+            os: macos-latest
+            target: aarch64-apple-ios
+
+          # iOS Simulator x86_64
+          - build: x86_64-ios-sim
+            os: macos-13
+            target: x86_64-apple-ios
+
+          # iOS Simulator ARM64
+          - build: aarch64-ios-sim
+            os: macos-latest
+            target: aarch64-apple-ios-sim
+
+          # Android ARM64
+          - build: aarch64-android
+            os: ubuntu-latest
+            target: aarch64-linux-android
+
+          # Android ARMv7
+          - build: armv7-android
+            os: ubuntu-latest
+            target: armv7-linux-androideabi
+
+          # Android x86_64
+          - build: x86_64-android
+            os: ubuntu-latest
+            target: x86_64-linux-android
+
+          # Windows x86_64
+          - build: x86_64-windows
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+          # Windows ARM64
+          - build: aarch64-windows
+            os: windows-latest
+            target: aarch64-pc-windows-msvc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Get the release version from the tag
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux)
+        if: contains(matrix.os, 'ubuntu') && contains(matrix.target, 'aarch64-unknown-linux')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Install Android NDK
+        if: contains(matrix.target, 'android')
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26d
+
+      - name: Set Android NDK environment
+        if: contains(matrix.target, 'android')
         shell: bash
         run: |
-          # Replace with the name of your binary
-          binary_name="http-proxy-client"
+          echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
+          echo "NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
 
-          dirname="$binary_name-${{ env.VERSION }}-${{ matrix.target }}"
-          mkdir "$dirname"
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            mv "target/${{ matrix.target }}/release/$binary_name.exe" "$dirname"
-          else
-            mv "target/${{ matrix.target }}/release/$binary_name" "$dirname"
-          fi
+      - name: Build FFI library
+        uses: actions-rs/cargo@v1
+        with:
+          use-cross: ${{ contains(matrix.target, 'android') || (contains(matrix.os, 'ubuntu') && contains(matrix.target, 'aarch64')) }}
+          command: build
+          args: --lib --features ffi --verbose --release --target ${{ matrix.target }}
 
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            7z a "$dirname.zip" "$dirname"
-            echo "CLIENT_ASSET=$dirname.zip" >> $GITHUB_ENV
-          else
-            tar -czf "$dirname.tar.gz" "$dirname"
-            echo "CLIENT_ASSET=$dirname.tar.gz" >> $GITHUB_ENV
-          fi
-
-      - name: Archive http-proxy-server
+      - name: Archive FFI library
         shell: bash
         run: |
-          # Replace with the name of your binary
-          binary_name="http-proxy-server"
+          dirname="libhttp_proxy-${{ env.VERSION }}-${{ matrix.target }}"
+          mkdir -p "$dirname"
 
-          dirname="$binary_name-${{ env.VERSION }}-${{ matrix.target }}"
-          mkdir "$dirname"
+          # Copy static library
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            mv "target/${{ matrix.target }}/release/$binary_name.exe" "$dirname"
+            cp "target/${{ matrix.target }}/release/http_proxy.lib" "$dirname/" 2>/dev/null || true
+            cp "target/${{ matrix.target }}/release/http_proxy.dll" "$dirname/" 2>/dev/null || true
+            cp "target/${{ matrix.target }}/release/http_proxy.dll.lib" "$dirname/" 2>/dev/null || true
           else
-            mv "target/${{ matrix.target }}/release/$binary_name" "$dirname"
+            cp "target/${{ matrix.target }}/release/libhttp_proxy.a" "$dirname/" 2>/dev/null || true
+            cp "target/${{ matrix.target }}/release/libhttp_proxy.so" "$dirname/" 2>/dev/null || true
+            cp "target/${{ matrix.target }}/release/libhttp_proxy.dylib" "$dirname/" 2>/dev/null || true
           fi
 
+          # Create archive
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             7z a "$dirname.zip" "$dirname"
-            echo "SERVER_ASSET=$dirname.zip" >> $GITHUB_ENV
           else
             tar -czf "$dirname.tar.gz" "$dirname"
-            echo "SERVER_ASSET=$dirname.tar.gz" >> $GITHUB_ENV
           fi
 
-      - name: Release binary
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffi-${{ matrix.target }}
+          path: |
+            *.tar.gz
+            *.zip
+
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [build-binaries, build-ffi-libs]
+    if: ${{ !cancelled() }}
+
+    steps:
+      - name: Get the release version from the tag
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect release files
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} release/ \;
+          ls -la release/
+
+      - name: Release
         uses: softprops/action-gh-release@v1
         with:
-          files: |
-            ${{ env.SERVER_ASSET }}
-            ${{ env.CLIENT_ASSET }}
-            ${{ env.CLI_ASSET }}
+          files: release/*
 
   docker-build:
     name: Build and push Docker image
     runs-on: ubuntu-latest
-    needs: build-and-deploy
+    needs: release
     if: ${{ !cancelled() }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           submodules: true
 
