@@ -1,0 +1,27 @@
+# Xcode user-specific files
+xcuserdata/
+*.xcuserstate
+
+# Build artifacts
+build/
+DerivedData/
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Static library (should be built locally)
+*.a
+
+# macOS
+.DS_Store
+
+# CocoaPods (if used)
+Pods/
+Podfile.lock
+
+# Carthage (if used)
+Carthage/Build/
+
+# Swift Package Manager
+.build/
+.swiftpm/

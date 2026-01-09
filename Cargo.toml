@@ -75,6 +75,7 @@ cli-dep = [
     "dep:comfy-table",
 ]
 tui = ["dep:ratatui", "dep:crossterm", "dep:clap", "dep:chrono"]
+ios = ["tokio", "dep:toml"]
 auto-proxy = [
     "dep:hashbrown",
     "dep:kanal",
