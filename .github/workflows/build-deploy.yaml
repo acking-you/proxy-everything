@@ -39,7 +39,7 @@ jobs:
 
           # macOS x86_64
           - build: x86_64-macos
-            os: macos-13
+            os: macos-latest
             target: x86_64-apple-darwin
 
           # macOS ARM64
@@ -144,7 +144,7 @@ jobs:
 
           # macOS x86_64
           - build: x86_64-macos
-            os: macos-13
+            os: macos-latest
             target: x86_64-apple-darwin
 
           # macOS ARM64
@@ -159,7 +159,7 @@ jobs:
 
           # iOS Simulator x86_64
           - build: x86_64-ios-sim
-            os: macos-13
+            os: macos-latest
             target: x86_64-apple-ios
 
           # iOS Simulator ARM64
