@@ -131,7 +131,7 @@ pub unsafe extern "C" fn proxy_start(
         };
 
         // Use session_key in the loop
-        let _session_key = session_key;
+        let session_key = session_key;
 
         loop {
             tokio::select! {
@@ -140,11 +140,13 @@ pub unsafe extern "C" fn proxy_start(
                         Ok((client_stream, addr)) => {
                             tracing::debug!("Accepted connection from {}", addr);
                             let server_host = server_host.clone();
+                            let session_key = session_key.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = handle_connection(
                                     client_stream,
                                     &server_host,
                                     server_port,
+                                    &session_key,
                                     auto_proxy,
                                     reverse_geo,
                                 ).await {
@@ -173,6 +175,7 @@ async fn handle_connection(
     mut client_stream: TcpStream,
     server_host: &str,
     server_port: u16,
+    session_key: &str,
     auto_proxy: bool,
     reverse_geo: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -250,24 +253,20 @@ async fn handle_connection(
         key: Some(msg_key.clone().into()),
     };
 
-    let mut header_json = serde_json::to_string(&proxy_header)?;
-    let mut cryption = Aes256GcmCryption::try_new_with_default_key()
+    let mut header_bytes = serde_json::to_string(&proxy_header)?.into_bytes();
+    let mut cryption = Aes256GcmCryption::try_new(session_key.as_bytes())
         .map_err(|e| format!("Crypto error: {}", e))?;
 
     // Encrypt header
-    let (addr, tag, len) = unsafe {
-        let addr = header_json.as_bytes_mut();
-        let tag = cryption
-            .encrypt(addr)
-            .map_err(|e| format!("Encrypt error: {}", e))?;
-        let len = addr.len() + tag.as_ref().len();
-        (addr, tag, len as u32)
-    };
+    let tag = cryption
+        .encrypt(&mut header_bytes)
+        .map_err(|e| format!("Encrypt error: {}", e))?;
+    let len = (header_bytes.len() + tag.as_ref().len()) as u32;
 
     // Send header length + encrypted header + tag
     let mut server_ref = AsyncReaderWriterRef::new(&mut server_stream);
     set_data_size(&mut server_ref, len).await?;
-    server_ref.write_all(addr).await?;
+    server_ref.write_all(&header_bytes).await?;
     server_ref.write_all(tag.as_ref()).await?;
 
     // For CONNECT requests, send 200 OK to client
