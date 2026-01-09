@@ -75,6 +75,7 @@ cli-dep = [
     "dep:comfy-table",
 ]
 tui = ["dep:ratatui", "dep:crossterm", "dep:clap", "dep:chrono"]
+ios = ["tokio", "dep:toml", "auto-proxy"]
 auto-proxy = [
     "dep:hashbrown",
     "dep:kanal",
@@ -83,3 +84,7 @@ auto-proxy = [
 
 [dev-dependencies]
 serial_test = "3"
+
+[lib]
+name = "http_proxy"
+crate-type = ["lib", "staticlib"]

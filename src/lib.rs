@@ -48,6 +48,10 @@ pub mod server;
 #[cfg(feature = "tui")]
 pub mod tui;
 
+// FFI module for iOS integration (C-compatible interface for Swift)
+#[cfg(feature = "ios")]
+pub mod ffi;
+
 // ============================================================================
 // Internal modules
 // ============================================================================

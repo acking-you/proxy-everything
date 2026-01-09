@@ -14,6 +14,8 @@ use serde::Serialize;
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt, Snafu};
 
+// USE_LOCAL_GEOIP config is only needed when auto-proxy feature is enabled
+#[cfg(feature = "auto-proxy")]
 use crate::config::USE_LOCAL_GEOIP;
 
 /// Global HTTP client (no proxy, reused across requests)
@@ -360,6 +362,8 @@ async fn query_geo_batch_local(hosts: &[impl AsRef<str>]) -> Result<HashMap<Stri
 
 /// Query geo info for a single host.
 /// Returns the country code (e.g., "CN", "US").
+// With auto-proxy: supports local GeoIP database; without: uses API only
+#[cfg(feature = "auto-proxy")]
 pub async fn query_geo_single(host: &str) -> Result<String> {
     if *USE_LOCAL_GEOIP {
         query_geo_local(host).await
@@ -368,8 +372,16 @@ pub async fn query_geo_single(host: &str) -> Result<String> {
     }
 }
 
+// Fallback implementation when auto-proxy is disabled (iOS builds)
+#[cfg(not(feature = "auto-proxy"))]
+pub async fn query_geo_single(host: &str) -> Result<String> {
+    query_geo_api(host).await
+}
+
 /// Query geo info for multiple IPs.
 /// Returns a map of IP -> country code (e.g., "8.8.8.8" -> "US").
+// With auto-proxy: supports local GeoIP database; without: uses API only
+#[cfg(feature = "auto-proxy")]
 pub async fn query_geo_batch<T: AsRef<str> + Serialize>(
     ips: &[T],
 ) -> Result<HashMap<String, String>> {
@@ -378,6 +390,14 @@ pub async fn query_geo_batch<T: AsRef<str> + Serialize>(
     } else {
         query_geo_batch_api(ips).await
     }
+}
+
+// Fallback implementation when auto-proxy is disabled (iOS builds)
+#[cfg(not(feature = "auto-proxy"))]
+pub async fn query_geo_batch<T: AsRef<str> + Serialize>(
+    ips: &[T],
+) -> Result<HashMap<String, String>> {
+    query_geo_batch_api(ips).await
 }
 
 #[cfg(test)]
