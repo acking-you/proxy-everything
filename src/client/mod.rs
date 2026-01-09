@@ -364,14 +364,16 @@ pub async fn need_proxy(
     port: u16,
     sender: &SenderChan,
 ) -> Result<ProxyStatus> {
-    use crate::config::{NONPROXY_KEYWORDS, PROXY_KEYWORDS};
+    use crate::config::runtime;
 
     if host.as_ref() == "127.0.0.1" {
         LocalHostSnafu { port }.fail()?;
     }
     // prehandle when host contain `NONPROXY_KEYWORS` or `PROXY_KEYWORDS`
-    let has_nonproxy_list = NONPROXY_KEYWORDS.iter().any(|v| host.as_ref().contains(v));
-    let has_proxy_status = PROXY_KEYWORDS
+    let nonproxy_keywords = runtime::nonproxy_keywords();
+    let proxy_keywords = runtime::proxy_keywords();
+    let has_nonproxy_list = nonproxy_keywords.iter().any(|v| host.as_ref().contains(v));
+    let has_proxy_status = proxy_keywords
         .iter()
         .find(|v| host.as_ref().contains(&v.name_server))
         .map(|v| match v.proxy_server.as_ref() {

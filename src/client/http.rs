@@ -10,7 +10,7 @@ use super::{
     resolve_server_connection, split_and_wrap,
 };
 use crate::client::HttpProxySnafu;
-use crate::config::{runtime, PROXY_KEYWORDS};
+use crate::config::runtime;
 
 #[derive(Debug, Snafu)]
 pub enum HttpProxyError {
@@ -171,7 +171,8 @@ impl HttpProxierProvider {
     ) -> super::Result<(TcpStream, bool, Option<Cow<'static, str>>)> {
         // if we don't have ssl,only use proxy when host is part of `PROXY_KEYWORDS`
         if !self.has_ssl {
-            let has_proxy_status = PROXY_KEYWORDS
+            let proxy_keywords = runtime::proxy_keywords();
+            let has_proxy_status = proxy_keywords
                 .iter()
                 .find(|e| self.host.contains(&e.name_server));
             let server_host = runtime::server_host();
