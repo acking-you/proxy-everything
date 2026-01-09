@@ -292,7 +292,7 @@ pub async fn resolve_server_connection(
     sender: Option<&SenderChan>,
     msg_key: Option<Cow<'static, str>>,
 ) -> Result<ServerConnection> {
-    use crate::config::{SERVER_HOST, SERVER_PORT};
+    use crate::config::runtime;
 
     // If sender is None (auto-proxy disabled), always use proxy
     if let Some(sender) = sender {
@@ -312,7 +312,7 @@ pub async fn resolve_server_connection(
                         host,
                         port,
                         &proxy_server,
-                        *SERVER_PORT,
+                        runtime::server_port(),
                         msg_key.clone(),
                         "[PROXY] special proxy",
                     )
@@ -325,13 +325,14 @@ pub async fn resolve_server_connection(
     }
 
     // Default: use normal proxy
-    let msg_key = change_msg_key(SERVER_HOST.as_str(), msg_key);
+    let server_host = runtime::server_host();
+    let msg_key = change_msg_key(server_host.as_str(), msg_key);
     Ok(ServerConnection {
         stream: get_tcp_proxy_stream(
             host,
             port,
-            &SERVER_HOST,
-            *SERVER_PORT,
+            &server_host,
+            runtime::server_port(),
             msg_key.clone(),
             "[PROXY] default proxy",
         )

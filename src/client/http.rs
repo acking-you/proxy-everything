@@ -10,7 +10,7 @@ use super::{
     resolve_server_connection, split_and_wrap,
 };
 use crate::client::HttpProxySnafu;
-use crate::config::{PROXY_KEYWORDS, SERVER_HOST, SERVER_PORT};
+use crate::config::{runtime, PROXY_KEYWORDS};
 
 #[derive(Debug, Snafu)]
 pub enum HttpProxyError {
@@ -174,16 +174,17 @@ impl HttpProxierProvider {
             let has_proxy_status = PROXY_KEYWORDS
                 .iter()
                 .find(|e| self.host.contains(&e.name_server));
+            let server_host = runtime::server_host();
             let (mut server_stream, msg_key) = match has_proxy_status {
                 Some(proxy_status) => {
-                    let server_ip = proxy_status.proxy_server.as_ref().unwrap_or(&SERVER_HOST);
+                    let server_ip = proxy_status.proxy_server.as_ref().unwrap_or(&server_host);
                     let msg_key = change_msg_key(server_ip.as_str(), self.msg_key.clone());
                     (
                         get_tcp_proxy_stream(
                             self.host.as_str(),
                             self.port,
                             server_ip,
-                            *SERVER_PORT,
+                            runtime::server_port(),
                             msg_key.clone(),
                             "[PROXY] we will proxy http",
                         )
