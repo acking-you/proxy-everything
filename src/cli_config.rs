@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 use sysproxy::Sysproxy;
 
 pub const CONFIG_FILE_NAME: &str = "config.toml";
@@ -98,10 +99,12 @@ pub fn get_default_config_path() -> Result<PathBuf> {
 ///
 /// Sets system proxy on creation, disables it on drop.
 /// This ensures proxy is always cleaned up, even on panic or signal.
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub struct SystemProxyGuard {
     original: Sysproxy,
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 impl SystemProxyGuard {
     /// Create a new guard that sets system proxy to 127.0.0.1:port.
     ///
@@ -133,6 +136,7 @@ impl SystemProxyGuard {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 impl Drop for SystemProxyGuard {
     fn drop(&mut self) {
         let disabled = Sysproxy {
