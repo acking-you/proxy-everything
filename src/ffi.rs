@@ -13,6 +13,8 @@ use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
 
 use crate::client::{ClientConfig, run_client_with_listener};
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+use crate::cli_config::SystemProxyGuard;
 
 /// Log callback function type.
 /// level: 0=trace, 1=debug, 2=info, 3=warn, 4=error
@@ -26,6 +28,8 @@ pub struct ProxyHandle {
     runtime: Runtime,
     cancel_token: Option<CancellationToken>,
     running: AtomicBool,
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    _system_proxy_guard: Option<SystemProxyGuard>,
 }
 
 /// Result codes for FFI functions.
@@ -52,6 +56,7 @@ pub struct ProxyConfig {
     pub cache_dir: *const c_char,   // cache directory for auto-proxy (required on mobile)
     pub need_codec_ips: *const c_char, // comma-separated IPs (default: null = empty list)
     pub force_codec: c_int,         // default: 0 = only specified IPs use codec
+    pub set_system_proxy: c_int,    // desktop only: 0 = disabled, 1 = set system proxy
 }
 
 /// Set log callback function.
@@ -165,6 +170,8 @@ pub extern "C" fn proxy_create() -> *mut ProxyHandle {
         runtime,
         cancel_token: None,
         running: AtomicBool::new(false),
+        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        _system_proxy_guard: None,
     }))
 }
 
@@ -234,6 +241,19 @@ pub unsafe extern "C" fn proxy_start(
     let reverse_geo = config.reverse_geo != 0;
     let enable_auto_proxy = config.auto_proxy != 0;
     let force_codec = config.force_codec != 0;
+    let set_system_proxy = config.set_system_proxy != 0;
+
+    // Set system proxy for desktop platforms
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    {
+        handle._system_proxy_guard = if set_system_proxy {
+            SystemProxyGuard::new(local_port)
+        } else {
+            None
+        };
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    let _ = set_system_proxy;
 
     // Initialize runtime config directly (no env vars needed)
     crate::config::runtime::init_config(
