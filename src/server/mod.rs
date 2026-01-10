@@ -468,7 +468,10 @@ fn detect_public_ip() -> Option<IpAddr> {
 
     let agent = ureq::Agent::new_with_defaults();
     for url in SERVICES {
-        if let Ok(body) = agent.get(*url).call().and_then(|mut r| r.body_mut().read_to_string())
+        if let Ok(body) = agent
+            .get(*url)
+            .call()
+            .and_then(|mut r| r.body_mut().read_to_string())
             && let Ok(ip) = body.trim().parse::<IpAddr>()
         {
             return Some(ip);

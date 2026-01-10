@@ -117,9 +117,8 @@ impl NodeStore {
         }
 
         let content = std::fs::read_to_string(&self.file_path)?;
-        let file: NodesFile = serde_json::from_str(&content).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-        })?;
+        let file: NodesFile = serde_json::from_str(&content)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
         // Single write lock scope for self_node and self_addrs
         {
@@ -147,9 +146,8 @@ impl NodeStore {
     /// Cleans up temp file on failure.
     pub fn save(&self) -> std::io::Result<()> {
         let file = self.to_file();
-        let content = serde_json::to_string_pretty(&file).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-        })?;
+        let content = serde_json::to_string_pretty(&file)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
         // Check if content changed
         let hash = simple_hash(&content);
@@ -227,7 +225,11 @@ impl NodeStore {
 
     /// Get self node ID.
     pub fn self_node_id(&self) -> Option<String> {
-        self.self_node.read().unwrap().as_ref().map(|n| n.node_id.clone())
+        self.self_node
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|n| n.node_id.clone())
     }
 
     /// Update or add a peer.
@@ -235,7 +237,10 @@ impl NodeStore {
         if self.is_self_addr(&peer.addr) {
             return;
         }
-        self.peers.write().unwrap().insert(peer.node_id.clone(), peer);
+        self.peers
+            .write()
+            .unwrap()
+            .insert(peer.node_id.clone(), peer);
     }
 
     /// Update multiple peers.
@@ -307,11 +312,7 @@ impl NodeStore {
 
     /// Check if address belongs to this node.
     pub fn is_self_addr(&self, addr: &str) -> bool {
-        self.self_addrs
-            .read()
-            .unwrap()
-            .iter()
-            .any(|v| v == addr)
+        self.self_addrs.read().unwrap().iter().any(|v| v == addr)
     }
 
     /// Clean up stale peers (not seen for given duration).

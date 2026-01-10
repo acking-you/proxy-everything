@@ -80,10 +80,7 @@ impl ShardData {
         );
 
         // Store visit
-        self.recent_visits
-            .entry(dest_host)
-            .or_default()
-            .push(visit);
+        self.recent_visits.entry(dest_host).or_default().push(visit);
         self.total_visits += 1;
     }
 

@@ -38,7 +38,11 @@ pub fn draw_ui(f: &mut Frame, state: &mut AppState) {
         .block(Block::default().borders(Borders::ALL).title(title))
         .select(state.tab_index)
         .style(Style::default().fg(Color::White))
-        .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+        .highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
     f.render_widget(tabs, chunks[0]);
 
     // Content
@@ -59,13 +63,22 @@ pub fn draw_ui(f: &mut Frame, state: &mut AppState) {
     // Status bar
     let loading_indicator = if state.loading { " ⟳" } else { "" };
     let status = if let Some(err) = &state.error {
-        Span::styled(format!("Error: {}{}", err, loading_indicator), Style::default().fg(Color::Red))
+        Span::styled(
+            format!("Error: {}{}", err, loading_indicator),
+            Style::default().fg(Color::Red),
+        )
     } else if let Some(geo_err) = &state.geo_error {
         Span::styled(format!("⚠ {}", geo_err), Style::default().fg(Color::Yellow))
     } else {
         let help = match state.tab_index {
-            0 => format!("q:quit  ←→:tabs  ↑↓:select  Enter:switch  a:add  d:delete  r:refresh{}", loading_indicator),
-            2 | 3 => format!("q:quit  ←→:tabs  /:filter  PgUp/PgDn:page  r:refresh{}", loading_indicator),
+            0 => format!(
+                "q:quit  ←→:tabs  ↑↓:select  Enter:switch  a:add  d:delete  r:refresh{}",
+                loading_indicator
+            ),
+            2 | 3 => format!(
+                "q:quit  ←→:tabs  /:filter  PgUp/PgDn:page  r:refresh{}",
+                loading_indicator
+            ),
             _ => format!("q:quit  ←→:tabs  r:refresh{}", loading_indicator),
         };
         Span::styled(help, Style::default().fg(Color::DarkGray))
@@ -190,7 +203,13 @@ fn draw_filter_dialog(f: &mut Frame, state: &AppState) {
     f.render_widget(dialog, dialog_area);
 }
 
-fn draw_nodes_tab(f: &mut Frame, area: Rect, data: &FetchedData, selected: usize, geo_cache: &HashMap<String, String>) {
+fn draw_nodes_tab(
+    f: &mut Frame,
+    area: Rect,
+    data: &FetchedData,
+    selected: usize,
+    geo_cache: &HashMap<String, String>,
+) {
     if data.nodes.is_empty() {
         let empty = Paragraph::new(vec![
             Line::from(""),
@@ -215,17 +234,27 @@ fn draw_nodes_tab(f: &mut Frame, area: Rect, data: &FetchedData, selected: usize
         .enumerate()
         .map(|(i, node)| {
             let style = if i == selected {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
-            let marker = if node.node_id == node.addr { "●" } else { "○" };
+            let marker = if node.node_id == node.addr {
+                "●"
+            } else {
+                "○"
+            };
             let ip = node.addr.split(':').next().unwrap_or("");
             let geo_str = geo_cache
                 .get(ip)
                 .map(|code| format!("{} {} ", country_to_flag(code), code))
                 .unwrap_or_default();
-            ListItem::new(format!("{} {}{} ({})", marker, geo_str, node.node_id, node.addr)).style(style)
+            ListItem::new(format!(
+                "{} {}{} ({})",
+                marker, geo_str, node.node_id, node.addr
+            ))
+            .style(style)
         })
         .collect();
 
@@ -258,8 +287,11 @@ fn draw_realtime_tab(f: &mut Frame, area: Rect, data: &FetchedData) {
         vec![Line::from("No data")]
     };
     f.render_widget(
-        Paragraph::new(process_text)
-            .block(Block::default().borders(Borders::ALL).title("Process Stats")),
+        Paragraph::new(process_text).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Process Stats"),
+        ),
         top_chunks[0],
     );
 
@@ -325,8 +357,11 @@ fn draw_realtime_tab(f: &mut Frame, area: Rect, data: &FetchedData) {
         })
         .collect();
     f.render_widget(
-        Paragraph::new(throughput_text)
-            .block(Block::default().borders(Borders::ALL).title("Recent Minutes")),
+        Paragraph::new(throughput_text).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Recent Minutes"),
+        ),
         chunks[1],
     );
 }
@@ -362,7 +397,11 @@ fn draw_connections_tab(f: &mut Frame, area: Rect, data: &FetchedData, state: &A
                 Cell::from(format!("{}:{}", c.dest_host, c.dest_port)),
                 Cell::from(format_bytes(c.bytes_up)),
                 Cell::from(format_bytes(c.bytes_down)),
-                Cell::from(c.latency_ms.map(|l| l.to_string()).unwrap_or("-".to_string())),
+                Cell::from(
+                    c.latency_ms
+                        .map(|l| l.to_string())
+                        .unwrap_or("-".to_string()),
+                ),
             ])
         })
         .collect();
@@ -370,7 +409,13 @@ fn draw_connections_tab(f: &mut Frame, area: Rect, data: &FetchedData, state: &A
     let title = if state.filter_input.is_empty() {
         format!("Connections [{}-{}/{}]", start + 1, end, total)
     } else {
-        format!("Connections [{}-{}/{}] filter: {}", start + 1, end, total, state.filter_input)
+        format!(
+            "Connections [{}-{}/{}] filter: {}",
+            start + 1,
+            end,
+            total,
+            state.filter_input
+        )
     };
 
     let table = Table::new(
@@ -413,18 +458,28 @@ fn draw_topn_tab(f: &mut Frame, area: Rect, data: &FetchedData, state: &AppState
         .iter()
         .enumerate()
         .map(|(i, (host, bytes))| {
-            ListItem::new(format!("{}. {} ({})", start_h + i + 1, host, format_bytes(*bytes)))
+            ListItem::new(format!(
+                "{}. {} ({})",
+                start_h + i + 1,
+                host,
+                format_bytes(*bytes)
+            ))
         })
         .collect();
 
     let host_title = if state.filter_input.is_empty() {
         format!("Top Hosts [{}-{}/{}]", start_h + 1, end_h, total_hosts)
     } else {
-        format!("Top Hosts [{}-{}/{}] filter: {}", start_h + 1, end_h, total_hosts, state.filter_input)
+        format!(
+            "Top Hosts [{}-{}/{}] filter: {}",
+            start_h + 1,
+            end_h,
+            total_hosts,
+            state.filter_input
+        )
     };
     f.render_widget(
-        List::new(host_items)
-            .block(Block::default().borders(Borders::ALL).title(host_title)),
+        List::new(host_items).block(Block::default().borders(Borders::ALL).title(host_title)),
         chunks[0],
     );
 
@@ -437,14 +492,18 @@ fn draw_topn_tab(f: &mut Frame, area: Rect, data: &FetchedData, state: &AppState
         .iter()
         .enumerate()
         .map(|(i, (ip, bytes))| {
-            ListItem::new(format!("{}. {} ({})", start_i + i + 1, ip, format_bytes(*bytes)))
+            ListItem::new(format!(
+                "{}. {} ({})",
+                start_i + i + 1,
+                ip,
+                format_bytes(*bytes)
+            ))
         })
         .collect();
 
     let ip_title = format!("Top IPs [{}-{}/{}]", start_i + 1, end_i, total_ips);
     f.render_widget(
-        List::new(ip_items)
-            .block(Block::default().borders(Borders::ALL).title(ip_title)),
+        List::new(ip_items).block(Block::default().borders(Borders::ALL).title(ip_title)),
         chunks[1],
     );
 }

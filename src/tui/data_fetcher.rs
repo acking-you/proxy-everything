@@ -76,7 +76,11 @@ pub async fn data_fetcher_task(
                 match result {
                     Ok(data) => {
                         client = None;
-                        if data_tx.send(Ok(DataResult::Data(data, Some(addr)))).await.is_err() {
+                        if data_tx
+                            .send(Ok(DataResult::Data(data, Some(addr))))
+                            .await
+                            .is_err()
+                        {
                             tracing::warn!("Main loop closed, exiting data fetcher");
                             break;
                         }

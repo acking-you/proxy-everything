@@ -37,8 +37,8 @@ use crossterm::{
 };
 use http_proxy::config::{CONTROL_SESSION_KEY, DEFAULT_SECRET_KEY};
 use http_proxy::tui::{
-    AppState, Cli, DataCommand, DataResult, TAB_COUNT,
-    data_fetcher_task, draw_ui, handle_add_dialog_input, TerminalGuard,
+    AppState, Cli, DataCommand, DataResult, TAB_COUNT, TerminalGuard, data_fetcher_task, draw_ui,
+    handle_add_dialog_input,
 };
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
@@ -109,7 +109,10 @@ async fn main() -> std::io::Result<()> {
                         })
                         .collect();
                     if !uncached_ips.is_empty()
-                        && cmd_tx.send(DataCommand::QueryGeo(uncached_ips)).await.is_err()
+                        && cmd_tx
+                            .send(DataCommand::QueryGeo(uncached_ips))
+                            .await
+                            .is_err()
                     {
                         state.error = Some("Failed to send geo query command".to_string());
                     }
@@ -216,7 +219,8 @@ async fn main() -> std::io::Result<()> {
                                 .await
                                 .is_err()
                             {
-                                state.error = Some("Failed to send remove node command".to_string());
+                                state.error =
+                                    Some("Failed to send remove node command".to_string());
                             } else {
                                 state.loading = true;
                             }
@@ -232,7 +236,8 @@ async fn main() -> std::io::Result<()> {
                                 .await
                                 .is_err()
                             {
-                                state.error = Some("Failed to send switch server command".to_string());
+                                state.error =
+                                    Some("Failed to send switch server command".to_string());
                             } else {
                                 state.switching = true;
                                 state.switch_target = Some(addr);

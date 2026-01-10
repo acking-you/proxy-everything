@@ -46,12 +46,12 @@ pub struct ProxyConfig {
     pub server_host: *const c_char,
     pub server_port: u16,
     pub local_port: u16,
-    pub session_key: *const c_char,  // can be null to use default key
-    pub auto_proxy: c_int,  // 0 = disabled, 1 = enabled
-    pub reverse_geo: c_int, // 0 = CN direct, 1 = CN proxy
-    pub cache_dir: *const c_char,  // cache directory for auto-proxy (required on mobile)
-    pub need_codec_ips: *const c_char,  // comma-separated IPs (default: null = empty list)
-    pub force_codec: c_int,  // default: 0 = only specified IPs use codec
+    pub session_key: *const c_char, // can be null to use default key
+    pub auto_proxy: c_int,          // 0 = disabled, 1 = enabled
+    pub reverse_geo: c_int,         // 0 = CN direct, 1 = CN proxy
+    pub cache_dir: *const c_char,   // cache directory for auto-proxy (required on mobile)
+    pub need_codec_ips: *const c_char, // comma-separated IPs (default: null = empty list)
+    pub force_codec: c_int,         // default: 0 = only specified IPs use codec
 }
 
 /// Set log callback function.
@@ -202,10 +202,7 @@ pub unsafe extern "C" fn proxy_start(
         match unsafe { CStr::from_ptr(config.session_key) }.to_str() {
             Ok(s) if s.len() == 32 => Some(s.to_string()),
             Ok(s) => {
-                send_log(
-                    4,
-                    &format!("Session key must be 32 bytes, got {}", s.len()),
-                );
+                send_log(4, &format!("Session key must be 32 bytes, got {}", s.len()));
                 return ProxyResult::InvalidParam;
             }
             Err(_) => return ProxyResult::InvalidParam,
@@ -224,13 +221,11 @@ pub unsafe extern "C" fn proxy_start(
 
     // need_codec_ips: null or empty = empty list (no codec IPs), otherwise comma-separated
     let need_codec_ips = if config.need_codec_ips.is_null() {
-        Some(vec![])  // default: empty list
+        Some(vec![]) // default: empty list
     } else {
         match unsafe { CStr::from_ptr(config.need_codec_ips) }.to_str() {
-            Ok(s) if !s.is_empty() => {
-                Some(s.split(',').map(|ip| ip.trim().to_string()).collect())
-            }
-            _ => Some(vec![]),  // empty string = empty list
+            Ok(s) if !s.is_empty() => Some(s.split(',').map(|ip| ip.trim().to_string()).collect()),
+            _ => Some(vec![]), // empty string = empty list
         }
     };
 
@@ -240,28 +235,14 @@ pub unsafe extern "C" fn proxy_start(
     let enable_auto_proxy = config.auto_proxy != 0;
     let force_codec = config.force_codec != 0;
 
-    // Set environment variables for config that uses static Lazy
-    // SAFETY: Called before spawning async tasks
-    unsafe {
-        std::env::set_var("SERVER_HOST", &server_host);
-        std::env::set_var("SERVER_PORT", server_port.to_string());
-        if let Some(ref key) = session_key {
-            std::env::set_var("SECRET_KEY", key);
-        }
-        if reverse_geo {
-            std::env::set_var("REVERSE_GEO_PROXY", "true");
-        } else {
-            std::env::remove_var("REVERSE_GEO_PROXY");
-        }
-        if let Some(ref ips) = need_codec_ips {
-            std::env::set_var("NEED_CODEC_IP", ips.join(","));
-        } else {
-            std::env::remove_var("NEED_CODEC_IP");
-        }
-    }
-
-    // Reload runtime config to pick up new environment variables
-    crate::config::runtime::reload_from_env();
+    // Initialize runtime config directly (no env vars needed)
+    crate::config::runtime::init_config(
+        server_host.clone(),
+        server_port,
+        reverse_geo,
+        need_codec_ips.clone().unwrap_or_default(),
+        session_key.clone(),
+    );
 
     // Build ClientConfig for runtime options
     let client_config = ClientConfig {
@@ -295,9 +276,11 @@ pub unsafe extern "C" fn proxy_start(
 
         // Use force_codec to determine NEED_CODEC constant
         if force_codec {
-            run_client_with_listener::<true>(listener, cancel_token, None, Some(client_config)).await;
+            run_client_with_listener::<true>(listener, cancel_token, None, Some(client_config))
+                .await;
         } else {
-            run_client_with_listener::<false>(listener, cancel_token, None, Some(client_config)).await;
+            run_client_with_listener::<false>(listener, cancel_token, None, Some(client_config))
+                .await;
         }
 
         tracing::info!("Proxy stopped");

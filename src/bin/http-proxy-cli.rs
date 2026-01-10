@@ -76,7 +76,11 @@ impl Cli {
                 .map(|s| s.split(',').map(String::from).collect()),
             msg_key: if self.msg_key { Some(true) } else { None },
             reverse_geo: if self.reverse_geo { Some(true) } else { None },
-            use_local_geoip: if self.use_local_geoip { Some(true) } else { None },
+            use_local_geoip: if self.use_local_geoip {
+                Some(true)
+            } else {
+                None
+            },
             set_system_proxy: if self.set_system_proxy {
                 Some(true)
             } else {

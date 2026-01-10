@@ -49,7 +49,7 @@ use ring::aead::{
     UnboundKey,
 };
 
-use crate::config::DEFAULT_KEY;
+use crate::config::runtime;
 
 /// Result type for ring cryptographic operations.
 pub type RingResult<T> = Result<T, ring::error::Unspecified>;
@@ -116,7 +116,7 @@ impl Aes256GcmCryption {
 
     /// Creates a new cryptor using the default key from configuration.
     pub fn try_new_with_default_key() -> RingResult<Self> {
-        Aes256GcmCryption::try_new(DEFAULT_KEY.0.as_ref())
+        runtime::with_secret_key(|key, _| Aes256GcmCryption::try_new(key))
     }
 
     /// Encrypts data in-place and returns the authentication tag.

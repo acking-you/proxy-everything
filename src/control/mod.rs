@@ -287,7 +287,9 @@ impl ControlClient {
         if !resp.ok {
             return Err(ControlError::Protocol {
                 source: ProxyError::Protocol {
-                    detail: resp.error.unwrap_or_else(|| "list nodes failed".to_string()),
+                    detail: resp
+                        .error
+                        .unwrap_or_else(|| "list nodes failed".to_string()),
                 },
             });
         }
@@ -314,7 +316,9 @@ impl ControlClient {
         if !resp.ok {
             return Err(ControlError::Protocol {
                 source: ProxyError::Protocol {
-                    detail: resp.error.unwrap_or_else(|| "get realtime stats failed".to_string()),
+                    detail: resp
+                        .error
+                        .unwrap_or_else(|| "get realtime stats failed".to_string()),
                 },
             });
         }
@@ -342,7 +346,9 @@ impl ControlClient {
         if !resp.ok {
             return Err(ControlError::Protocol {
                 source: ProxyError::Protocol {
-                    detail: resp.error.unwrap_or_else(|| "get recent connections failed".to_string()),
+                    detail: resp
+                        .error
+                        .unwrap_or_else(|| "get recent connections failed".to_string()),
                 },
             });
         }
@@ -370,7 +376,9 @@ impl ControlClient {
         if !resp.ok {
             return Err(ControlError::Protocol {
                 source: ProxyError::Protocol {
-                    detail: resp.error.unwrap_or_else(|| "get time buckets failed".to_string()),
+                    detail: resp
+                        .error
+                        .unwrap_or_else(|| "get time buckets failed".to_string()),
                 },
             });
         }
@@ -442,7 +450,9 @@ impl ControlClient {
         } else {
             Err(ControlError::Protocol {
                 source: ProxyError::Protocol {
-                    detail: resp.error.unwrap_or_else(|| "remove node failed".to_string()),
+                    detail: resp
+                        .error
+                        .unwrap_or_else(|| "remove node failed".to_string()),
                 },
             })
         }

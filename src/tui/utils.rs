@@ -27,7 +27,9 @@ pub fn parse_addr(addr: &str) -> Result<(String, u16), String> {
     if parts.len() != 2 {
         return Err(format!("Invalid address: {}", addr));
     }
-    let port = parts[0].parse::<u16>().map_err(|_| format!("Invalid port: {}", parts[0]))?;
+    let port = parts[0]
+        .parse::<u16>()
+        .map_err(|_| format!("Invalid port: {}", parts[0]))?;
     Ok((parts[1].to_string(), port))
 }
 
@@ -53,7 +55,11 @@ pub fn format_bytes(bytes: u64) -> String {
 }
 
 /// Handle input in add node dialog.
-pub async fn handle_add_dialog_input(state: &mut AppState, key: KeyCode, cmd_tx: &mpsc::Sender<DataCommand>) {
+pub async fn handle_add_dialog_input(
+    state: &mut AppState,
+    key: KeyCode,
+    cmd_tx: &mpsc::Sender<DataCommand>,
+) {
     match key {
         KeyCode::Esc => {
             state.show_add_dialog = false;

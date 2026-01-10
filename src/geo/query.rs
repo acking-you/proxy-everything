@@ -285,7 +285,10 @@ fn lookup_country_local(ip: IpAddr) -> Result<String> {
     let guard = DB_READER.lock().expect("DB_READER lock poisoned");
     let reader = guard.as_ref().ok_or(GeoError::DataDir)?;
     let result = reader.lookup(ip).context(LookupSnafu)?;
-    let city: maxminddb::geoip2::City = result.decode().context(LookupSnafu)?.ok_or(GeoError::DataDir)?;
+    let city: maxminddb::geoip2::City = result
+        .decode()
+        .context(LookupSnafu)?
+        .ok_or(GeoError::DataDir)?;
 
     if let Some(code) = city.country.iso_code {
         return Ok(code.to_string());

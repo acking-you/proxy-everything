@@ -69,7 +69,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use self::http::{HttpProxierProvider, HttpProxyError};
 use self::socks::{SocksError, SocksProxierProvider};
 use crate::codec::{AsyncReader, AsyncReaderWriterRef, AsyncWriter};
-use crate::config::{NEED_CODEC_IP, gen_random_key};
+use crate::config::{gen_random_key, runtime};
 use crate::util::{GracefulShutdownManager, GracefulShutdownManagerImpl};
 use crate::{
     Aes256GcmCryption, MyAsyncWriteExt, ProxyHeader, client_proxy_with_cryptor_codec,
@@ -130,7 +130,8 @@ pub enum ClientError {
 
 #[inline]
 pub fn get_msg_key_from_codec_ip(ip: impl AsRef<str>) -> Option<String> {
-    NEED_CODEC_IP
+    let codec_ips = runtime::need_codec_ips();
+    codec_ips
         .iter()
         .find(|codec_ip| codec_ip.as_str() == ip.as_ref())
         .map(|_| gen_random_key())

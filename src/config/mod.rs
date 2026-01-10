@@ -1,6 +1,7 @@
+use arc_swap::ArcSwap;
 use once_cell::sync::Lazy;
-use parking_lot::RwLock;
 use rand::Rng;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{Layer, fmt};
@@ -49,123 +50,92 @@ pub mod runtime {
 
     // Atomic values for simple types
     static SERVER_PORT_RT: AtomicU16 = AtomicU16::new(1081);
-    static CLIENT_PORT_RT: AtomicU16 = AtomicU16::new(1080);
     #[cfg(feature = "auto-proxy")]
     static REVERSE_GEO_RT: AtomicBool = AtomicBool::new(false);
 
-    // RwLock for complex types
-    static SERVER_HOST_RT: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(String::new()));
-    static NEED_CODEC_IP_RT: Lazy<RwLock<Vec<String>>> = Lazy::new(|| RwLock::new(Vec::new()));
+    // ArcSwap for complex types (lock-free reads)
+    type SecretKey = Option<(Vec<u8>, u32)>;
+    static SERVER_HOST_RT: Lazy<ArcSwap<String>> =
+        Lazy::new(|| ArcSwap::from_pointee(String::new()));
+    static NEED_CODEC_IP_RT: Lazy<ArcSwap<Vec<String>>> =
+        Lazy::new(|| ArcSwap::from_pointee(Vec::new()));
+    static SECRET_KEY_RT: Lazy<ArcSwap<SecretKey>> = Lazy::new(|| ArcSwap::from_pointee(None));
     #[cfg(feature = "auto-proxy")]
-    static PROXY_KEYWORDS_RT: Lazy<RwLock<Vec<ParsedProxyKeyWord>>> =
-        Lazy::new(|| RwLock::new(Vec::new()));
+    static PROXY_KEYWORDS_RT: Lazy<ArcSwap<Vec<ParsedProxyKeyWord>>> =
+        Lazy::new(|| ArcSwap::from_pointee(Vec::new()));
     #[cfg(feature = "auto-proxy")]
-    static NONPROXY_KEYWORDS_RT: Lazy<RwLock<Vec<String>>> = Lazy::new(|| RwLock::new(Vec::new()));
+    static NONPROXY_KEYWORDS_RT: Lazy<ArcSwap<Vec<String>>> =
+        Lazy::new(|| ArcSwap::from_pointee(Vec::new()));
 
-    // Flag to check if runtime config is initialized
-    static INITIALIZED: AtomicBool = AtomicBool::new(false);
+    // ===== Setters (for FFI direct use) =====
 
-    /// Initialize runtime config from environment variables (called once at startup)
-    pub fn init_from_env() {
-        if INITIALIZED.swap(true, Ordering::SeqCst) {
-            return; // Already initialized
-        }
-        reload_from_env();
+    pub fn set_server_host(host: String) {
+        SERVER_HOST_RT.store(Arc::new(host));
     }
 
-    /// Reload runtime config from environment variables (can be called multiple times)
-    pub fn reload_from_env() {
-        // Server port
-        if let Ok(port) = std::env::var("SERVER_PORT") {
-            if let Ok(p) = port.parse::<u16>() {
-                SERVER_PORT_RT.store(p, Ordering::SeqCst);
+    pub fn set_server_port(port: u16) {
+        SERVER_PORT_RT.store(port, Ordering::SeqCst);
+    }
+
+    #[cfg(feature = "auto-proxy")]
+    pub fn set_reverse_geo(reverse: bool) {
+        REVERSE_GEO_RT.store(reverse, Ordering::SeqCst);
+    }
+
+    pub fn set_need_codec_ips(ips: Vec<String>) {
+        NEED_CODEC_IP_RT.store(Arc::new(ips));
+    }
+
+    pub fn set_secret_key(key: Option<String>) {
+        let key_data = key.and_then(|k| {
+            let bytes = k.as_bytes();
+            if bytes.len() != 32 {
+                tracing::warn!(
+                    "`SECRET_KEY` must have 256 bit(32 byte)! current: {} bytes",
+                    bytes.len()
+                );
+                return None;
             }
-        }
+            let hash = bytes
+                .iter()
+                .fold(0u32, |h, &b| h.wrapping_mul(31).wrapping_add(b as u32));
+            Some((bytes.to_vec(), hash))
+        });
+        SECRET_KEY_RT.store(Arc::new(key_data));
+    }
 
-        // Client port
-        if let Ok(port) = std::env::var("CLIENT_PORT") {
-            if let Ok(p) = port.parse::<u16>() {
-                CLIENT_PORT_RT.store(p, Ordering::SeqCst);
-            }
-        }
-
-        // Server host
-        if let Ok(host) = std::env::var("SERVER_HOST") {
-            *SERVER_HOST_RT.write() = host;
-        }
-
-        // Reverse geo
-        #[cfg(feature = "auto-proxy")]
-        {
-            let reverse = parse_bool_env("REVERSE_GEO_PROXY", false);
-            REVERSE_GEO_RT.store(reverse, Ordering::SeqCst);
-        }
-
-        // Need codec IPs
-        let default_codec_ip = vec!["64.23.159.180".to_string(), server_host()];
-        if let Ok(v) = std::env::var("NEED_CODEC_IP") {
-            *NEED_CODEC_IP_RT.write() = split_concat_with_default(v, default_codec_ip);
+    #[cfg(feature = "auto-proxy")]
+    pub fn set_proxy_keywords(reverse: bool) {
+        let default_proxy = if reverse {
+            CN_KEYWORDS.clone()
         } else {
-            *NEED_CODEC_IP_RT.write() = default_codec_ip;
-        }
-
-        // Proxy/nonproxy keywords (depend on reverse_geo)
-        #[cfg(feature = "auto-proxy")]
-        {
-            let reverse = reverse_geo();
-            let default_proxy = if reverse {
-                CN_KEYWORDS.clone()
-            } else {
-                FOREIGN_KEYWORDS.clone()
-            };
-            let default_nonproxy = if reverse {
-                FOREIGN_KEYWORDS.clone()
-            } else {
-                CN_KEYWORDS.clone()
-            };
-
-            // Proxy keywords
-            let proxy_kw = if let Ok(v) = std::env::var("PROXY_KEYWORDS") {
-                split_concat_with_default(v, default_proxy)
-            } else {
-                default_proxy
-            };
-            *PROXY_KEYWORDS_RT.write() = parse_keywords(proxy_kw);
-
-            // Nonproxy keywords
-            let nonproxy_kw = if let Ok(v) = std::env::var("NONPROXY_KEYWORDS") {
-                split_concat_with_default(v, default_nonproxy)
-            } else {
-                default_nonproxy
-            };
-            *NONPROXY_KEYWORDS_RT.write() = nonproxy_kw;
-        }
-
-        tracing::info!(
-            "Runtime config reloaded: server={}:{}, local_port={}, reverse_geo={}",
-            server_host(),
-            server_port(),
-            client_port(),
-            cfg!(feature = "auto-proxy")
-                .then(|| reverse_geo())
-                .unwrap_or(false)
-        );
+            FOREIGN_KEYWORDS.clone()
+        };
+        PROXY_KEYWORDS_RT.store(Arc::new(parse_keywords(default_proxy)));
     }
+
+    #[cfg(feature = "auto-proxy")]
+    pub fn set_nonproxy_keywords(reverse: bool) {
+        let default_nonproxy = if reverse {
+            FOREIGN_KEYWORDS.clone()
+        } else {
+            CN_KEYWORDS.clone()
+        };
+        NONPROXY_KEYWORDS_RT.store(Arc::new(default_nonproxy));
+    }
+
+    // ===== Getters (lock-free) =====
 
     pub fn server_port() -> u16 {
         SERVER_PORT_RT.load(Ordering::SeqCst)
     }
 
-    pub fn client_port() -> u16 {
-        CLIENT_PORT_RT.load(Ordering::SeqCst)
-    }
-
-    pub fn server_host() -> String {
-        let host = SERVER_HOST_RT.read();
+    pub fn server_host() -> Arc<String> {
+        let host = SERVER_HOST_RT.load_full();
         if host.is_empty() {
-            "127.0.0.1".to_string()
+            Arc::new("127.0.0.1".to_string())
         } else {
-            host.clone()
+            host
         }
     }
 
@@ -179,18 +149,63 @@ pub mod runtime {
         false
     }
 
-    pub fn need_codec_ips() -> Vec<String> {
-        NEED_CODEC_IP_RT.read().clone()
+    pub fn need_codec_ips() -> Arc<Vec<String>> {
+        NEED_CODEC_IP_RT.load_full()
+    }
+
+    /// Get secret key via closure (zero-copy for sync callers)
+    pub fn with_secret_key<R>(f: impl FnOnce(&[u8], u32) -> R) -> R {
+        let guard = SECRET_KEY_RT.load();
+        match guard.as_ref() {
+            Some((key, hash)) => f(key, *hash),
+            None => f(&DEFAULT_KEY.0, DEFAULT_KEY.1),
+        }
     }
 
     #[cfg(feature = "auto-proxy")]
-    pub fn proxy_keywords() -> Vec<ParsedProxyKeyWord> {
-        PROXY_KEYWORDS_RT.read().clone()
+    pub fn proxy_keywords() -> Arc<Vec<ParsedProxyKeyWord>> {
+        PROXY_KEYWORDS_RT.load_full()
     }
 
     #[cfg(feature = "auto-proxy")]
-    pub fn nonproxy_keywords() -> Vec<String> {
-        NONPROXY_KEYWORDS_RT.read().clone()
+    pub fn nonproxy_keywords() -> Arc<Vec<String>> {
+        NONPROXY_KEYWORDS_RT.load_full()
+    }
+
+    /// Initialize all runtime config from values (for FFI)
+    pub fn init_config(
+        host: String,
+        port: u16,
+        reverse: bool,
+        codec_ips: Vec<String>,
+        secret: Option<String>,
+    ) {
+        set_server_host(host);
+        set_server_port(port);
+        set_secret_key(secret);
+
+        // Codec IPs: if empty, use default with server_host
+        let ips = if codec_ips.is_empty() {
+            vec!["64.23.159.180".to_string(), server_host().to_string()]
+        } else {
+            codec_ips
+        };
+        set_need_codec_ips(ips);
+
+        #[cfg(feature = "auto-proxy")]
+        {
+            set_reverse_geo(reverse);
+            set_proxy_keywords(reverse);
+            set_nonproxy_keywords(reverse);
+        }
+        #[cfg(not(feature = "auto-proxy"))]
+        let _ = reverse;
+
+        tracing::info!(
+            "Runtime config initialized: server={}:{}",
+            server_host(),
+            server_port()
+        );
     }
 }
 

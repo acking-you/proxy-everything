@@ -180,20 +180,22 @@ struct TaskContext {
 #[tracing::instrument(skip_all)]
 pub async fn run_auto_proxy_by_country(receiver: ReceiverChan, cache_dir: Option<PathBuf>) {
     let cache_dir_ref = cache_dir.as_deref();
-    let (non_proxy_set, non_proxy_file) = match get_data_set_and_file(NON_PROXY_FILE_NAME, cache_dir_ref).await {
-        Ok(v) => {
-            info!("`non_proxy_set`:{:?}", v.0);
-            v
-        }
-        Err(e) => {
-            tracing::error!(
-                "init `non_proxy_file` error: detail:{}",
-                snafu::Report::from_error(e)
-            );
-            return;
-        }
-    };
-    let (proxy_set, proxy_file) = match get_data_set_and_file(PROXY_FILE_NAME, cache_dir_ref).await {
+    let (non_proxy_set, non_proxy_file) =
+        match get_data_set_and_file(NON_PROXY_FILE_NAME, cache_dir_ref).await {
+            Ok(v) => {
+                info!("`non_proxy_set`:{:?}", v.0);
+                v
+            }
+            Err(e) => {
+                tracing::error!(
+                    "init `non_proxy_file` error: detail:{}",
+                    snafu::Report::from_error(e)
+                );
+                return;
+            }
+        };
+    let (proxy_set, proxy_file) = match get_data_set_and_file(PROXY_FILE_NAME, cache_dir_ref).await
+    {
         Ok(v) => {
             info!("`proxy_set`:{:?}", v.0);
             v
