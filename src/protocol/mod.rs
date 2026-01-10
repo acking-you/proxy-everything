@@ -36,7 +36,7 @@ use std::fmt::Display;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
-use crate::config::DEFAULT_KEY;
+use crate::config::runtime;
 use crate::error::{CheckSumSnafu, MaxSizeSnafu, ProtocolIoSnafu, ProxyError};
 
 /// Type alias for data size fields in the wire protocol.
@@ -97,7 +97,7 @@ impl Display for ProxyHeader {
 /// The actual data integrity is ensured by AES-GCM authentication.
 #[inline]
 pub fn get_check_sum(data: DataSize) -> DataSize {
-    data ^ DEFAULT_KEY.1
+    data ^ runtime::default_key_hash()
 }
 
 /// Reads and validates the data size from a framed message.

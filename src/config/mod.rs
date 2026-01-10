@@ -43,6 +43,13 @@ fn parse_bool_env(var: &str, default: bool) -> bool {
     }
 }
 
+/// Compute hash for key (used in checksum)
+fn compute_key_hash(key: &[u8]) -> u32 {
+    key.iter().fold(0u32, |hash, &byte| {
+        hash.wrapping_mul(31).wrapping_add(byte as u32)
+    })
+}
+
 /// Runtime-updatable configuration for FFI
 pub mod runtime {
     use super::*;
@@ -56,6 +63,9 @@ pub mod runtime {
     // RwLock for complex types
     static SERVER_HOST_RT: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(String::new()));
     static NEED_CODEC_IP_RT: Lazy<RwLock<Vec<String>>> = Lazy::new(|| RwLock::new(Vec::new()));
+    // DEFAULT_KEY: (key_bytes, hash) - must be initialized before use
+    static DEFAULT_KEY_RT: Lazy<RwLock<(Vec<u8>, u32)>> =
+        Lazy::new(|| RwLock::new((DEFAULT_SECRET_KEY.as_bytes().to_vec(), compute_key_hash(DEFAULT_SECRET_KEY.as_bytes()))));
     #[cfg(feature = "auto-proxy")]
     static PROXY_KEYWORDS_RT: Lazy<RwLock<Vec<ParsedProxyKeyWord>>> =
         Lazy::new(|| RwLock::new(Vec::new()));
@@ -92,6 +102,17 @@ pub mod runtime {
         // Server host
         if let Ok(host) = std::env::var("SERVER_HOST") {
             *SERVER_HOST_RT.write() = host;
+        }
+
+        // Secret key (DEFAULT_KEY)
+        if let Ok(key) = std::env::var("SECRET_KEY") {
+            let key_bytes = key.as_bytes();
+            if key_bytes.len() == 32 {
+                let hash = compute_key_hash(key_bytes);
+                *DEFAULT_KEY_RT.write() = (key_bytes.to_vec(), hash);
+            } else {
+                tracing::warn!("`SECRET_KEY` must be 32 bytes, got {}", key_bytes.len());
+            }
         }
 
         // Reverse geo
@@ -191,6 +212,16 @@ pub mod runtime {
     #[cfg(feature = "auto-proxy")]
     pub fn nonproxy_keywords() -> Vec<String> {
         NONPROXY_KEYWORDS_RT.read().clone()
+    }
+
+    /// Get the current default key (key_bytes, hash)
+    pub fn default_key() -> (Vec<u8>, u32) {
+        DEFAULT_KEY_RT.read().clone()
+    }
+
+    /// Get just the key hash for checksum operations
+    pub fn default_key_hash() -> u32 {
+        DEFAULT_KEY_RT.read().1
     }
 }
 

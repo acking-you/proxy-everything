@@ -1,5 +1,5 @@
 use clap::Parser;
-use http_proxy::config::{SERVER_PORT, init_tracing};
+use http_proxy::config::{SERVER_PORT, init_tracing, runtime};
 use http_proxy::server::start_server;
 use mimalloc_rust::GlobalMiMalloc;
 
@@ -32,6 +32,7 @@ async fn main() {
             std::env::set_var("TURELY_PROXY_SERVER", key);
         }
     }
+    runtime::init_from_env();
     let mode = match &cli.turely_proxy_server {
         Some(upstream) => format!("chain mode -> {}", upstream),
         None => "direct mode".to_string(),

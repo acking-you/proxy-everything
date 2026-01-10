@@ -1,5 +1,5 @@
 use http_proxy::client::start_client;
-use http_proxy::config::{CLIENT_PORT, SERVER_HOST, init_tracing};
+use http_proxy::config::{CLIENT_PORT, SERVER_HOST, init_tracing, runtime};
 use mimalloc_rust::GlobalMiMalloc;
 
 #[global_allocator]
@@ -8,6 +8,7 @@ static GLOBAL_MIMALLOC: GlobalMiMalloc = GlobalMiMalloc;
 #[tokio::main]
 async fn main() {
     init_tracing();
+    runtime::init_from_env();
     tracing::info!("SERVER_HOST:{}", *SERVER_HOST);
     let msg_key = std::env::var("MSG_KEY").is_ok();
     if msg_key {
