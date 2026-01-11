@@ -48,7 +48,7 @@ pub mod server;
 #[cfg(feature = "tui")]
 pub mod tui;
 
-#[cfg(feature = "vpn")]
+#[cfg(all(feature = "vpn", target_os = "android"))]
 pub mod tun;
 
 // FFI module (C-compatible interface for cross-platform integration)

@@ -1,28 +1,28 @@
-#[cfg(feature = "vpn")]
+#[cfg(all(feature = "vpn", target_os = "android"))]
 use anyhow::{Context, Result};
-#[cfg(feature = "vpn")]
+#[cfg(all(feature = "vpn", target_os = "android"))]
 use std::collections::{HashMap, VecDeque};
-#[cfg(feature = "vpn")]
+#[cfg(all(feature = "vpn", target_os = "android"))]
 use std::os::unix::io::RawFd;
-#[cfg(feature = "vpn")]
+#[cfg(all(feature = "vpn", target_os = "android"))]
 use std::sync::Arc;
-#[cfg(feature = "vpn")]
+#[cfg(all(feature = "vpn", target_os = "android"))]
 use tokio::io::AsyncReadExt;
-#[cfg(feature = "vpn")]
+#[cfg(all(feature = "vpn", target_os = "android"))]
 use tokio::io::AsyncWriteExt;
-#[cfg(feature = "vpn")]
+#[cfg(all(feature = "vpn", target_os = "android"))]
 use tokio::sync::RwLock;
-#[cfg(feature = "vpn")]
+#[cfg(all(feature = "vpn", target_os = "android"))]
 use tokio::sync::mpsc;
-#[cfg(feature = "vpn")]
+#[cfg(all(feature = "vpn", target_os = "android"))]
 use tokio_util::sync::CancellationToken;
 
-#[cfg(feature = "vpn")]
+#[cfg(all(feature = "vpn", target_os = "android"))]
 pub struct TunDevice {
     fd: RawFd,
 }
 
-#[cfg(feature = "vpn")]
+#[cfg(all(feature = "vpn", target_os = "android"))]
 impl TunDevice {
     pub fn from_fd(fd: RawFd) -> Result<Self> {
         if fd < 0 {
@@ -37,7 +37,7 @@ impl TunDevice {
     }
 }
 
-#[cfg(feature = "vpn")]
+#[cfg(all(feature = "vpn", target_os = "android"))]
 pub struct TunHandler {
     device: Arc<TunDevice>,
     protect_callback: Option<extern "C" fn(i32) -> bool>,
@@ -45,7 +45,7 @@ pub struct TunHandler {
     connections: Arc<RwLock<HashMap<FlowKey, mpsc::UnboundedSender<Vec<u8>>>>>,
 }
 
-#[cfg(feature = "vpn")]
+#[cfg(all(feature = "vpn", target_os = "android"))]
 impl TunHandler {
     pub fn new(
         fd: RawFd,
@@ -694,7 +694,7 @@ impl TunHandler {
     }
 }
 
-#[cfg(feature = "vpn")]
+#[cfg(all(feature = "vpn", target_os = "android"))]
 type FlowKey = (std::net::Ipv4Addr, u16, std::net::Ipv4Addr, u16);
 
 #[cfg(not(feature = "vpn"))]

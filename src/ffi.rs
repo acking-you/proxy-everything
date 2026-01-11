@@ -508,7 +508,7 @@ extern "C" fn android_protect_socket(fd: i32) -> bool {
         return false;
     };
 
-    let Ok(env) = vm.attach_current_thread() else {
+    let Ok(mut env) = vm.attach_current_thread() else {
         return false;
     };
 

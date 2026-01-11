@@ -52,11 +52,11 @@ indicatif = { version = "0.18", optional = true }
 comfy-table = { version = "7", optional = true }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 arc-swap = "1.8.0"
-tun = { version = "0.6", optional = true }
-smoltcp = { version = "0.11", optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
+tun = { version = "0.6", optional = true }
+smoltcp = { version = "0.11", optional = true }
 
 [[bin]]
 name = "http-proxy-server"
