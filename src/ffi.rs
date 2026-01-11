@@ -459,10 +459,10 @@ pub extern "C" fn proxy_init_logging() {
 // VPN-related FFI functions
 // ============================================================================
 
-#[cfg(feature = "vpn")]
+#[cfg(all(feature = "vpn", target_os = "android"))]
 use std::sync::RwLock;
 
-#[cfg(feature = "vpn")]
+#[cfg(all(feature = "vpn", target_os = "android"))]
 static PROTECT_CALLBACK: RwLock<Option<ProtectCallback>> = RwLock::new(None);
 
 #[cfg(all(feature = "vpn", target_os = "android"))]
@@ -528,7 +528,7 @@ extern "C" fn android_protect_socket(fd: i32) -> bool {
 ///
 /// # Safety
 /// `callback` must be a valid function pointer or null to disable protection.
-#[cfg(feature = "vpn")]
+#[cfg(all(feature = "vpn", target_os = "android"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn proxy_register_protect_callback(callback: Option<ProtectCallback>) {
     let mut guard = match PROTECT_CALLBACK.write() {
@@ -552,7 +552,7 @@ pub extern "C" fn proxy_register_protect_callback(_callback: Option<ProtectCallb
 ///
 /// # Safety
 /// Should only be called from within the proxy library.
-#[cfg(feature = "vpn")]
+#[cfg(all(feature = "vpn", target_os = "android"))]
 pub fn protect_socket(fd: i32) -> bool {
     let callback = match PROTECT_CALLBACK.read() {
         Ok(g) => *g,
@@ -572,7 +572,7 @@ pub fn protect_socket(_fd: i32) -> bool {
 /// - `handle` must be a valid pointer from `proxy_create`
 /// - `tun_fd` must be a valid file descriptor from Android VpnService
 /// - `protect_callback` must be a valid function pointer
-#[cfg(feature = "vpn")]
+#[cfg(all(feature = "vpn", target_os = "android"))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn proxy_start_vpn(
     handle: *mut ProxyHandle,
