@@ -52,6 +52,11 @@ indicatif = { version = "0.18", optional = true }
 comfy-table = { version = "7", optional = true }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 arc-swap = "1.8.0"
+tun = { version = "0.6", optional = true }
+smoltcp = { version = "0.11", optional = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
 
 [[bin]]
 name = "http-proxy-server"
@@ -66,7 +71,7 @@ path = "src/bin/proxy-tui.rs"
 required-features = ["tui"]
 
 [features]
-default = ["tokio", "auto-proxy", "cli-dep", "tui", "ffi"]
+default = ["tokio", "auto-proxy", "cli-dep", "tui", "ffi", "vpn"]
 tokio = ["dep:tokio", "dep:tokio-util"]
 cli-dep = [
     "dep:clap",
@@ -78,11 +83,8 @@ cli-dep = [
 ]
 tui = ["dep:ratatui", "dep:crossterm", "dep:clap", "dep:chrono"]
 ffi = ["tokio", "dep:toml"]
-auto-proxy = [
-    "dep:hashbrown",
-    "dep:kanal",
-    "dep:async-broadcast",
-]
+vpn = ["tokio", "dep:tun", "dep:smoltcp"]
+auto-proxy = ["dep:hashbrown", "dep:kanal", "dep:async-broadcast"]
 
 [dev-dependencies]
 serial_test = "3"

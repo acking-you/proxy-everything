@@ -48,6 +48,9 @@ pub mod server;
 #[cfg(feature = "tui")]
 pub mod tui;
 
+#[cfg(feature = "vpn")]
+pub mod tun;
+
 // FFI module (C-compatible interface for cross-platform integration)
 #[cfg(feature = "ffi")]
 pub mod ffi;
@@ -193,16 +196,17 @@ fn get_encryptor_codec<R: MyAsyncReadExt + Unpin>(
 ///
 /// This is the core proxy loop that copies data in both directions
 /// until one side closes the connection.
-async fn start_proxy<
+pub(crate) async fn start_proxy<
     ClientCodec: MyAsyncCodecReader + Send + Unpin,
     ServerCodec: MyAsyncCodecReader + Send + Unpin,
-    W: MyAsyncWriteExt + Send + Unpin,
+    ClientWriter: MyAsyncWriteExt + Send + Unpin,
+    ServerWriter: MyAsyncWriteExt + Send + Unpin,
 >(
     host: impl AsRef<str>,
     client_codec: ClientCodec,
     server_codec: ServerCodec,
-    client_writer: W,
-    server_writer: W,
+    client_writer: ClientWriter,
+    server_writer: ServerWriter,
 ) -> Result<()> {
     let client_to_server = codec::copy(client_codec, server_writer);
     let server_to_client = codec::copy(server_codec, client_writer);
@@ -231,15 +235,17 @@ async fn start_proxy<
 /// Client ◄── [decrypt] ◄── Server
 /// ```
 pub(crate) async fn client_proxy_with_cryptor_codec<
-    R: MyAsyncReadExt + Send + Unpin,
-    W: MyAsyncWriteExt + Send + Unpin,
+    ClientReader: MyAsyncReadExt + Send + Unpin,
+    ServerReader: MyAsyncReadExt + Send + Unpin,
+    ClientWriter: MyAsyncWriteExt + Send + Unpin,
+    ServerWriter: MyAsyncWriteExt + Send + Unpin,
 >(
     host: impl AsRef<str>,
     key: &impl AsRef<str>,
-    client_reader: R,
-    server_reader: R,
-    client_writer: W,
-    server_writer: W,
+    client_reader: ClientReader,
+    server_reader: ServerReader,
+    client_writer: ClientWriter,
+    server_writer: ServerWriter,
 ) -> Result<()> {
     tracing::info!("Client proxy starting with session key:{}", key.as_ref());
     start_proxy(
@@ -265,15 +271,17 @@ pub(crate) async fn client_proxy_with_cryptor_codec<
 /// ```
 #[allow(dead_code)]
 pub(crate) async fn server_proxy_with_cryptor_codec<
-    R: MyAsyncReadExt + Send + Unpin,
-    W: MyAsyncWriteExt + Send + Unpin,
+    ClientReader: MyAsyncReadExt + Send + Unpin,
+    ServerReader: MyAsyncReadExt + Send + Unpin,
+    ClientWriter: MyAsyncWriteExt + Send + Unpin,
+    ServerWriter: MyAsyncWriteExt + Send + Unpin,
 >(
     host: impl AsRef<str>,
     key: &impl AsRef<str>,
-    client_reader: R,
-    server_reader: R,
-    client_writer: W,
-    server_writer: W,
+    client_reader: ClientReader,
+    server_reader: ServerReader,
+    client_writer: ClientWriter,
+    server_writer: ServerWriter,
 ) -> Result<()> {
     tracing::info!("Server proxy starting with session key:{}", key.as_ref());
     start_proxy(
@@ -291,14 +299,16 @@ pub(crate) async fn server_proxy_with_cryptor_codec<
 /// Used for direct connections that don't require encryption,
 /// such as local traffic or already-encrypted protocols.
 pub(crate) async fn proxy_with_normal_codec<
-    R: MyAsyncReadExt + Send + Unpin,
-    W: MyAsyncWriteExt + Send + Unpin,
+    ClientReader: MyAsyncReadExt + Send + Unpin,
+    ServerReader: MyAsyncReadExt + Send + Unpin,
+    ClientWriter: MyAsyncWriteExt + Send + Unpin,
+    ServerWriter: MyAsyncWriteExt + Send + Unpin,
 >(
     host: impl AsRef<str>,
-    client_reader: R,
-    server_reader: R,
-    client_writer: W,
-    server_writer: W,
+    client_reader: ClientReader,
+    server_reader: ServerReader,
+    client_writer: ClientWriter,
+    server_writer: ServerWriter,
 ) -> Result<()> {
     start_proxy(
         host,
