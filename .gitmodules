@@ -4,3 +4,6 @@
 [submodule "ui/flutter"]
 	path = ui/flutter
 	url = https://github.com/Proxy-UI/Proxy-UI-Flutter.git
+[submodule "deps/kanal"]
+	path = deps/kanal
+	url = git@github.com:acking-you/kanal.git

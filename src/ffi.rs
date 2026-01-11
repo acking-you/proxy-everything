@@ -12,9 +12,9 @@ use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
 
-use crate::client::{ClientConfig, run_client_with_listener};
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 use crate::cli_config::SystemProxyGuard;
+use crate::client::{ClientConfig, run_client_with_listener};
 
 /// Log callback function type.
 /// level: 0=trace, 1=debug, 2=info, 3=warn, 4=error
@@ -328,6 +328,13 @@ pub unsafe extern "C" fn proxy_stop(handle: *mut ProxyHandle) -> ProxyResult {
     if let Some(token) = handle.cancel_token.take() {
         token.cancel();
         handle.running.store(false, Ordering::SeqCst);
+
+        // Clear system proxy guard to restore system proxy settings
+        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        {
+            handle._system_proxy_guard = None;
+        }
+
         ProxyResult::Ok
     } else {
         ProxyResult::NotRunning

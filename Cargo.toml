@@ -29,7 +29,7 @@ hashbrown = { version = "0.16.1", optional = true }
 dashmap = "6.1.0"
 indexmap = "2"
 async-broadcast = { version = "0.7", optional = true }
-kanal = { version = "0.1", optional = true }
+kanal = { path = "deps/kanal", optional = true }
 futures = "0.3"
 mimalloc-rust = "0.2"
 anyhow = "1.0.100"

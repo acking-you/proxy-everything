@@ -192,18 +192,12 @@ pub enum ProxyError {
     /// Failed to send auto-proxy request.
     #[cfg(feature = "auto-proxy")]
     #[snafu(display("Client: failed to send auto-proxy request for `{uri}`"))]
-    SendAutoProxy {
-        uri: String,
-        source: kanal::SendError,
-    },
+    SendAutoProxy { uri: String },
 
     /// Failed to receive auto-proxy response.
     #[cfg(feature = "auto-proxy")]
     #[snafu(display("Client: failed to receive auto-proxy response for `{uri}`"))]
-    RecvAutoProxy {
-        uri: String,
-        source: kanal::ReceiveError,
-    },
+    RecvAutoProxy { uri: String },
 
     /// Cannot proxy localhost.
     #[snafu(display("Client: cannot proxy localhost (127.0.0.1:{port})"))]

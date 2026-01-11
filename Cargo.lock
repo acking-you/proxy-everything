@@ -197,6 +197,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "branches"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f11502672c5570f77f6bdf573332483f8475bab6a7fda00f1fae8ddb5a6245c0"
+dependencies = [
+ "rustc_version",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -213,6 +222,12 @@ name = "bytes"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b35204fbdc0b3f4446b89fc1ac2cf84a8a68971995d0bf2e925ec7cd960f9cb3"
+
+[[package]]
+name = "cacheguard"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2dbbe48daefc2575b7dfdc8227f4724582080ae48b0482191f6eb91e4cd2f405"
 
 [[package]]
 name = "castaway"
@@ -1348,10 +1363,10 @@ dependencies = [
 
 [[package]]
 name = "kanal"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e3953adf0cd667798b396c2fa13552d6d9b3269d7dd1154c4c416442d1ff574"
+version = "0.2.0-beta1"
 dependencies = [
+ "branches",
+ "cacheguard",
  "futures-core",
  "lock_api",
 ]

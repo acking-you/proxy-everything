@@ -46,12 +46,16 @@
 
 use std::env;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use dashmap::DashMap;
-use hashbrown::HashSet;
 use kanal::{AsyncReceiver, AsyncSender};
 use snafu::{OptionExt, ResultExt, Snafu};
+
+/// Global cache for fast-path lookup (fine-grained locking with DashMap).
+/// - true = needs proxy
+/// - false = direct connection
+pub static PROXY_CACHE: LazyLock<DashMap<String, bool>> = LazyLock::new(DashMap::new);
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -77,7 +81,7 @@ pub enum ProxyStrategy {
 
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::config::runtime;
@@ -120,58 +124,111 @@ pub type ReceiverChan = AsyncReceiver<SendItem>;
 /// configuration and cache data in a single location.
 const DATA_DIR_NAME: &str = "http-proxy-cli-config";
 
-/// Load or create a cache file and return its contents as a HashSet.
-/// Creates the data directory if it doesn't exist.
-async fn get_data_set_and_file(
-    name: impl AsRef<str>,
-    custom_dir: Option<&Path>,
-) -> Result<(HashSet<String>, tokio::fs::File)> {
-    let data_dir = if let Some(dir) = custom_dir {
-        dir.to_path_buf()
-    } else {
-        let home_dir = if cfg!(windows) {
-            env::var_os("USERPROFILE").context(NotFindHomeSnafu { var: "USERPROFILE" })?
-        } else {
-            env::var_os("HOME").context(NotFindHomeSnafu { var: "HOME" })?
-        };
-        Path::new(&home_dir).join(DATA_DIR_NAME)
-    };
-    // Create data directory if not exists
-    if !data_dir.exists() {
-        tokio::fs::create_dir_all(&data_dir)
-            .await
-            .context(OpenFileSnafu)?;
-    }
-    let path = data_dir.join(name.as_ref());
-    let mut file = OpenOptions::new()
-        .read(true)
-        .append(true)
-        .create(true)
-        .open(path)
-        .await
-        .context(OpenFileSnafu)?;
-    let mut content = String::new();
-    file.read_to_string(&mut content)
-        .await
-        .context(ReadFileSnafu)?;
-    Ok((content.lines().map(|l| l.to_string()).collect(), file))
-}
-
 /// Cache file for hosts that should connect directly (no proxy).
 const NON_PROXY_FILE_NAME: &str = "non-proxy-cache.txt";
 /// Cache file for hosts that should use proxy.
 const PROXY_FILE_NAME: &str = "proxy-cache.txt";
 
-type RwSharedSet = Arc<RwLock<HashSet<String>>>;
-type SharedFile = Arc<Mutex<tokio::fs::File>>;
+/// Manages cache files and global PROXY_CACHE synchronization.
+struct CacheManager {
+    proxy_file: Arc<Mutex<tokio::fs::File>>,
+    non_proxy_file: Arc<Mutex<tokio::fs::File>>,
+}
+
+impl CacheManager {
+    /// Load cache files and populate global PROXY_CACHE.
+    async fn load(cache_dir: Option<&Path>) -> Result<Self> {
+        let non_proxy_file = Self::load_file(NON_PROXY_FILE_NAME, cache_dir, false).await?;
+        let proxy_file = Self::load_file(PROXY_FILE_NAME, cache_dir, true).await?;
+
+        Ok(Self {
+            proxy_file: Arc::new(Mutex::new(proxy_file)),
+            non_proxy_file: Arc::new(Mutex::new(non_proxy_file)),
+        })
+    }
+
+    /// Load a single cache file and populate global PROXY_CACHE.
+    async fn load_file(
+        name: &str,
+        custom_dir: Option<&Path>,
+        need_proxy: bool,
+    ) -> Result<tokio::fs::File> {
+        let data_dir = if let Some(dir) = custom_dir {
+            dir.to_path_buf()
+        } else {
+            let home_dir = if cfg!(windows) {
+                env::var_os("USERPROFILE").context(NotFindHomeSnafu { var: "USERPROFILE" })?
+            } else {
+                env::var_os("HOME").context(NotFindHomeSnafu { var: "HOME" })?
+            };
+            Path::new(&home_dir).join(DATA_DIR_NAME)
+        };
+
+        if !data_dir.exists() {
+            tokio::fs::create_dir_all(&data_dir)
+                .await
+                .context(OpenFileSnafu)?;
+        }
+
+        let path = data_dir.join(name);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .create(true)
+            .open(path)
+            .await
+            .context(OpenFileSnafu)?;
+
+        let mut content = String::new();
+        file.read_to_string(&mut content)
+            .await
+            .context(ReadFileSnafu)?;
+
+        // Load hosts into global cache
+        let hosts: Vec<_> = content.lines().filter(|l| !l.is_empty()).collect();
+        info!(
+            "Loading {} hosts from {} (need_proxy={})",
+            hosts.len(),
+            name,
+            need_proxy
+        );
+        for host in hosts {
+            PROXY_CACHE.insert(host.to_string(), need_proxy);
+        }
+
+        Ok(file)
+    }
+
+    /// Update cache: insert into global PROXY_CACHE and append to file (WAL).
+    async fn update(&self, host: String, need_proxy: bool) {
+        // Update global cache
+        PROXY_CACHE.insert(host.clone(), need_proxy);
+
+        // WAL: append to file
+        let file = if need_proxy {
+            &self.proxy_file
+        } else {
+            &self.non_proxy_file
+        };
+
+        let mut file = file.lock().await;
+        if let Err(e) = file
+            .write_all(format!("{}\n", host).as_bytes())
+            .await
+            .context(WALSnafu)
+        {
+            tracing::error!(host, need_proxy, wal_error = ?e);
+        } else if let Err(e) = file.flush().await.context(WALSnafu) {
+            tracing::error!(host, need_proxy, flush_error = ?e);
+        }
+    }
+}
+
 type TaskMap = Arc<DashMap<String, (TaskId, async_broadcast::Receiver<bool>)>>;
 
 struct TaskContext {
     task_id: TaskId,
-    proxy_set: RwSharedSet,
-    non_proxy_set: RwSharedSet,
-    proxy_file: SharedFile,
-    non_proxy_file: SharedFile,
+    cache_manager: Arc<CacheManager>,
     host: String,
     notifier: AsyncSender<bool>,
     tasks: TaskMap,
@@ -180,77 +237,61 @@ struct TaskContext {
 #[tracing::instrument(skip_all)]
 pub async fn run_auto_proxy_by_country(receiver: ReceiverChan, cache_dir: Option<PathBuf>) {
     let cache_dir_ref = cache_dir.as_deref();
-    let (non_proxy_set, non_proxy_file) =
-        match get_data_set_and_file(NON_PROXY_FILE_NAME, cache_dir_ref).await {
-            Ok(v) => {
-                info!("`non_proxy_set`:{:?}", v.0);
-                v
-            }
-            Err(e) => {
-                tracing::error!(
-                    "init `non_proxy_file` error: detail:{}",
-                    snafu::Report::from_error(e)
-                );
-                return;
-            }
-        };
-    let (proxy_set, proxy_file) = match get_data_set_and_file(PROXY_FILE_NAME, cache_dir_ref).await
-    {
-        Ok(v) => {
-            info!("`proxy_set`:{:?}", v.0);
-            v
-        }
+
+    // Load cache files and populate global PROXY_CACHE
+    let cache_manager = match CacheManager::load(cache_dir_ref).await {
+        Ok(mgr) => Arc::new(mgr),
         Err(e) => {
-            tracing::error!(
-                "init `proxy_file` error: detail:{}",
-                snafu::Report::from_error(e)
-            );
+            tracing::error!("Failed to load cache: {}", snafu::Report::from_error(e));
             return;
         }
     };
 
-    let non_proxy_set = Arc::new(RwLock::new(non_proxy_set));
-    let proxy_set = Arc::new(RwLock::new(proxy_set));
-    let proxy_file = Arc::new(Mutex::new(proxy_file));
-    let non_proxy_file = Arc::new(Mutex::new(non_proxy_file));
     let tasks = Arc::new(DashMap::new());
     let mut query_task_id = QueryIpTaskId::new();
+    let mut batch_buffer = Vec::new();
+
     loop {
-        let (host, notifier) = match receiver.recv().await {
-            Ok(v) => v,
+        // Drain all available messages into buffer (non-blocking)
+        batch_buffer.clear();
+        match receiver.drain_into_blocking(&mut batch_buffer).await {
+            Ok(count) if count > 0 => {
+                tracing::debug!("Drained {} requests from channel", count);
+            }
+            Ok(_) => {
+                // No messages available, wait for at least one
+                match receiver.recv().await {
+                    Ok(item) => batch_buffer.push(item),
+                    Err(e) => {
+                        tracing::error!(channel_msg_error = ?e);
+                        return;
+                    }
+                }
+            }
             Err(e) => {
-                tracing::error!(channel_msg_error = ?e);
+                tracing::error!(drain_error = ?e);
                 return;
             }
-        };
-        // FIXME Maybe add regex handle?
-        // check by cache
-        {
-            let non_proxy_set = non_proxy_set.read().await;
-            if non_proxy_set.contains(&host) {
-                cached_send(notifier, false, &host).await;
+        }
+
+        // Process all messages in batch
+        for (host, notifier) in batch_buffer.drain(..) {
+            // Check global cache (already checked in mod.rs, but double-check for safety)
+            if let Some(entry) = PROXY_CACHE.get(&host) {
+                let need_proxy = *entry;
+                cached_send(notifier, need_proxy, &host).await;
                 continue;
             }
+
+            // Cache miss: spawn task to query geo API
+            tokio::spawn(check_proxy(TaskContext {
+                task_id: query_task_id.r#gen(),
+                cache_manager: cache_manager.clone(),
+                host: host.clone(),
+                notifier,
+                tasks: tasks.clone(),
+            }));
         }
-        {
-            let proxy_set = proxy_set.read().await;
-            if proxy_set.contains(&host) {
-                cached_send(notifier, true, &host).await;
-                continue;
-            }
-        }
-        // A [`host`] will only correspond to one task to execute the HTTP request, and the rest
-        // will wait for the task to complete.
-        tokio::spawn(check_proxy(TaskContext {
-            task_id: query_task_id.r#gen(),
-            proxy_set: proxy_set.clone(),
-            non_proxy_set: non_proxy_set.clone(),
-            proxy_file: proxy_file.clone(),
-            non_proxy_file: non_proxy_file.clone(),
-            host: host.clone(),
-            notifier,
-            tasks: tasks.clone(),
-        }));
     }
 }
 
@@ -279,10 +320,7 @@ enum ChannelContext {
 async fn check_proxy(context: TaskContext) {
     let TaskContext {
         task_id,
-        proxy_set,
-        non_proxy_set,
-        proxy_file,
-        non_proxy_file,
+        cache_manager,
         host,
         notifier,
         tasks,
@@ -332,39 +370,17 @@ async fn check_proxy(context: TaskContext) {
         }
     };
     cache_miss_send(notifier, need_proxy, &host).await;
-    // broadcast result & update cache & config file
+    // broadcast result & update cache
     match tx.broadcast(need_proxy).await {
         Ok(_) => tracing::info!(task_id, host, info = "broadcast ok!"),
         Err(e) => tracing::error!(task_id, host, broadcast_error= ?e),
     }
-    if need_proxy {
-        let mut proxy_set = proxy_set.write().await;
-        let mut proxy_file = proxy_file.lock().await;
-        tracing::info!(task_id, host, info = "add host to proxy set");
-        wal_tracing(&mut proxy_file, host.as_str()).await;
-        wal_tracing(&mut proxy_file, "\n").await;
-        let _ = proxy_file.flush().await;
-        proxy_set.insert(host.clone());
-    } else {
-        let mut non_proxy_set = non_proxy_set.write().await;
-        let mut non_proxy_file = non_proxy_file.lock().await;
-        tracing::info!(task_id, host, info = "add host to no proxy set");
-        wal_tracing(&mut non_proxy_file, host.as_str()).await;
-        wal_tracing(&mut non_proxy_file, "\n").await;
-        let _ = non_proxy_file.flush().await;
-        non_proxy_set.insert(host.clone());
-    }
-    tasks.remove(&host);
-}
 
-async fn wal_tracing(file: &mut tokio::fs::File, text: impl AsRef<str>) {
-    if let Err(e) = file
-        .write_all(text.as_ref().as_bytes())
-        .await
-        .context(WALSnafu)
-    {
-        tracing::error!(wal_error = ?snafu::Report::from_error(e));
-    }
+    // Update cache (global PROXY_CACHE + WAL)
+    tracing::info!(task_id, host, need_proxy, info = "updating cache");
+    cache_manager.update(host.clone(), need_proxy).await;
+
+    tasks.remove(&host);
 }
 
 #[cfg(test)]

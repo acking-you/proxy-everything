@@ -105,16 +105,10 @@ pub enum ClientError {
     },
     #[cfg(feature = "auto-proxy")]
     #[snafu(display("URI(`{uri}`) Send item for auto proxy error"))]
-    SendAutoProxy {
-        uri: String,
-        source: kanal::SendError,
-    },
+    SendAutoProxy { uri: String },
     #[cfg(feature = "auto-proxy")]
     #[snafu(display("URI(`{uri}`) Recv item form auto proxy error"))]
-    ReciveAutoProxy {
-        uri: String,
-        source: kanal::ReceiveError,
-    },
+    ReciveAutoProxy { uri: String },
     #[cfg(feature = "auto-proxy")]
     #[snafu(display("Can't proxy localhost!!! Host(`127.0.0.1:{port}`)"))]
     LocalHost { port: u16 },
@@ -388,51 +382,29 @@ pub async fn need_proxy(
     }
     match has_proxy_status {
         None => {
-            // TODO: Performance optimization - migrate from flume to tokio::sync::mpsc
-            //
-            // Current problem:
-            // - Every connection sends a request through flume channel to background task
-            // - Background task checks cache and queries geo API if needed
-            // - This creates a bottleneck when many connections arrive simultaneously
-            // - flume lacks native batch receive (only drain/try_iter which are suboptimal)
-            //
-            // Migration plan:
-            // 1. Replace flume with tokio::sync::mpsc throughout auto_proxy module
-            // 2. Use recv_many(&mut VecDeque, limit) for efficient batch receiving:
-            //    - Single wake for multiple messages
-            //    - Single lock operation for batch
-            //    - Better memory locality (direct write to VecDeque)
-            // 3. Expose global cache as DashMap for fast-path lookup:
-            //    - Create PROXY_CACHE: OnceLock<Arc<DashMap<String, bool>>>
-            //    - Check cache here BEFORE sending to channel
-            //    - Cache hit = O(1) return, no channel overhead
-            // 4. Batch process cache misses:
-            //    - Collect multiple requests with recv_many()
-            //    - Deduplicate hosts
-            //    - Call query_geo_batch() instead of query_geo_single()
-            //    - Broadcast results to all waiting connections
-            //
-            // Benefits:
-            // - recv_many: 1 wake + 1 lock for N messages (vs N wakes + N locks)
-            // - Cache fast-path bypasses channel entirely
-            // - Batch geo API calls reduce HTTP requests
-            //
-            // Files to modify:
-            // - src/client/auto_proxy.rs: replace flume with tokio::mpsc, add global cache
-            // - src/client/mod.rs: add cache lookup before channel send
-            // - Cargo.toml: remove flume dependency
-            //
-            // Alternative: fork https://github.com/fereidani/kanal and add recv_many()
-            // kanal has better performance than tokio::mpsc but lacks batch receive API
+            // Fast-path: check global cache before sending to channel
+            // This bypasses channel overhead for cache hits (O(1) lookup)
+            if let Some(need_proxy) = auto_proxy::PROXY_CACHE.get(host.as_ref()) {
+                let need_proxy = *need_proxy;
+                tracing::debug!(host = host.as_ref(), need_proxy, "cache hit (fast-path)");
+                return if need_proxy {
+                    Ok(ProxyStatus::NorlmalProxy)
+                } else {
+                    Ok(ProxyStatus::NoProxy(
+                        "[NOPROXY-AUTO] we will start connect server by proxy",
+                    ))
+                };
+            }
 
+            // Cache miss: send to background task for geo query
             let (tx, rx) = kanal::bounded_async(1);
             sender
                 .send((host.as_ref().to_string(), tx))
                 .await
-                .with_context(|_| SendAutoProxySnafu {
+                .map_err(|_| ClientError::SendAutoProxy {
                     uri: get_uri(host.as_ref(), port),
                 })?;
-            match rx.recv().await.with_context(|_| ReciveAutoProxySnafu {
+            match rx.recv().await.map_err(|_| ClientError::ReciveAutoProxy {
                 uri: get_uri(host.as_ref(), port),
             }) {
                 Ok(v) => {
