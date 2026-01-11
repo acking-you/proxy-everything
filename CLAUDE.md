@@ -199,6 +199,25 @@ cargo run --bin proxy-tui
 
 ## Release Workflow
 
+### Version Numbering Rules
+
+**IMPORTANT**: Always use `0.4.x` series for stable releases, NOT `0.5.x`.
+
+- **Stable releases**: `0.4.0`, `0.4.1`, `0.4.2`, ... `0.4.14`, `0.4.15`, etc.
+- **Experimental releases**: `0.5.0`, `0.5.1` (reserved for experimental features)
+
+**Reason**: The `0.5.x` series is reserved for experimental and unstable features. All production releases should increment the `0.4.x` series to maintain stability and compatibility.
+
+When creating a new release tag:
+```bash
+# Check latest 0.4.x version
+git tag --sort=-v:refname | grep "^0\.4\." | head -1
+
+# Create next version (e.g., if latest is 0.4.14, create 0.4.15)
+git tag 0.4.15
+git push origin 0.4.15
+```
+
 ### 1. Create Tag to Trigger Build
 
 ```bash
@@ -366,26 +385,6 @@ git submodule status
 **Submodules**:
 - `deps/sysproxy-rs` - System proxy library (https://github.com/zzzgydi/sysproxy-rs.git)
 - `ui/flutter` - Flutter UI (https://github.com/Proxy-UI/Proxy-UI-Flutter.git)
-
-## Recent Fixes (v0.4.14)
-
-### CLI Runtime Config Bug
-**Issue**: Command-line arguments were being ignored in `http-proxy-cli`
-- **Root Cause**: CLI set environment variables but never called `runtime::init_config()`
-- **Fix**: Added runtime config initialization in `src/bin/http-proxy-cli.rs:217-223`
-- **Impact**: CLI arguments, config file, and environment variables now work correctly
-
-### TUI Server Switching Bug
-**Issue**: Switching servers in proxy-tui didn't update displayed metrics
-- **Root Cause**: Auto-refresh always connected to initial server instead of current server
-- **Fix**: Track `current_server` state in `data_fetcher_task` and use it for all operations
-- **Impact**: Server switching now works correctly, metrics update properly
-
-### TUI Loading State Bug
-**Issue**: TUI stuck in "Loading..." state after initial launch
-- **Root Cause**: Data update logic only handled switching state, not normal refresh
-- **Fix**: Added `else if !state.switching` branch to update data on normal refresh
-- **Impact**: TUI now displays data correctly on startup and refresh
 
 ## Troubleshooting
 
