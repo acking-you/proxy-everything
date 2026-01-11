@@ -205,6 +205,23 @@ async fn main() -> Result<()> {
     let server_port = *SERVER_PORT;
     let remote_server = SERVER_HOST.clone();
 
+    // Initialize runtime config (used by client code)
+    // Parse NEED_CODEC_IP from environment variable
+    let need_codec_ips = std::env::var("NEED_CODEC_IP")
+        .ok()
+        .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_default();
+
+    let secret_key = std::env::var("SECRET_KEY").ok();
+
+    http_proxy::config::runtime::init_config(
+        server_host.clone(),
+        server_port,
+        reverse_geo,
+        need_codec_ips,
+        secret_key,
+    );
+
     // Print startup banner
     let title = if config_valid {
         Cell::new("HTTP Proxy CLI Started").fg(Color::Green)

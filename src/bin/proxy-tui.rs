@@ -124,6 +124,9 @@ async fn main() -> std::io::Result<()> {
                             state.switching = false;
                             state.switch_target = None;
                             state.selected_node = 0;
+                        } else if !state.switching {
+                            // Normal refresh: update data without changing current_server
+                            state.data = Some(data);
                         }
                     } else {
                         state.data = Some(data);
