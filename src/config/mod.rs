@@ -183,14 +183,7 @@ pub mod runtime {
         set_server_host(host);
         set_server_port(port);
         set_secret_key(secret);
-
-        // Codec IPs: if empty, use default with server_host
-        let ips = if codec_ips.is_empty() {
-            vec!["64.23.159.180".to_string(), server_host().to_string()]
-        } else {
-            codec_ips
-        };
-        set_need_codec_ips(ips);
+        set_need_codec_ips(codec_ips);
 
         #[cfg(feature = "auto-proxy")]
         {
