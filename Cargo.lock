@@ -1930,6 +1930,7 @@ version = "0.4.15"
 dependencies = [
  "proxy-client",
  "proxy-core",
+ "reqwest",
  "sysproxy",
  "tokio",
  "tokio-util",
