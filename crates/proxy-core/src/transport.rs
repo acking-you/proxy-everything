@@ -5,9 +5,18 @@
 
 use std::borrow::Cow;
 use std::net::IpAddr;
+use std::sync::LazyLock;
 
+use dashmap::DashMap;
 use snafu::{OptionExt, ResultExt, Snafu};
 use tokio::net::TcpStream;
+
+/// Permanent DNS cache for resolved domain names.
+///
+/// This cache is designed primarily for proxy server addresses, which are expected
+/// to have stable IP addresses. Once resolved, the IP is cached permanently without
+/// expiration, avoiding repeated DNS lookups for frequently accessed proxy servers.
+static DNS_CACHE: LazyLock<DashMap<String, IpAddr>> = LazyLock::new(DashMap::new);
 
 use crate::codec::AsyncReaderWriterRef;
 use crate::config::runtime;
@@ -56,16 +65,46 @@ pub async fn get_tcp_stream(host: &str, port: u16, detail: &'static str) -> Resu
     let ipaddr = match host.parse::<IpAddr>() {
         Ok(ip) => ip,
         Err(_) => {
-            // Domain name, need DNS resolution
-            uni_stream::addr::get_ip_addrs(host)
-                .await
-                .context(IoSnafu {
-                    uri: Some(host.into()),
-                    detail,
-                })?
-                .into_iter()
-                .next()
-                .context(EmptyDNSRecordSnafu)?
+            // Fast path: check permanent cache first
+            // This cache is mainly for proxy server IPs which should remain stable
+            if let Some(cached_ip) = DNS_CACHE.get(host) {
+                let ip = *cached_ip;
+                tracing::debug!(host, ?ip, "DNS cache hit");
+                return TcpStream::connect((ip, port))
+                    .await
+                    .with_context(|_| IoSnafu {
+                        uri: Some(format!("TcpStream({}:{})", host, port)),
+                        detail,
+                    });
+            }
+
+            // Try uni_stream DNS resolution first
+            let ip = match uni_stream::addr::get_ip_addrs(host).await {
+                Ok(addrs) => addrs.into_iter().next(),
+                Err(e) => {
+                    tracing::warn!(host, error = %e, "uni_stream DNS failed, falling back to tokio");
+                    None
+                }
+            };
+
+            // Fallback to tokio DNS resolution if uni_stream failed or returned empty
+            let ip = match ip {
+                Some(ip) => ip,
+                None => tokio::net::lookup_host((host, port))
+                    .await
+                    .context(IoSnafu {
+                        uri: Some(host.into()),
+                        detail,
+                    })?
+                    .next()
+                    .map(|addr| addr.ip())
+                    .context(EmptyDNSRecordSnafu)?,
+            };
+
+            // Cache the resolved IP permanently (primarily for proxy server addresses)
+            DNS_CACHE.insert(host.to_string(), ip);
+            tracing::debug!(host, ?ip, "DNS resolved and cached");
+            ip
         }
     };
 

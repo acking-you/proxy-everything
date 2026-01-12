@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use tokio::runtime::Runtime;
 
+use proxy_core::config::DEFAULT_SECRET_KEY;
 use proxy_core::control::ControlClient;
 use proxy_core::geo::query_geo_batch;
 
@@ -50,12 +51,14 @@ pub unsafe extern "C" fn proxy_get_server_nodes(
         }
     };
 
+    // Use default key if session_key is null or empty
     let key = if session_key.is_null() {
-        None
+        Some(DEFAULT_SECRET_KEY.to_string())
     } else {
         match unsafe { CStr::from_ptr(session_key) }.to_str() {
+            Ok(s) if s.is_empty() => Some(DEFAULT_SECRET_KEY.to_string()),
             Ok(s) => Some(s.to_string()),
-            Err(_) => None,
+            Err(_) => Some(DEFAULT_SECRET_KEY.to_string()),
         }
     };
 
