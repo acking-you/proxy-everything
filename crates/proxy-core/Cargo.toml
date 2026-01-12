@@ -1,0 +1,66 @@
+[package]
+name = "proxy-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+snafu = { workspace = true }
+
+# Crypto
+ring = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Concurrency
+dashmap = { workspace = true }
+arc-swap = { workspace = true }
+once_cell = { workspace = true }
+
+# Collections
+indexmap = { workspace = true }
+lru = { workspace = true }
+
+# Async utilities
+futures = { workspace = true }
+
+# Network
+reqwest = { workspace = true }
+ureq = { workspace = true }
+uni-stream = { workspace = true }
+
+# Geo
+maxminddb = { workspace = true }
+flate2 = { workspace = true }
+
+# System
+dirs = { workspace = true }
+
+# Random
+rand = { workspace = true }
+
+# CLI dependencies (optional, for progress bar)
+indicatif = { workspace = true, optional = true }
+
+# auto-proxy dependencies (optional)
+hashbrown = { workspace = true, optional = true }
+kanal = { workspace = true, optional = true }
+async-broadcast = { workspace = true, optional = true }
+
+[features]
+default = ["tokio", "auto-proxy"]
+tokio = ["dep:tokio", "dep:tokio-util"]
+auto-proxy = ["dep:hashbrown", "dep:kanal", "dep:async-broadcast"]
+cli-dep = ["dep:indicatif"]

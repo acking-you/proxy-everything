@@ -1,0 +1,25 @@
+[package]
+name = "proxy-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+proxy-core = { path = "../proxy-core" }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+mimalloc-rust = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+snafu = { workspace = true }
+sysinfo = { workspace = true }
+ureq = { workspace = true }
+
+[[bin]]
+name = "http-proxy-server"
+path = "src/bin/main.rs"

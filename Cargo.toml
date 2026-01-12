@@ -1,88 +1,87 @@
-[package]
-name = "http-proxy"
-version = "0.1.0"
+[workspace]
+resolver = "2"
+members = [
+    "crates/proxy-core",
+    "crates/proxy-client",
+    "crates/proxy-server",
+    "crates/proxy-tui",
+    "crates/proxy-ffi",
+]
+exclude = [
+    "deps/kanal",
+    "deps/sysproxy-rs",
+]
+
+[workspace.package]
+version = "0.4.15"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/acking-you/proxy-everything"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7.18", features = ["full"] }
 
-[lib]
-name = "http_proxy"
-crate-type = ["lib", "staticlib", "cdylib"]
-
-[dependencies]
-tokio = { version = "1", features = ["full"], optional = true }
-tokio-util = { version = "0.7.18", features = ["full"], optional = true }
+# Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = { version = "0.9", optional = true }
+toml = "0.9"
+
+# Error handling
 snafu = "0.8.9"
-ring = "0.17.14"
-once_cell = "1.21.3"
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.22", features = [
-    "env-filter",
-    "fmt",
-], default-features = true }
-clap = { version = "4.5.54", features = ["derive", "env"], optional = true }
-rand = "0.9"
-hashbrown = { version = "0.16.1", optional = true }
-dashmap = "6.1.0"
-indexmap = "2"
-async-broadcast = { version = "0.7", optional = true }
-kanal = { path = "deps/kanal", optional = true }
-futures = "0.3"
-mimalloc-rust = "0.2"
 anyhow = "1.0.100"
-uni-stream = "0.1.0"
+
+# Crypto
+ring = "0.17.14"
+
+# Logging
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"], default-features = true }
+
+# Concurrency
+dashmap = "6.1.0"
+arc-swap = "1.8.0"
+once_cell = "1.21.3"
+
+# Collections
+indexmap = "2"
+hashbrown = "0.16.1"
 lru = "0.16"
-dirs = "6"
-sysinfo = "0.37"
-sysproxy = { path = "deps/sysproxy-rs", optional = true }
-ratatui = { version = "0.30", optional = true }
-crossterm = { version = "0.29", optional = true }
-chrono = { version = "0.4", optional = true }
+
+# Async utilities
+futures = "0.3"
+async-broadcast = "0.7"
+
+# Network
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+uni-stream = "0.1.0"
+
+# Geo
 maxminddb = "0.27"
 flate2 = "1.1"
-reqwest = { version = "0.12", default-features = false, features = [
-    "rustls-tls",
-    "json",
-    "stream",
-] }
-indicatif = { version = "0.18", optional = true }
-comfy-table = { version = "7", optional = true }
-ureq = { version = "3", default-features = false, features = ["rustls"] }
-arc-swap = "1.8.0"
 
-[[bin]]
-name = "http-proxy-server"
-path = "src/bin/server-bin.rs"
-[[bin]]
-name = "http-proxy-cli"
-path = "src/bin/http-proxy-cli.rs"
-required-features = ["cli-dep"]
-[[bin]]
-name = "proxy-tui"
-path = "src/bin/proxy-tui.rs"
-required-features = ["tui"]
+# CLI
+clap = { version = "4.5.54", features = ["derive", "env"] }
+crossterm = "0.29"
+indicatif = "0.18"
+comfy-table = "7"
 
-[features]
-default = ["tokio", "auto-proxy", "cli-dep", "tui", "ffi"]
-tokio = ["dep:tokio", "dep:tokio-util"]
-cli-dep = [
-    "dep:clap",
-    "dep:sysproxy",
-    "dep:toml",
-    "dep:crossterm",
-    "dep:indicatif",
-    "dep:comfy-table",
-]
-tui = ["dep:ratatui", "dep:crossterm", "dep:clap", "dep:chrono"]
-ffi = ["tokio", "dep:toml"]
-auto-proxy = [
-    "dep:hashbrown",
-    "dep:kanal",
-    "dep:async-broadcast",
-]
+# TUI
+ratatui = "0.30"
+chrono = "0.4"
 
-[dev-dependencies]
-serial_test = "3"
+# System
+dirs = "6"
+sysinfo = "0.37"
+
+# Memory allocator
+mimalloc-rust = "0.2"
+
+# Random
+rand = "0.9"
+
+# Local dependencies
+kanal = { path = "deps/kanal" }
+sysproxy = { path = "deps/sysproxy-rs" }

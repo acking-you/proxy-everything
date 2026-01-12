@@ -1,0 +1,52 @@
+# HTTP Proxy CLI Configuration
+
+# [Required] Proxy server address
+server_host = "your-server.com"
+
+# Proxy server port (default: 1081)
+server_port = 1081
+
+# Local client port (default: 7890)
+client_port = 7890
+
+# [Optional] Encryption key (must be exactly 32 bytes)
+# secret_key = ""
+
+# [Optional] Reverse geo-proxy: CN sites use proxy, foreign sites direct
+reverse_geo = false
+
+# [Optional] Use local GeoIP database instead of ip-api.com API
+# use_local_geoip = false
+
+# [Optional] Auto set system proxy on start (disabled on exit)
+set_system_proxy = false
+
+# [Optional] Enable random message key
+# msg_key = false
+
+# ============================================================================
+# Keyword Configuration
+# ============================================================================
+# In reverse-geo mode, configure keywords the same way as normal mode:
+# - proxy_keywords: sites you want to USE PROXY (will be proxied)
+# - nonproxy_keywords: sites you want to CONNECT DIRECTLY (no proxy)
+# The system automatically swaps default lists based on reverse_geo setting.
+# User-configured keywords always take priority over defaults.
+
+# [Optional] Custom proxy keywords - sites that should use proxy
+# Use %DEFAULT% to include default keywords, e.g. proxy_keywords = ["%DEFAULT%", "newsite"]
+# Normal mode default: tiktok, youtube, google, reddit, chatgpt, twitter, facebook,
+#                      bilibili.tv, github, docker, scholar.google
+# Reverse-geo mode default: chaoxing, bilibili, bili, xigua, byte, douyin, cnblogs,
+#                           qq.com, jd.com, retiehe, meituan, jianguoyun, taobao.com,
+#                           csdn, juejin, baidu, zhihu, ximalaya, cn
+# proxy_keywords = ["google", "youtube", "github"]
+
+# [Optional] Custom nonproxy keywords - sites that should connect directly
+# Use %DEFAULT% to include default keywords, e.g. nonproxy_keywords = ["%DEFAULT%", "newsite"]
+# Normal mode default: chaoxing, bilibili, bili, xigua, byte, douyin, cnblogs, qq.com,
+#                      jd.com, retiehe, meituan, jianguoyun, taobao.com, csdn, juejin,
+#                      baidu, zhihu, ximalaya, cn
+# Reverse-geo mode default: tiktok, youtube, google, reddit, chatgpt, twitter, facebook,
+#                           bilibili.tv, github, docker, scholar.google
+# nonproxy_keywords = ["bilibili", "baidu", "qq.com"]

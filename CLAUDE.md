@@ -34,7 +34,7 @@ Application → Client(local:1080) → [AES-256-GCM] → Server(remote:1081) →
 ┌─────────────────────────────────────────────────────────────┐
 │                      Proxy Core Layer                        │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ Client (src/client/)                                 │   │
+│  │ Client (crates/proxy-client/)                        │   │
 │  │  ├─ HTTP/HTTPS Handler (http.rs)                    │   │
 │  │  ├─ SOCKS5 Handler (socks.rs)                       │   │
 │  │  └─ Auto Proxy (auto_proxy.rs) - Geo routing        │   │
@@ -42,7 +42,7 @@ Application → Client(local:1080) → [AES-256-GCM] → Server(remote:1081) →
 │                         │ Encryption                         │
 │                         ▼                                    │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ Codec Layer (src/codec/)                             │   │
+│  │ Codec Layer (crates/proxy-core/src/codec/)           │   │
 │  │  ├─ AsyncEncryptCodec - Encrypt stream              │   │
 │  │  ├─ AsyncDecryptCodec - Decrypt stream              │   │
 │  │  └─ AsyncNormalCodec - Plaintext passthrough        │   │
@@ -53,14 +53,14 @@ Application → Client(local:1080) → [AES-256-GCM] → Server(remote:1081) →
 ┌─────────────────────────────────────────────────────────────┐
 │                      Server Layer                            │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ Server (src/server/)                                 │   │
+│  │ Server (crates/proxy-server/)                        │   │
 │  │  ├─ Decrypt ProxyHeader                             │   │
 │  │  ├─ Connect to target                               │   │
 │  │  ├─ Bidirectional forwarding                        │   │
-│  │  └─ Metrics collection (src/metrics/)               │   │
+│  │  └─ Metrics collection (proxy-core/metrics/)        │   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ Control Plane (src/control/)                         │   │
+│  │ Control Plane (crates/proxy-core/src/control/)       │   │
 │  │  ├─ Node management (AddNode/RemoveNode/ListNodes)  │   │
 │  │  └─ Metrics query (GetRealtimeStats/GetTopN)        │   │
 │  └──────────────────────────────────────────────────────┘   │
@@ -71,59 +71,63 @@ Application → Client(local:1080) → [AES-256-GCM] → Server(remote:1081) →
 
 | Module | Path | Purpose |
 |--------|------|---------|
-| **Core** | `src/lib.rs` | Crypto primitives, ProxyHeader, bidirectional forwarding |
-| **Client** | `src/client/mod.rs` | Main loop, protocol abstraction (ForwarderProvider) |
-| **Server** | `src/server/mod.rs` | Connection handling, metrics collection |
-| **Codec** | `src/codec/` | Encrypt/decrypt streams, frame processing |
-| **Config** | `src/config/mod.rs` | Environment vars, runtime config (ArcSwap zero-copy) |
-| **FFI** | `src/ffi.rs` | C-compatible interface for Flutter |
-| **Metrics** | `src/metrics/mod.rs` | DashMap sharded storage, connection stats |
-| **Control** | `src/control/` | Node discovery, metrics query API |
-| **Protocol** | `src/protocol/mod.rs` | Data frame format definitions |
+| **Core** | `crates/proxy-core/src/lib.rs` | Crypto primitives, ProxyHeader, bidirectional forwarding |
+| **Client** | `crates/proxy-client/src/client/mod.rs` | Main loop, protocol abstraction (ForwarderProvider) |
+| **Server** | `crates/proxy-server/src/server/mod.rs` | Connection handling, metrics collection |
+| **Codec** | `crates/proxy-core/src/codec/` | Encrypt/decrypt streams, frame processing |
+| **Config** | `crates/proxy-core/src/config/mod.rs` | Environment vars, runtime config (ArcSwap zero-copy) |
+| **FFI** | `crates/proxy-ffi/src/lib.rs` | C-compatible interface for Flutter |
+| **Metrics** | `crates/proxy-core/src/metrics/mod.rs` | DashMap sharded storage, connection stats |
+| **Control** | `crates/proxy-core/src/control/` | Node discovery, metrics query API |
+| **Protocol** | `crates/proxy-core/src/protocol/mod.rs` | Data frame format definitions |
+| **TUI** | `crates/proxy-tui/src/tui/` | Terminal UI for monitoring |
 
 ## Directory Structure
 
 ```
 proxy-everything/
-├── src/
-│   ├── lib.rs              # Core encryption and forwarding logic
-│   ├── ffi.rs              # FFI interface (proxy_create/start/stop/destroy)
-│   ├── client/             # Client implementation
-│   │   ├── mod.rs          # Main loop, ForwarderProvider trait
-│   │   ├── http.rs         # HTTP/HTTPS CONNECT handling
-│   │   ├── socks.rs        # SOCKS5 protocol
-│   │   └── auto_proxy.rs   # Geo-based auto routing
-│   ├── server/             # Server implementation
-│   │   └── mod.rs          # Connection handling, metrics
-│   ├── codec/              # Codecs
-│   │   ├── encrypt.rs      # AsyncEncryptCodec
-│   │   ├── decrypt.rs      # AsyncDecryptCodec
-│   │   └── normal.rs       # AsyncNormalCodec
-│   ├── config/             # Configuration
-│   │   └── mod.rs          # Environment vars, runtime module (ArcSwap)
-│   ├── metrics/            # Metrics storage
-│   │   └── mod.rs          # DashMap sharding, connection stats
-│   ├── control/            # Control plane
-│   │   ├── mod.rs          # Control protocol definitions
-│   │   └── session.rs      # Control session handling
-│   ├── protocol/           # Protocol definitions
-│   │   └── mod.rs          # Data frame format
-│   └── bin/                # Binaries
-│       ├── server-bin.rs   # http-proxy-server
-│       ├── http-proxy-cli.rs # http-proxy-cli (recommended client)
-│       └── proxy-tui.rs    # TUI monitoring interface
-├── ui/flutter/             # Flutter UI (submodule)
-│   ├── lib/src/ffi/        # Dart FFI bindings
-│   ├── android/            # Android platform config
-│   ├── ios/                # iOS platform config
-│   ├── macos/              # macOS platform config
-│   ├── windows/            # Windows platform config
-│   └── linux/              # Linux platform config
-├── deps/sysproxy-rs/       # System proxy library (submodule)
+├── Cargo.toml                    # Workspace root configuration
+├── crates/
+│   ├── proxy-core/               # Core library (shared by all crates)
+│   │   └── src/
+│   │       ├── lib.rs            # Core encryption and forwarding logic
+│   │       ├── error.rs          # Error types
+│   │       ├── transport.rs      # TCP connection helpers
+│   │       ├── codec/            # Encrypt/decrypt codecs
+│   │       ├── config/           # Configuration and runtime state
+│   │       ├── control/          # Control plane protocol
+│   │       ├── crypto/           # AES-256-GCM encryption
+│   │       ├── geo/              # GeoIP lookup
+│   │       ├── metrics/          # Connection metrics
+│   │       ├── nodes/            # Node management
+│   │       ├── protocol/         # Wire protocol definitions
+│   │       └── util/             # Utilities
+│   ├── proxy-client/             # Client implementation
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── cli_config.rs     # CLI configuration
+│   │       ├── client/           # HTTP/HTTPS/SOCKS5 handlers
+│   │       └── bin/main.rs       # http-proxy-cli binary
+│   ├── proxy-server/             # Server implementation
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── server/           # Server logic
+│   │       └── bin/main.rs       # http-proxy-server binary
+│   ├── proxy-tui/                # TUI monitoring interface
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── tui/              # TUI components
+│   │       └── bin/main.rs       # proxy-tui binary
+│   └── proxy-ffi/                # FFI interface for Flutter
+│       └── src/lib.rs            # C-compatible interface
+├── ui/flutter/                   # Flutter UI (submodule)
+├── deps/                         # External dependencies (submodules)
+│   ├── sysproxy-rs/              # System proxy library
+│   └── kanal/                    # Channel library
 ├── .github/workflows/
-│   ├── build-deploy.yaml   # Build binaries and FFI libs
-│   └── cargo-test.yaml     # CI tests
-└── Cargo.toml              # Dependencies and feature flags
+│   ├── build-deploy.yaml         # Build binaries and FFI libs
+│   └── cargo-test.yaml           # CI tests
+└── config.template.toml          # Configuration template
 ```
 
 ## Build & Test
@@ -131,57 +135,63 @@ proxy-everything/
 ### Build Commands
 
 ```bash
-# Debug build
-cargo build
+# Debug build (all crates)
+cargo build --workspace
 
-# Release build
-cargo build --release
+# Release build (all crates)
+cargo build --workspace --release
 
-# Build CLI client (recommended)
-make build-cli-release
-
-# Build server
-make build-server-release
+# Build specific crate
+cargo build -p proxy-client --release
+cargo build -p proxy-server --release
+cargo build -p proxy-tui --release
 
 # Build FFI library (for Flutter)
-cargo build --lib --features ffi --release
+cargo build -p proxy-ffi --release
 ```
 
 ### Test Commands
 
 ```bash
 # Run all tests
-cargo test
+cargo test --workspace
 
 # Run specific test
 cargo test <test_name>
 
 # Run clippy checks
-cargo clippy --all-targets --all-features
+cargo clippy --workspace --all-targets
 ```
 
 ### Run Binaries
 
 ```bash
 # Run server
-cargo run --bin http-proxy-server -- -h 0.0.0.0 -p 1081
+cargo run -p proxy-server -- -H 0.0.0.0 -p 1081
 
 # Run CLI client
-cargo run --bin http-proxy-cli -- -s <server-ip> -c <local-port>
+cargo run -p proxy-client -- -s <server-ip> -c <local-port>
 
 # Run TUI monitor
-cargo run --bin proxy-tui
+cargo run -p proxy-tui
 ```
+
+## Workspace Structure
+
+| Crate | Description | Binary |
+|-------|-------------|--------|
+| `proxy-core` | Core library (crypto, codec, config, protocol) | - |
+| `proxy-client` | Client implementation | `http-proxy-cli` |
+| `proxy-server` | Server implementation | `http-proxy-server` |
+| `proxy-tui` | TUI monitoring interface | `proxy-tui` |
+| `proxy-ffi` | FFI interface for Flutter | `libhttp_proxy.so/dylib/dll` |
 
 ## Feature Flags
 
-| Feature | Default | Description |
-|---------|---------|-------------|
-| `tokio` | ✓ | Tokio async runtime |
-| `auto-proxy` | ✓ | Geo-based auto routing |
-| `cli-dep` | ✓ | CLI arg parsing, system proxy setup |
-| `tui` | ✓ | TUI monitoring interface |
-| `ffi` | ✓ | FFI interface (mobile integration) |
+| Crate | Feature | Default | Description |
+|-------|---------|---------|-------------|
+| `proxy-core` | `auto-proxy` | ✓ | Geo-based auto routing dependencies |
+| `proxy-client` | `auto-proxy` | ✓ | Enable auto-proxy in client |
 
 ## Environment Variables
 

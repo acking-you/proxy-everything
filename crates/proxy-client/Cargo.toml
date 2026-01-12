@@ -1,0 +1,39 @@
+[package]
+name = "proxy-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+proxy-core = { path = "../proxy-core", features = ["cli-dep"] }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+clap = { workspace = true }
+sysproxy = { workspace = true }
+toml = { workspace = true }
+crossterm = { workspace = true }
+comfy-table = { workspace = true }
+mimalloc-rust = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+snafu = { workspace = true }
+futures = { workspace = true }
+dirs = { workspace = true }
+uni-stream = { workspace = true }
+
+# auto-proxy dependencies
+hashbrown = { workspace = true, optional = true }
+kanal = { workspace = true, optional = true }
+async-broadcast = { workspace = true, optional = true }
+dashmap = { workspace = true, optional = true }
+
+[features]
+default = ["auto-proxy"]
+auto-proxy = ["proxy-core/auto-proxy", "dep:hashbrown", "dep:kanal", "dep:async-broadcast", "dep:dashmap"]
+
+[[bin]]
+name = "http-proxy-cli"
+path = "src/bin/main.rs"

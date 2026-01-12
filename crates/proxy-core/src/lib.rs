@@ -1,0 +1,281 @@
+//! Proxy-Core: Core library for proxy-everything.
+//!
+//! This crate provides the core functionality for the proxy system:
+//! - Cryptographic primitives (AES-256-GCM)
+//! - Wire protocol definitions
+//! - Stream codecs (encrypt/decrypt/normal)
+//! - Configuration management
+//! - Metrics and node management
+//! - Control plane protocol
+//! - Transport utilities
+
+// ============================================================================
+// Public modules
+// ============================================================================
+
+pub mod codec;
+pub mod config;
+pub mod control;
+pub mod crypto;
+pub mod error;
+pub mod geo;
+pub mod metrics;
+pub mod nodes;
+pub mod protocol;
+pub mod transport;
+pub mod util;
+
+// ============================================================================
+// Re-exports for public API
+// ============================================================================
+
+pub use crypto::{
+    Aes256GcmCryption, Aes256GcmDecryptor, Aes256GcmEncryptor, Decryptor, Encryptor, RingResult,
+};
+pub use error::{ProxyError, Result};
+pub use protocol::{DataSize, MAX_DATA_SIZE, ProxyHeader, get_data_size, set_data_size};
+
+// ============================================================================
+// Async I/O Traits
+// ============================================================================
+
+/// Async read extension trait.
+///
+/// Provides a runtime-agnostic interface for async read operations,
+/// allowing the codebase to potentially support multiple async runtimes.
+pub trait MyAsyncReadExt {
+    /// Reads a big-endian u32.
+    fn read_u32(
+        &mut self,
+    ) -> impl std::future::Future<Output = std::result::Result<u32, std::io::Error>> + Send;
+
+    /// Reads into buffer, returning bytes read.
+    fn read(
+        &mut self,
+        buf: &mut [u8],
+    ) -> impl std::future::Future<Output = std::result::Result<usize, std::io::Error>> + Send;
+
+    /// Reads exactly enough bytes to fill the buffer.
+    fn read_exact(
+        &mut self,
+        buf: &mut [u8],
+    ) -> impl std::future::Future<Output = std::result::Result<usize, std::io::Error>> + Send;
+}
+
+/// Async write extension trait.
+///
+/// Provides a runtime-agnostic interface for async write operations.
+pub trait MyAsyncWriteExt {
+    /// Writes a big-endian u32.
+    fn write_u32(
+        &mut self,
+        n: u32,
+    ) -> impl std::future::Future<Output = std::result::Result<(), std::io::Error>> + Send;
+
+    /// Writes all bytes from the buffer.
+    fn write_all(
+        &mut self,
+        src: &[u8],
+    ) -> impl std::future::Future<Output = std::result::Result<(), std::io::Error>> + Send;
+
+    /// Shuts down the writer (best-effort for half-close).
+    fn shutdown(
+        &mut self,
+    ) -> impl std::future::Future<Output = std::result::Result<(), std::io::Error>> + Send {
+        async { Ok(()) }
+    }
+}
+
+/// Async codec reader trait.
+///
+/// Provides streaming read with optional encoding/decoding transformation.
+pub trait MyAsyncCodecReader {
+    /// The item type returned by codec operations.
+    type Item<'a>
+    where
+        Self: 'a;
+
+    /// Reads and decodes the next chunk of data.
+    fn codec(&mut self) -> impl std::future::Future<Output = Result<Self::Item<'_>>> + Send;
+
+    /// Reads, decodes, and writes to the given writer.
+    fn codec_and_write<W: MyAsyncWriteExt + Send + Unpin>(
+        &mut self,
+        writer: &mut W,
+    ) -> impl std::future::Future<Output = Result<DataSize>> + Send;
+}
+
+// ============================================================================
+// Proxy Result Handling
+// ============================================================================
+
+/// Logs the result of a proxy operation.
+///
+/// Used for consistent logging of proxy completion or errors.
+pub fn proxy_result_handle(host: impl AsRef<str>, ret: Result<DataSize>, detail: &'static str) {
+    match ret {
+        Ok(n) => tracing::info!(
+            "Transferred {n} bytes, detail:{detail} host:{}",
+            host.as_ref()
+        ),
+        Err(e) => tracing::error!("Proxy error:{e}, detail:{detail} host:{}", host.as_ref()),
+    }
+}
+
+// ============================================================================
+// Codec Factory Functions
+// ============================================================================
+
+/// Creates a decryption codec for the given reader and key.
+pub fn get_decryptor_codec<R: MyAsyncReadExt + Unpin>(
+    key: &impl AsRef<str>,
+    reader: R,
+) -> Result<codec::AsyncDecryptCodec<R, Aes256GcmDecryptor>> {
+    Ok(codec::AsyncDecryptCodec::new(
+        reader,
+        Aes256GcmDecryptor::try_new(key.as_ref().as_bytes()).map_err(|e| ProxyError::Crypto {
+            detail: format!("{e}"),
+        })?,
+    ))
+}
+
+/// Creates an encryption codec for the given reader and key.
+pub fn get_encryptor_codec<R: MyAsyncReadExt + Unpin>(
+    key: impl AsRef<str>,
+    reader: R,
+) -> Result<codec::AsyncEncryptCodec<R, Aes256GcmEncryptor>> {
+    Ok(codec::AsyncEncryptCodec::new(
+        reader,
+        Aes256GcmEncryptor::try_new(key.as_ref().as_bytes()).map_err(|e| ProxyError::Crypto {
+            detail: format!("{e}"),
+        })?,
+    ))
+}
+
+// ============================================================================
+// Bidirectional Proxy Functions
+// ============================================================================
+
+/// Starts bidirectional proxy between client and server.
+///
+/// This is the core proxy loop that copies data in both directions
+/// until one side closes the connection.
+pub async fn start_proxy<
+    ClientCodec: MyAsyncCodecReader + Send + Unpin,
+    ServerCodec: MyAsyncCodecReader + Send + Unpin,
+    W: MyAsyncWriteExt + Send + Unpin,
+>(
+    host: impl AsRef<str>,
+    client_codec: ClientCodec,
+    server_codec: ServerCodec,
+    client_writer: W,
+    server_writer: W,
+) -> Result<()> {
+    let client_to_server = codec::copy(client_codec, server_writer);
+    let server_to_client = codec::copy(server_codec, client_writer);
+
+    // Race both directions - first to complete wins
+    tokio::select! {
+        ret = client_to_server => {
+            proxy_result_handle(&host, ret, "client->server");
+        }
+        ret = server_to_client => {
+            proxy_result_handle(&host, ret, "server->client");
+        }
+    }
+    Ok(())
+}
+
+/// Client-side proxy with encryption.
+///
+/// Encrypts data from client before sending to server,
+/// decrypts data from server before sending to client.
+///
+/// # Data Flow
+///
+/// ```text
+/// Client ──► [encrypt] ──► Server
+/// Client ◄── [decrypt] ◄── Server
+/// ```
+pub async fn client_proxy_with_cryptor_codec<
+    R: MyAsyncReadExt + Send + Unpin,
+    W: MyAsyncWriteExt + Send + Unpin,
+>(
+    host: impl AsRef<str>,
+    key: &impl AsRef<str>,
+    client_reader: R,
+    server_reader: R,
+    client_writer: W,
+    server_writer: W,
+) -> Result<()> {
+    tracing::info!("Client proxy starting with session key:{}", key.as_ref());
+    start_proxy(
+        host,
+        get_encryptor_codec(key, client_reader)?,
+        get_decryptor_codec(key, server_reader)?,
+        client_writer,
+        server_writer,
+    )
+    .await
+}
+
+/// Server-side proxy with decryption.
+///
+/// Decrypts data from client, encrypts data to client.
+/// This is the inverse of `client_proxy_with_cryptor_codec`.
+///
+/// # Data Flow
+///
+/// ```text
+/// Client ──► [decrypt] ──► Destination
+/// Client ◄── [encrypt] ◄── Destination
+/// ```
+#[allow(dead_code)]
+pub async fn server_proxy_with_cryptor_codec<
+    R: MyAsyncReadExt + Send + Unpin,
+    W: MyAsyncWriteExt + Send + Unpin,
+>(
+    host: impl AsRef<str>,
+    key: &impl AsRef<str>,
+    client_reader: R,
+    server_reader: R,
+    client_writer: W,
+    server_writer: W,
+) -> Result<()> {
+    tracing::info!("Server proxy starting with session key:{}", key.as_ref());
+    start_proxy(
+        host,
+        get_decryptor_codec(key, client_reader)?,
+        get_encryptor_codec(key, server_reader)?,
+        client_writer,
+        server_writer,
+    )
+    .await
+}
+
+/// Plain proxy without encryption.
+///
+/// Used for direct connections that don't require encryption,
+/// such as local traffic or already-encrypted protocols.
+pub async fn proxy_with_normal_codec<
+    R: MyAsyncReadExt + Send + Unpin,
+    W: MyAsyncWriteExt + Send + Unpin,
+>(
+    host: impl AsRef<str>,
+    client_reader: R,
+    server_reader: R,
+    client_writer: W,
+    server_writer: W,
+) -> Result<()> {
+    start_proxy(
+        host,
+        codec::AsyncNormalCodec::new(client_reader),
+        codec::AsyncNormalCodec::new(server_reader),
+        client_writer,
+        server_writer,
+    )
+    .await
+}
+
+// Backward compatibility alias
+pub use proxy_with_normal_codec as proxy_with_norlmal_codec;

@@ -1,0 +1,21 @@
+[package]
+name = "proxy-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "http_proxy"
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+proxy-core = { path = "../proxy-core" }
+proxy-client = { path = "../proxy-client" }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
+sysproxy = { workspace = true }

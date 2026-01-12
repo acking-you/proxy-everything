@@ -77,14 +77,14 @@ jobs:
         with:
           use-cross: ${{ !contains(matrix.os, 'macos') && !contains(matrix.os, 'windows') }}
           command: build
-          args: --bin http-proxy-server --verbose --release --target ${{ matrix.target }}
+          args: -p proxy-server --bin http-proxy-server --verbose --release --target ${{ matrix.target }}
 
       - name: Build http-proxy-cli
         uses: actions-rs/cargo@v1
         with:
           use-cross: ${{ !contains(matrix.os, 'macos') && !contains(matrix.os, 'windows') }}
           command: build
-          args: --bin http-proxy-cli --features cli-dep --verbose --release --target ${{ matrix.target }}
+          args: -p proxy-client --bin http-proxy-cli --verbose --release --target ${{ matrix.target }}
 
       - name: Archive binaries
         shell: bash
@@ -244,7 +244,7 @@ jobs:
         with:
           use-cross: ${{ !contains(matrix.target, 'android') && contains(matrix.os, 'ubuntu') && contains(matrix.target, 'aarch64') }}
           command: build
-          args: --lib --features ffi --verbose --release --target ${{ matrix.target }}
+          args: -p proxy-ffi --verbose --release --target ${{ matrix.target }}
 
       - name: Archive FFI library
         shell: bash

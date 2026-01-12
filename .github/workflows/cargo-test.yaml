@@ -28,8 +28,8 @@ jobs:
           toolchain: 1.87.0
           components: clippy
       - name: cargo clippy
-        run: cargo clippy
+        run: cargo clippy --workspace
       - name: cargo test
-        run: cargo test
+        run: cargo test --workspace
       - name: cargo build
-        run: cargo build --release
+        run: cargo build --workspace --release
