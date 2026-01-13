@@ -12,7 +12,7 @@ use std::sync::{Mutex, OnceLock};
 
 use serde::Serialize;
 use serde_json::Value;
-use snafu::{OptionExt, ResultExt, Snafu};
+use snafu::{ResultExt, Snafu};
 
 use crate::config::USE_LOCAL_GEOIP;
 
@@ -72,14 +72,11 @@ type Result<T> = std::result::Result<T, GeoError>;
 
 /// Query geo info for a single IP/host using ip-api.com line API.
 async fn query_geo_api(host: &str) -> Result<String> {
-    let ipaddr = uni_stream::addr::get_ip_addrs(host)
+    let ipaddr = crate::transport::resolve_host(host)
         .await
         .with_context(|_| DnsResolveSnafu {
             host: host.to_string(),
-        })?
-        .into_iter()
-        .next()
-        .context(EmptyDnsSnafu)?;
+        })?;
 
     let url = format!("http://ip-api.com/line/{}", ipaddr);
     let text = http_client()
@@ -306,15 +303,12 @@ async fn query_geo_local(host: &str) -> Result<String> {
     ensure_db().await?;
 
     // Resolve hostname to IP
-    let ip = uni_stream::addr::get_ip_addrs(host)
+    let ip = crate::transport::resolve_host(host)
         .await
         .map_err(|e| GeoError::DnsResolve {
             source: e,
             host: host.to_string(),
-        })?
-        .into_iter()
-        .next()
-        .ok_or(GeoError::EmptyDns)?;
+        })?;
 
     lookup_country_local(ip)
 }
