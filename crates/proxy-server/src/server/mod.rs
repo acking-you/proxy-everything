@@ -55,14 +55,19 @@
 //! │                                      │ - GetRecentConnections      │   │
 //! │                                      │ - GetTimeBuckets            │   │
 //! │                                      │ - GetTopN (hosts/ips)       │   │
+//! │                                      │ - Relay config management   │   │
 //! │                                      └─────────────────────────────┘   │
 //! └─────────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
 //! # Transparent Proxy Chain
 //!
-//! When `TURELY_PROXY_SERVER` is configured, the server acts as a transparent
-//! relay, forwarding all traffic to another proxy server without decryption.
+//! When `TURELY_PROXY_SERVER` is configured or relay is enabled, the server
+//! acts as a transparent relay, forwarding all traffic to another proxy server.
+
+mod relay;
+
+pub use relay::RelayManager;
 
 use std::fmt::Debug;
 use std::net::{IpAddr, SocketAddr, UdpSocket};
@@ -128,6 +133,7 @@ pub const MAX_HEADER_SIZE: DataSize = 8 * 128;
 struct ServerContext {
     metrics: Arc<MetricsStore>,
     nodes: Arc<NodeStore>,
+    relay: Arc<RelayManager>,
     admin_token: Option<String>,
     require_control_encryption: bool,
     control_session_key: Option<String>,
@@ -402,6 +408,137 @@ fn handle_control_request(request: ControlRequest, ctx: Arc<ServerContext>) -> C
                 result: Some(ControlResult::TopN { entries }),
             }
         }
+        // Group management
+        ControlOp::CreateGroup { group_id, name } => {
+            if ctx.nodes.create_group(group_id, name) {
+                if let Err(err) = ctx.nodes.save() {
+                    tracing::warn!("save nodes failed: {err}");
+                }
+                ControlResponse {
+                    ok: true,
+                    error: None,
+                    result: Some(ControlResult::Ack),
+                }
+            } else {
+                ControlResponse {
+                    ok: false,
+                    error: Some("group already exists".to_string()),
+                    result: None,
+                }
+            }
+        }
+        ControlOp::DeleteGroup { group_id } => {
+            ctx.nodes.delete_group(&group_id);
+            if let Err(err) = ctx.nodes.save() {
+                tracing::warn!("save nodes failed: {err}");
+            }
+            ControlResponse {
+                ok: true,
+                error: None,
+                result: Some(ControlResult::Ack),
+            }
+        }
+        ControlOp::ListGroups => {
+            let groups = ctx.nodes.list_groups();
+            ControlResponse {
+                ok: true,
+                error: None,
+                result: Some(ControlResult::Groups { groups }),
+            }
+        }
+        ControlOp::AddNodeToGroup { group_id, node_id } => {
+            if ctx.nodes.add_node_to_group(&group_id, node_id) {
+                if let Err(err) = ctx.nodes.save() {
+                    tracing::warn!("save nodes failed: {err}");
+                }
+                ControlResponse {
+                    ok: true,
+                    error: None,
+                    result: Some(ControlResult::Ack),
+                }
+            } else {
+                ControlResponse {
+                    ok: false,
+                    error: Some("group not found".to_string()),
+                    result: None,
+                }
+            }
+        }
+        ControlOp::RemoveNodeFromGroup { group_id, node_id } => {
+            ctx.nodes.remove_node_from_group(&group_id, &node_id);
+            if let Err(err) = ctx.nodes.save() {
+                tracing::warn!("save nodes failed: {err}");
+            }
+            ControlResponse {
+                ok: true,
+                error: None,
+                result: Some(ControlResult::Ack),
+            }
+        }
+        // Relay configuration
+        ControlOp::GetRelayConfig => {
+            let config = ctx.relay.get_config();
+            ControlResponse {
+                ok: true,
+                error: None,
+                result: Some(ControlResult::RelayConfig { config }),
+            }
+        }
+        ControlOp::SetRelayConfig { config } => {
+            ctx.relay.set_config(config);
+            ControlResponse {
+                ok: true,
+                error: None,
+                result: Some(ControlResult::Ack),
+            }
+        }
+        ControlOp::SetRelayEnabled { enabled } => {
+            ctx.relay.set_enabled(enabled);
+            ControlResponse {
+                ok: true,
+                error: None,
+                result: Some(ControlResult::Ack),
+            }
+        }
+        ControlOp::AddRelayTarget { target } => {
+            ctx.relay.add_target(target);
+            ControlResponse {
+                ok: true,
+                error: None,
+                result: Some(ControlResult::Ack),
+            }
+        }
+        ControlOp::RemoveRelayTarget { index } => {
+            if ctx.relay.remove_target(index) {
+                ControlResponse {
+                    ok: true,
+                    error: None,
+                    result: Some(ControlResult::Ack),
+                }
+            } else {
+                ControlResponse {
+                    ok: false,
+                    error: Some("invalid target index".to_string()),
+                    result: None,
+                }
+            }
+        }
+        ControlOp::SetRelayAlgo { algo } => {
+            ctx.relay.set_algo(algo);
+            ControlResponse {
+                ok: true,
+                error: None,
+                result: Some(ControlResult::Ack),
+            }
+        }
+        ControlOp::GetRelayStatus => {
+            let status = ctx.relay.get_status();
+            ControlResponse {
+                ok: true,
+                error: None,
+                result: Some(ControlResult::RelayStatus { status }),
+            }
+        }
     }
 }
 
@@ -601,16 +738,17 @@ async fn handle_connect_inner(
             detail: "Read Header(addr,tag)",
         })?;
 
-    // In relay mode, skip header decryption
-    if TURELY_PROXY_SERVER.is_some() {
-        let truely_proxy_server = TURELY_PROXY_SERVER.as_ref().unwrap();
-        let truely_proxy_stream =
-            TcpStream::connect(truely_proxy_server)
-                .await
-                .context(IoSnafu {
-                    detail: format!("Connect to truely_proxy_server:{}", truely_proxy_server),
-                })?;
-        let (r, w) = truely_proxy_stream.into_split();
+    // Use dynamic relay selection (TURELY_PROXY_SERVER is now added to relay config at startup)
+    let relay_target = ctx.relay.select();
+
+    if let Some(relay_server) = relay_target {
+        let relay_stream = TcpStream::connect(&relay_server)
+            .await
+            .context(IoSnafu {
+                detail: format!("Connect to relay_server:{}", relay_server),
+            })?;
+        ctx.relay.on_connect(&relay_server);
+        let (r, w) = relay_stream.into_split();
         let (server_reader, mut server_writer) = (AsyncReader::new(r), AsyncWriter::new(w));
         set_data_size(&mut server_writer, msg_len)
             .await
@@ -619,15 +757,19 @@ async fn handle_connect_inner(
             .write_all(&header_buf)
             .await
             .context(IoSnafu {
-                detail: "Write To Truely Server Header(addr,tag)",
+                detail: "Write To Relay Server Header(addr,tag)",
             })?;
         let result =
             proxy_with_metrics_normal(client_reader, server_reader, client_writer, server_writer)
                 .await;
+        ctx.relay.on_disconnect(&relay_server);
+        if result.is_err() {
+            ctx.relay.mark_unhealthy(&relay_server);
+        }
         record_connection(
             &ctx,
             &peer_ip,
-            &format!("relay:{}", truely_proxy_server),
+            &format!("relay:{}", relay_server),
             0,
             started_at_ms,
             &result,
@@ -759,6 +901,7 @@ fn record_connection(
 pub struct ServerConfig {
     pub metrics: Arc<MetricsStore>,
     pub nodes: Arc<NodeStore>,
+    pub relay: Arc<RelayManager>,
     pub admin_token: Option<String>,
     pub require_control_encryption: bool,
     pub control_session_key: Option<String>,
@@ -767,9 +910,11 @@ pub struct ServerConfig {
 
 impl Default for ServerConfig {
     fn default() -> Self {
+        let nodes = Arc::new(NodeStore::with_default_path());
         Self {
             metrics: Arc::new(MetricsStore::with_default_config()),
-            nodes: Arc::new(NodeStore::with_default_path()),
+            relay: Arc::new(RelayManager::with_default_path(nodes.clone())),
+            nodes,
             admin_token: None,
             require_control_encryption: false,
             control_session_key: None,
@@ -878,6 +1023,7 @@ pub async fn run_server_with_listener(
     let ctx = Arc::new(ServerContext {
         metrics: config.metrics,
         nodes: config.nodes,
+        relay: config.relay,
         admin_token: config.admin_token,
         require_control_encryption: config.require_control_encryption,
         control_session_key: config.control_session_key,
@@ -986,9 +1132,29 @@ pub async fn start_server(host: impl AsRef<str> + Debug, port: u16) {
         None
     };
 
+    let relay = Arc::new(RelayManager::with_default_path(nodes.clone()));
+
+    // If TURELY_PROXY_SERVER is set, add it as initial relay target and enable relay
+    if let Some(upstream) = TURELY_PROXY_SERVER.as_ref() {
+        // Only add if relay is not already configured (respect persisted config)
+        if relay.get_config().targets.is_empty() {
+            tracing::info!(
+                "TURELY_PROXY_SERVER={} detected, adding as initial relay target",
+                upstream
+            );
+            relay.add_target(proxy_core::relay::UpstreamTarget::node(upstream));
+            relay.set_enabled(true);
+        } else {
+            tracing::info!(
+                "TURELY_PROXY_SERVER set but relay already configured, using persisted config"
+            );
+        }
+    }
+
     let config = ServerConfig {
         metrics,
         nodes,
+        relay,
         admin_token: (*CONTROL_ADMIN_TOKEN).clone(),
         require_control_encryption: *CONTROL_REQUIRE_ENCRYPTION,
         control_session_key,

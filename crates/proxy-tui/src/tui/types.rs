@@ -6,7 +6,8 @@ use clap::Parser;
 
 use proxy_core::config::SERVER_PORT;
 use proxy_core::metrics::{ConnectionRecord, RealtimeSnapshot, TimeBucket};
-use proxy_core::nodes::NodeInfo;
+use proxy_core::nodes::{NodeGroup, NodeInfo};
+use proxy_core::relay::{LoadBalanceAlgo, RelayConfig, RelayStatus, UpstreamTarget};
 
 pub const TAB_COUNT: usize = 4;
 pub const TAB_TITLES: [&str; TAB_COUNT] = ["Nodes", "Realtime", "Connections", "Top-N"];
@@ -38,11 +39,14 @@ pub struct Cli {
 #[derive(Default, Clone)]
 pub struct FetchedData {
     pub nodes: Vec<NodeInfo>,
+    pub groups: Vec<NodeGroup>,
     pub realtime: Option<RealtimeSnapshot>,
     pub connections: Vec<ConnectionRecord>,
     pub buckets: Vec<TimeBucket>,
     pub top_hosts: Vec<(String, u64)>,
     pub top_ips: Vec<(String, u64)>,
+    pub relay_config: Option<RelayConfig>,
+    pub relay_status: Option<RelayStatus>,
 }
 
 /// UI state.
@@ -104,6 +108,17 @@ pub enum DataCommand {
     RemoveNode(String),
     SwitchServer(String),
     QueryGeo(Vec<String>),
+    // Group management
+    CreateGroup { group_id: String, name: String },
+    DeleteGroup(String),
+    AddNodeToGroup { group_id: String, node_id: String },
+    RemoveNodeFromGroup { group_id: String, node_id: String },
+    // Relay configuration
+    SetRelayEnabled(bool),
+    AddRelayTarget(UpstreamTarget),
+    RemoveRelayTarget(usize),
+    SetRelayAlgo(LoadBalanceAlgo),
+    SetRelayConfig(RelayConfig),
     Shutdown,
 }
 

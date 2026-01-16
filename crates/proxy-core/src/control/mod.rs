@@ -44,7 +44,8 @@ use crate::codec::{AsyncReader, AsyncWriter};
 use crate::metrics::{
     ConnectionRecord, Granularity, RealtimeSnapshot, TimeBucket, TopCategory, TrafficStats,
 };
-use crate::nodes::NodeInfo;
+use crate::nodes::{NodeGroup, NodeInfo};
+use crate::relay::{LoadBalanceAlgo, RelayConfig, RelayStatus, UpstreamTarget};
 use crate::transport::{TransportError, get_tcp_proxy_stream};
 use crate::{Aes256GcmCryption, MyAsyncReadExt, MyAsyncWriteExt};
 use crate::{ProxyError, get_data_size, set_data_size};
@@ -93,6 +94,22 @@ pub enum ControlOp {
     ListNodes,
     SyncNodes { nodes: Vec<NodeInfo> },
 
+    // Group management
+    CreateGroup { group_id: String, name: String },
+    DeleteGroup { group_id: String },
+    ListGroups,
+    AddNodeToGroup { group_id: String, node_id: String },
+    RemoveNodeFromGroup { group_id: String, node_id: String },
+
+    // Relay configuration
+    GetRelayConfig,
+    SetRelayConfig { config: RelayConfig },
+    SetRelayEnabled { enabled: bool },
+    AddRelayTarget { target: UpstreamTarget },
+    RemoveRelayTarget { index: usize },
+    SetRelayAlgo { algo: LoadBalanceAlgo },
+    GetRelayStatus,
+
     // Metrics queries
     GetRealtimeStats,
     GetRecentConnections,
@@ -113,6 +130,9 @@ pub enum ControlResult {
     Pong,
     Ack,
     Nodes { nodes: Vec<NodeInfo> },
+    Groups { groups: Vec<NodeGroup> },
+    RelayConfig { config: RelayConfig },
+    RelayStatus { status: RelayStatus },
     RealtimeStats { stats: RealtimeSnapshot },
     Connections { connections: Vec<ConnectionRecord> },
     TimeBuckets { buckets: Vec<TimeBucket> },

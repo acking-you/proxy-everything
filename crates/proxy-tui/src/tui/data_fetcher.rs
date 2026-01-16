@@ -143,6 +143,30 @@ pub async fn data_fetcher_task(
                     }
                 }
             },
+            // Group and relay commands - just refresh data after operation
+            DataCommand::CreateGroup { .. }
+            | DataCommand::DeleteGroup(_)
+            | DataCommand::AddNodeToGroup { .. }
+            | DataCommand::RemoveNodeFromGroup { .. }
+            | DataCommand::SetRelayEnabled(_)
+            | DataCommand::AddRelayTarget(_)
+            | DataCommand::RemoveRelayTarget(_)
+            | DataCommand::SetRelayAlgo(_)
+            | DataCommand::SetRelayConfig(_) => {
+                // These commands are not yet implemented in the TUI
+                // For now, just refresh data
+                let result =
+                    fetch_data_from_addr(&current_server, &cli.token, &session_key, &mut client)
+                        .await;
+                if data_tx
+                    .send(result.map(|d| DataResult::Data(d, Some(current_server.clone()))))
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Main loop closed, exiting data fetcher");
+                    break;
+                }
+            }
         }
     }
 }
@@ -190,11 +214,14 @@ async fn switch_server(addr: &str, session_key: &Option<String>) -> Result<Fetch
 
     Ok(FetchedData {
         nodes,
+        groups: Vec::new(),
         realtime,
         connections,
         buckets,
         top_hosts,
         top_ips,
+        relay_config: None,
+        relay_status: None,
     })
 }
 
@@ -257,11 +284,14 @@ async fn fetch_data_from_addr(
 
     Ok(FetchedData {
         nodes,
+        groups: Vec::new(),
         realtime,
         connections,
         buckets,
         top_hosts,
         top_ips,
+        relay_config: None,
+        relay_status: None,
     })
 }
 

@@ -20,6 +20,9 @@ snafu = { workspace = true }
 sysinfo = { workspace = true }
 ureq = { workspace = true }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+
 [[bin]]
 name = "http-proxy-server"
 path = "src/bin/main.rs"

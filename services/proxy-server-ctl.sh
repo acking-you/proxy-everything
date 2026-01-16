@@ -81,6 +81,10 @@ do_install() {
     echo -n "Enter upstream proxy for chain mode (leave empty for direct mode): "
     read -r UPSTREAM
 
+    # Get CONTROL_SESSION_KEY (optional)
+    echo -n "Enter CONTROL_SESSION_KEY for encrypted control (32 chars, optional): "
+    read -r CONTROL_SESSION_KEY
+
     # Get LOG_LEVEL
     echo -n "Enter log level [info]: "
     read -r LOG_LEVEL
@@ -91,6 +95,9 @@ do_install() {
     ENV_LINES="${ENV_LINES}\nEnvironment=\"RUST_LOG=${LOG_LEVEL}\""
     if [ -n "$UPSTREAM" ]; then
         ENV_LINES="${ENV_LINES}\nEnvironment=\"TURELY_PROXY_SERVER=${UPSTREAM}\""
+    fi
+    if [ -n "$CONTROL_SESSION_KEY" ]; then
+        ENV_LINES="${ENV_LINES}\nEnvironment=\"CONTROL_SESSION_KEY=${CONTROL_SESSION_KEY}\""
     fi
 
     # Generate service file
@@ -119,7 +126,9 @@ EOF
     echo "Configuration:"
     echo "  - Port: $PORT"
     echo "  - Mode: $([ -n "$UPSTREAM" ] && echo "chain -> $UPSTREAM" || echo "direct")"
+    echo "  - Control encryption: $([ -n "$CONTROL_SESSION_KEY" ] && echo "enabled" || echo "disabled")"
     echo "  - Log level: $LOG_LEVEL"
+    echo "  - Data dir: ~/.proxy-everything/ (nodes.json, relay.json)"
     echo ""
     echo "Run option 2 to start the service."
 }

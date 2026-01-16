@@ -51,6 +51,15 @@ pub struct NodeInfo {
     pub last_seen_ms: i64,
 }
 
+/// Node group for organizing nodes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeGroup {
+    pub group_id: String,
+    pub name: String,
+    pub node_ids: Vec<String>,
+    pub created_at_ms: i64,
+}
+
 /// Self node information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SelfNode {
@@ -66,15 +75,18 @@ struct NodesFile {
     #[serde(rename = "self")]
     self_node: Option<SelfNode>,
     peers: Vec<NodeInfo>,
+    #[serde(default)]
+    groups: Vec<NodeGroup>,
     updated_at_ms: i64,
 }
 
 impl Default for NodesFile {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
             self_node: None,
             peers: Vec::new(),
+            groups: Vec::new(),
             updated_at_ms: current_time_ms(),
         }
     }
@@ -86,6 +98,7 @@ pub struct NodeStore {
     self_node: RwLock<Option<SelfNode>>,
     self_addrs: RwLock<Vec<String>>,
     peers: RwLock<HashMap<String, NodeInfo>>,
+    groups: RwLock<HashMap<String, NodeGroup>>,
     last_hash: RwLock<u64>,
 }
 
@@ -97,6 +110,7 @@ impl NodeStore {
             self_node: RwLock::new(None),
             self_addrs: RwLock::new(Vec::new()),
             peers: RwLock::new(HashMap::new()),
+            groups: RwLock::new(HashMap::new()),
             last_hash: RwLock::new(0),
         }
     }
@@ -135,6 +149,12 @@ impl NodeStore {
         peers.clear();
         for peer in file.peers {
             peers.insert(peer.node_id.clone(), peer);
+        }
+
+        let mut groups = self.groups.write().unwrap();
+        groups.clear();
+        for group in file.groups {
+            groups.insert(group.group_id.clone(), group);
         }
 
         Ok(())
@@ -179,10 +199,12 @@ impl NodeStore {
     fn to_file(&self) -> NodesFile {
         let self_node = self.self_node.read().unwrap().clone();
         let peers: Vec<_> = self.peers.read().unwrap().values().cloned().collect();
+        let groups: Vec<_> = self.groups.read().unwrap().values().cloned().collect();
         NodesFile {
-            version: 1,
+            version: 2,
             self_node,
             peers,
+            groups,
             updated_at_ms: current_time_ms(),
         }
     }
@@ -325,6 +347,87 @@ impl NodeStore {
     /// Get peer count.
     pub fn peer_count(&self) -> usize {
         self.peers.read().unwrap().len()
+    }
+
+    // ========================================================================
+    // Group management
+    // ========================================================================
+
+    /// Create a new group.
+    pub fn create_group(&self, group_id: String, name: String) -> bool {
+        let mut groups = self.groups.write().unwrap();
+        if groups.contains_key(&group_id) {
+            return false;
+        }
+        groups.insert(
+            group_id.clone(),
+            NodeGroup {
+                group_id,
+                name,
+                node_ids: Vec::new(),
+                created_at_ms: current_time_ms(),
+            },
+        );
+        true
+    }
+
+    /// Delete a group.
+    pub fn delete_group(&self, group_id: &str) -> bool {
+        self.groups.write().unwrap().remove(group_id).is_some()
+    }
+
+    /// List all groups.
+    pub fn list_groups(&self) -> Vec<NodeGroup> {
+        self.groups.read().unwrap().values().cloned().collect()
+    }
+
+    /// Get a group by ID.
+    pub fn get_group(&self, group_id: &str) -> Option<NodeGroup> {
+        self.groups.read().unwrap().get(group_id).cloned()
+    }
+
+    /// Add a node to a group.
+    pub fn add_node_to_group(&self, group_id: &str, node_id: String) -> bool {
+        let mut groups = self.groups.write().unwrap();
+        if let Some(group) = groups.get_mut(group_id) {
+            if !group.node_ids.contains(&node_id) {
+                group.node_ids.push(node_id);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove a node from a group.
+    pub fn remove_node_from_group(&self, group_id: &str, node_id: &str) -> bool {
+        let mut groups = self.groups.write().unwrap();
+        if let Some(group) = groups.get_mut(group_id) {
+            let len_before = group.node_ids.len();
+            group.node_ids.retain(|id| id != node_id);
+            group.node_ids.len() != len_before
+        } else {
+            false
+        }
+    }
+
+    /// Get all node addresses in a group.
+    pub fn get_group_addrs(&self, group_id: &str) -> Vec<String> {
+        let groups = self.groups.read().unwrap();
+        let peers = self.peers.read().unwrap();
+        let Some(group) = groups.get(group_id) else {
+            return Vec::new();
+        };
+        group
+            .node_ids
+            .iter()
+            .filter_map(|id| peers.get(id).map(|n| n.addr.clone()))
+            .collect()
+    }
+
+    /// Get group count.
+    pub fn group_count(&self) -> usize {
+        self.groups.read().unwrap().len()
     }
 }
 
