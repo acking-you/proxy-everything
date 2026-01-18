@@ -56,7 +56,7 @@ pub unsafe extern "C" fn proxy_get_server_nodes(
         Some(DEFAULT_SECRET_KEY.to_string())
     } else {
         match unsafe { CStr::from_ptr(session_key) }.to_str() {
-            Ok(s) if s.is_empty() => Some(DEFAULT_SECRET_KEY.to_string()),
+            Ok("") => Some(DEFAULT_SECRET_KEY.to_string()),
             Ok(s) => Some(s.to_string()),
             Err(_) => Some(DEFAULT_SECRET_KEY.to_string()),
         }
