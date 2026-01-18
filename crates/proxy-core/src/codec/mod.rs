@@ -458,5 +458,6 @@ pub async fn copy<R: MyAsyncCodecReader + Send + Unpin, W: MyAsyncWriteExt + Sen
         }
         length += n;
     }
+    let _ = writer.shutdown().await;
     Ok(length)
 }

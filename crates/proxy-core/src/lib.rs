@@ -119,7 +119,16 @@ pub fn proxy_result_handle(host: impl AsRef<str>, ret: Result<DataSize>, detail:
             "Transferred {n} bytes, detail:{detail} host:{}",
             host.as_ref()
         ),
-        Err(e) => tracing::error!("Proxy error:{e}, detail:{detail} host:{}", host.as_ref()),
+        Err(e) => {
+            if e.is_expected_disconnect() {
+                tracing::debug!(
+                    "Proxy closed by peer:{e}, detail:{detail} host:{}",
+                    host.as_ref()
+                );
+            } else {
+                tracing::error!("Proxy error:{e}, detail:{detail} host:{}", host.as_ref());
+            }
+        }
     }
 }
 
@@ -175,15 +184,9 @@ pub async fn start_proxy<
     let client_to_server = codec::copy(client_codec, server_writer);
     let server_to_client = codec::copy(server_codec, client_writer);
 
-    // Race both directions - first to complete wins
-    tokio::select! {
-        ret = client_to_server => {
-            proxy_result_handle(&host, ret, "client->server");
-        }
-        ret = server_to_client => {
-            proxy_result_handle(&host, ret, "server->client");
-        }
-    }
+    let (client_result, server_result) = tokio::join!(client_to_server, server_to_client);
+    proxy_result_handle(&host, client_result, "client->server");
+    proxy_result_handle(&host, server_result, "server->client");
     Ok(())
 }
 
