@@ -238,3 +238,28 @@ pub enum ProxyError {
 
 /// Unified Result type alias.
 pub type Result<T, E = ProxyError> = std::result::Result<T, E>;
+
+impl ProxyError {
+    pub fn is_expected_disconnect(&self) -> bool {
+        use std::io::ErrorKind;
+
+        let is_expected = |kind: ErrorKind| {
+            matches!(
+                kind,
+                ErrorKind::UnexpectedEof
+                    | ErrorKind::ConnectionReset
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::BrokenPipe
+                    | ErrorKind::NotConnected
+                    | ErrorKind::TimedOut
+            )
+        };
+
+        match self {
+            ProxyError::Io { source, .. } | ProxyError::ProtocolIo { source, .. } => {
+                is_expected(source.kind())
+            }
+            _ => false,
+        }
+    }
+}
