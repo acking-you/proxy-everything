@@ -18,6 +18,93 @@ PORT="${PORT:-$DEFAULT_PORT}"
 SECRET_KEY="${SECRET_KEY:-$DEFAULT_SECRET_KEY}"
 RUST_LOG="${RUST_LOG:-info}"
 
+is_valid_port() {
+  local port="$1"
+  [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]
+}
+
+port_in_use() {
+  local port="$1"
+  if command -v ss >/dev/null 2>&1; then
+    if ss -ltnuH "sport = :$port" 2>/dev/null | awk 'NF {found=1} END {exit !found}'; then
+      return 0
+    fi
+    return 1
+  fi
+  if command -v netstat >/dev/null 2>&1; then
+    if netstat -ltnu 2>/dev/null | awk '$4 ~ /:'"$port"'$/ {found=1} END {exit !found}'; then
+      return 0
+    fi
+    return 1
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    if lsof -iTCP:"$port" -sTCP:LISTEN -P -n >/dev/null 2>&1; then
+      return 0
+    fi
+    return 1
+  fi
+  if command -v fuser >/dev/null 2>&1; then
+    if fuser -n tcp "$port" >/dev/null 2>&1; then
+      return 0
+    fi
+    return 1
+  fi
+  return 2
+}
+
+ensure_port_available() {
+  local port="$1"
+  if ! is_valid_port "$port"; then
+    echo "Invalid PORT: $port" >&2
+    echo "Set PORT to a number between 1 and 65535." >&2
+    exit 1
+  fi
+
+  local attempts=0
+  while true; do
+    port_in_use "$port"
+    case $? in
+      0)
+        echo "Port $port is already in use." >&2
+        echo "You can choose another port by setting PORT or editing the systemd unit." >&2
+        if [ -t 0 ]; then
+          read -r -p "Enter a free port (or press Enter to abort): " new_port
+          if [ -z "$new_port" ]; then
+            echo "Aborting. Example:" >&2
+            echo "  PORT=1082 bash install-proxy-server.sh" >&2
+            exit 1
+          fi
+          if ! is_valid_port "$new_port"; then
+            echo "Invalid PORT: $new_port" >&2
+            continue
+          fi
+          port="$new_port"
+          PORT="$new_port"
+          attempts=$((attempts + 1))
+          if [ "$attempts" -ge 5 ]; then
+            echo "Too many attempts. Aborting." >&2
+            exit 1
+          fi
+          continue
+        else
+          echo "Non-interactive shell detected." >&2
+          echo "Re-run with a free port, for example:" >&2
+          echo "  PORT=1082 bash install-proxy-server.sh" >&2
+          exit 1
+        fi
+        ;;
+      1)
+        return 0
+        ;;
+      2)
+        echo "Warning: cannot detect whether port $port is in use (missing ss/netstat/lsof/fuser)." >&2
+        echo "Continuing without port check." >&2
+        return 0
+        ;;
+    esac
+  done
+}
+
 # Resolve download URL (first arg is filename or full URL)
 REQUESTED_FILE="${1:-$DEFAULT_FILE}"
 if [[ "$REQUESTED_FILE" == http://* || "$REQUESTED_FILE" == https://* ]]; then
@@ -94,6 +181,9 @@ fi
 if [ -f "$SERVICE_PATH" ]; then
   rm -f "$SERVICE_PATH"
 fi
+
+# Verify port availability before creating the service
+ensure_port_available "$PORT"
 
 # Write systemd unit
 cat > "$SERVICE_PATH" <<UNIT
