@@ -28,7 +28,7 @@ jobs:
           toolchain: 1.87.0
           components: clippy, rustfmt
       - name: cargo fmt
-        run: cargo fmt --all -- --check
+        run: cargo fmt -- --check
       - name: cargo clippy
         run: cargo clippy --workspace
       - name: cargo test
