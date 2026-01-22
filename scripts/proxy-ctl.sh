@@ -12,7 +12,7 @@ set -e
 INSTANCE="${1:-proxy}"
 case "$INSTANCE" in
     proxy|relay)
-        shift || true
+        shift
         ;;
     start|stop|restart|update|logs|status|shell|init|help|--help|-h|all)
         INSTANCE="proxy"
@@ -20,7 +20,7 @@ case "$INSTANCE" in
     *)
         # Check if it's a custom instance name (not a command)
         if [[ "$1" =~ ^[a-zA-Z][a-zA-Z0-9_-]*$ ]] && [[ ! "$1" =~ ^(start|stop|restart|update|logs|status|shell|init)$ ]]; then
-            shift || true
+            shift
         else
             INSTANCE="proxy"
         fi
@@ -36,10 +36,10 @@ case "$INSTANCE" in
         DEFAULT_DATA_DIR="/opt/proxy-relay-data"
         ;;
     *)
-        # Default proxy instance
-        DEFAULT_CONTAINER="proxy-server"
+        # Custom instance: use instance name directly as container name
+        DEFAULT_CONTAINER="${INSTANCE}"
         DEFAULT_PORT="1081"
-        DEFAULT_DATA_DIR="/opt/proxy-data"
+        DEFAULT_DATA_DIR="/opt/${INSTANCE}-data"
         ;;
 esac
 
@@ -377,3 +377,5 @@ case "$CMD" in
     help|--help|-h) show_help ;;
     *)       show_help ;;
 esac
+
+
