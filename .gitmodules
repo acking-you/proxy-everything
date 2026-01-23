@@ -7,3 +7,6 @@
 [submodule "deps/kanal"]
 	path = deps/kanal
 	url = git@github.com:acking-you/kanal.git
+[submodule "deps/uni-stream"]
+	path = deps/uni-stream
+	url = git@github.com:acking-you/uni-stream.git
