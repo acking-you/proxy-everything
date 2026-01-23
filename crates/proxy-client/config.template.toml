@@ -15,6 +15,11 @@ client_port = 7890
 # [Optional] Reverse geo-proxy: CN sites use proxy, foreign sites direct
 reverse_geo = false
 
+# [Optional] Auto-proxy switch (true/false)
+# - true: decide proxy/direct by keywords + geo rules
+# - false: force all connections through proxy (skip all auto-proxy checks)
+auto_proxy = true
+
 # [Optional] Use local GeoIP database instead of ip-api.com API
 # use_local_geoip = false
 

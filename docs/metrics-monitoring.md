@@ -1,12 +1,22 @@
-# Metrics Monitoring (TUI + Admin CLI)
+# Metrics & Management (TUI + Admin CLI)
 
-This project exposes proxy metrics over the **control plane**. There are two
-ways to monitor them:
+This project exposes proxy metrics and management operations over the **control plane**. There are two ways to interact:
 
 - **`proxy-tui`**: interactive terminal UI
 - **`http-proxy-admin`**: CLI with JSON output (script-friendly)
 
 Both tools use the same control API and require the same credentials.
+
+## Table of Contents
+
+- [Prerequisites](#prerequisites)
+- [Authentication & Encryption](#control-plane-authentication--encryption)
+- [Terminal UI (proxy-tui)](#1-terminal-ui-proxy-tui)
+- [Admin CLI (http-proxy-admin)](#2-admin-cli-http-proxy-admin)
+  - [Metrics Commands](#metrics-commands)
+  - [Relay Commands](#relay-commands)
+  - [Node Group Commands](#node-group-commands)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -53,10 +63,8 @@ the same value or requests will return `"unauthorized"`.
 
 ### Build
 
-`proxy-tui` is behind the `tui` feature.
-
 ```bash
-cargo build --release --features tui --bin proxy-tui
+cargo build --release -p proxy-tui
 ```
 
 ### Run
@@ -80,6 +88,8 @@ cargo build --release --features tui --bin proxy-tui
 ### TUI Tabs
 
 - **Nodes**: cluster node list (if node discovery is configured)
+- **Groups**: node group management
+- **Relay**: relay configuration and status
 - **Realtime**: active connections, CPU, memory, uptime + recent minute buckets
 - **Connections**: last 20 connection records
 - **Top-N**: top hosts and top client IPs by traffic
@@ -89,7 +99,37 @@ cargo build --release --features tui --bin proxy-tui
 - `q` / `Esc` - quit
 - `Tab` / `Right` - next tab
 - `Shift+Tab` / `Left` - previous tab
-- `Up` / `Down` - move selection in Nodes tab
+- `r` - refresh
+- `Up` / `Down` - move selection in Nodes / Groups / Relay
+- `Enter` - switch server (Nodes tab)
+- `/` - filter (Connections / Top-N)
+- `PgUp` / `PgDn` - page (Connections / Top-N)
+
+#### Node management (Nodes tab)
+
+- `a` - add node (input: `host:port`)
+- `d` - delete node (selected)
+  - Self node cannot be removed and will show `[self]`
+
+#### Group management (Groups tab)
+
+- `a` - create group (input: `<group_id> <name>`)
+- `d` - delete group (selected)
+- `g` - add node to group (input: `<node_id>`, typically `host:port`)
+- `x` - remove node from group (input: `<node_id>`)
+
+#### Relay management (Relay tab)
+
+- `e` - enable/disable relay
+- `l` - cycle load-balancing algorithm
+- `a` - add relay target
+  - `node <host:port> [weight]`
+  - `node_ref <node_id> [weight]`
+  - `group_ref <group_id>`
+- `d` - remove selected relay target
+- `c` - set relay config (JSON)
+  - Example:
+    `{"enabled":true,"targets":[{"type":"group_ref","group_id":"asia"}],"algo":"round_robin","health_check_interval_secs":30}`
 
 ---
 
@@ -152,6 +192,110 @@ http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY \
 ```
 
 - `--category`: `hosts`/`host` or `ips`/`ip`
+
+---
+
+## Relay Commands
+
+Manage dynamic relay configuration at runtime.
+
+### Get relay config
+
+```bash
+http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY relay get
+```
+
+Returns:
+- `enabled`: whether relay is active
+- `targets`: list of upstream targets (nodes or group refs)
+- `algo`: load balancing algorithm
+- `health_check_interval_secs`: health check interval
+
+### Enable/disable relay
+
+```bash
+# Enable relay
+http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY relay enable
+
+# Disable relay
+http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY relay disable
+```
+
+### Add relay target
+
+```bash
+# Add a node target
+http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY \
+  relay add-target --addr 10.0.0.1:1081 --weight 1
+
+# Add a group reference
+http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY \
+  relay add-target --group asia-servers
+```
+
+### Remove relay target
+
+```bash
+http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY \
+  relay remove-target --index 0
+```
+
+### Set load balancing algorithm
+
+```bash
+http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY \
+  relay set-algo --algo weighted
+```
+
+Algorithms: `round_robin`, `random`, `weighted`, `least_conn`
+
+### Get relay status
+
+```bash
+http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY relay status
+```
+
+Returns current relay state including resolved targets and health status.
+
+---
+
+## Node Group Commands
+
+Organize nodes into groups for easier management.
+
+### List groups
+
+```bash
+http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY groups list
+```
+
+### Create group
+
+```bash
+http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY \
+  groups create --id asia --name "Asia Servers"
+```
+
+### Delete group
+
+```bash
+http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY \
+  groups delete --id asia
+```
+
+### Add node to group
+
+```bash
+http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY \
+  groups add-node --group-id asia --node-id 10.0.0.1:1081
+```
+
+### Remove node from group
+
+```bash
+http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY \
+  groups remove-node --group-id asia --node-id 10.0.0.1:1081
+```
 
 ---
 

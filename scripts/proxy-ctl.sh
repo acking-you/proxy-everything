@@ -58,6 +58,8 @@ PORT="${PROXY_PORT:-$DEFAULT_PORT}"
 DATA_DIR="${PROXY_DATA_DIR:-$DEFAULT_DATA_DIR}"
 SECRET_KEY="${SECRET_KEY:-my-secret-key123my-secret-key123}"
 TURELY_PROXY_SERVER="${TURELY_PROXY_SERVER:-}"
+CONTROL_SESSION_KEY="${CONTROL_SESSION_KEY:-}"
+CONTROL_REQUIRE_ENCRYPTION="${CONTROL_REQUIRE_ENCRYPTION:-}"
 
 # Colors
 RED='\033[0;31m'
@@ -121,6 +123,8 @@ do_start() {
     fi
 
     [ -n "$CONTROL_ADMIN_TOKEN" ] && docker_cmd="$docker_cmd -e CONTROL_ADMIN_TOKEN=$CONTROL_ADMIN_TOKEN"
+    [ -n "$CONTROL_SESSION_KEY" ] && docker_cmd="$docker_cmd -e CONTROL_SESSION_KEY=$CONTROL_SESSION_KEY"
+    [ -n "$CONTROL_REQUIRE_ENCRYPTION" ] && docker_cmd="$docker_cmd -e CONTROL_REQUIRE_ENCRYPTION=$CONTROL_REQUIRE_ENCRYPTION"
     [ -n "$NODE_ADVERTISE_ADDR" ] && docker_cmd="$docker_cmd -e NODE_ADVERTISE_ADDR=$NODE_ADVERTISE_ADDR"
     docker_cmd="$docker_cmd $IMAGE"
 
@@ -246,14 +250,16 @@ Configuration:
     relay:  /etc/proxy-relay.conf
 
   Environment variables (override config):
-    PROXY_IMAGE          Docker image
-    PROXY_CONTAINER      Container name
-    PROXY_PORT           Server port
-    PROXY_DATA_DIR       Data directory
-    SECRET_KEY           32-char encryption key
-    CONTROL_ADMIN_TOKEN  Admin token (optional)
-    NODE_ADVERTISE_ADDR  Node address for sync (optional)
-    TURELY_PROXY_SERVER  Upstream proxy for relay mode
+    PROXY_IMAGE               Docker image
+    PROXY_CONTAINER           Container name
+    PROXY_PORT                Server port
+    PROXY_DATA_DIR            Data directory
+    SECRET_KEY                32-char encryption key
+    CONTROL_ADMIN_TOKEN       Admin token (optional)
+    CONTROL_SESSION_KEY       Control protocol session key (optional)
+    CONTROL_REQUIRE_ENCRYPTION Require encrypted control (true/false)
+    NODE_ADVERTISE_ADDR       Node address for sync (optional)
+    TURELY_PROXY_SERVER       Upstream proxy for static relay mode
 
 Deployment Modes:
   1. Normal Proxy Mode (instance: proxy):
@@ -261,6 +267,11 @@ Deployment Modes:
 
   2. Transparent Relay Mode (instance: relay):
      Client -> Server -> [forward as-is] -> Upstream Proxy
+
+  3. Dynamic Relay Mode (NEW):
+     Configure relay targets at runtime via control protocol.
+     Supports load balancing: RoundRobin, Random, Weighted, LeastConn.
+     Config persisted to DATA_DIR/relay.json.
 
 Examples:
   # Initialize config files
@@ -307,7 +318,7 @@ PROXY_CONTAINER="proxy-relay"
 # Server port (relay typically uses different port)
 PROXY_PORT="$PORT"
 
-# Data directory
+# Data directory (stores nodes.json and relay.json)
 PROXY_DATA_DIR="/opt/proxy-relay-data"
 
 # Encryption key (must match client config)
@@ -317,8 +328,14 @@ SECRET_KEY="my-secret-key123my-secret-key123"
 # Format: host:port
 TURELY_PROXY_SERVER="your-real-proxy:1081"
 
-# Optional: Admin token
+# Optional: Admin token for control operations
 # CONTROL_ADMIN_TOKEN="your-admin-token"
+
+# Optional: Session key for control protocol encryption (32 chars)
+# CONTROL_SESSION_KEY="your-32-char-session-key-here!!"
+
+# Optional: Require encrypted control protocol (true/false)
+# CONTROL_REQUIRE_ENCRYPTION="true"
 
 # Optional: Advertised address for node sync
 # NODE_ADVERTISE_ADDR="your-public-ip:$PORT"
@@ -338,7 +355,7 @@ PROXY_CONTAINER="proxy-server"
 # Server port
 PROXY_PORT="$PORT"
 
-# Data directory
+# Data directory (stores nodes.json and relay.json)
 PROXY_DATA_DIR="/opt/proxy-data"
 
 # 32-character encryption key
@@ -347,10 +364,17 @@ SECRET_KEY="my-secret-key123my-secret-key123"
 # Optional: Admin token for control plane
 # CONTROL_ADMIN_TOKEN="your-admin-token"
 
+# Optional: Session key for control protocol encryption (32 chars)
+# CONTROL_SESSION_KEY="your-32-char-session-key-here!!"
+
+# Optional: Require encrypted control protocol (true/false)
+# CONTROL_REQUIRE_ENCRYPTION="true"
+
 # Optional: Advertised address for node sync
 # NODE_ADVERTISE_ADDR="your-public-ip:$PORT"
 
-# Optional: Enable relay mode (leave empty for normal proxy)
+# Optional: Static relay mode (leave empty for normal proxy)
+# For dynamic relay, configure via control protocol instead
 # TURELY_PROXY_SERVER="upstream-proxy:1081"
 EOF
             ;;

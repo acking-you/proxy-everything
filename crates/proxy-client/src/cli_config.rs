@@ -20,6 +20,8 @@ pub struct Config {
     pub server_port: Option<u16>,
     pub client_port: Option<u16>,
     pub secret_key: Option<String>,
+    /// Enable auto-proxy (true/false). When disabled, all traffic goes through proxy.
+    pub auto_proxy: Option<bool>,
     pub nonproxy_keywords: Option<Vec<String>>,
     pub proxy_keywords: Option<Vec<String>>,
     pub need_codec_ip: Option<Vec<String>>,

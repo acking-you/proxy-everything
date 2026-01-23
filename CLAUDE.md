@@ -7,6 +7,8 @@ Lightweight encrypted proxy system establishing secure tunnels between client an
 **Core Features**:
 - Encrypted proxy service (HTTP/HTTPS/SOCKS5)
 - Geo-based intelligent routing (CN direct, overseas via proxy)
+- Dynamic relay configuration with load balancing (RoundRobin/Random/Weighted/LeastConn)
+- Node group management for organizing upstream servers
 - Cross-platform support (Linux/macOS/Windows/Android/iOS)
 - FFI interface for Flutter UI integration
 
@@ -62,6 +64,8 @@ Application → Client(local:1080) → [AES-256-GCM] → Server(remote:1081) →
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ Control Plane (crates/proxy-core/src/control/)       │   │
 │  │  ├─ Node management (AddNode/RemoveNode/ListNodes)  │   │
+│  │  ├─ Group management (CreateGroup/DeleteGroup)      │   │
+│  │  ├─ Relay config (SetRelayConfig/GetRelayStatus)    │   │
 │  │  └─ Metrics query (GetRealtimeStats/GetTopN)        │   │
 │  └──────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────┘
@@ -79,6 +83,7 @@ Application → Client(local:1080) → [AES-256-GCM] → Server(remote:1081) →
 | **FFI** | `crates/proxy-ffi/src/lib.rs` | C-compatible interface for Flutter |
 | **Metrics** | `crates/proxy-core/src/metrics/mod.rs` | DashMap sharded storage, connection stats |
 | **Control** | `crates/proxy-core/src/control/` | Node discovery, metrics query API |
+| **Relay** | `crates/proxy-core/src/relay/` | Load balancing algorithms, relay configuration |
 | **Protocol** | `crates/proxy-core/src/protocol/mod.rs` | Data frame format definitions |
 | **TUI** | `crates/proxy-tui/src/tui/` | Terminal UI for monitoring |
 
@@ -100,6 +105,7 @@ proxy-everything/
 │   │       ├── geo/              # GeoIP lookup
 │   │       ├── metrics/          # Connection metrics
 │   │       ├── nodes/            # Node management
+│   │       ├── relay/            # Relay config and load balancers
 │   │       ├── protocol/         # Wire protocol definitions
 │   │       └── util/             # Utilities
 │   ├── proxy-client/             # Client implementation
@@ -166,14 +172,33 @@ cargo clippy --workspace --all-targets
 ### Run Binaries
 
 ```bash
-# Run server
+# Run server (direct mode)
 cargo run -p proxy-server -- -H 0.0.0.0 -p 1081
+
+# Run server (chain mode - relay to upstream)
+cargo run -p proxy-server -- -H 0.0.0.0 -p 1081 -t upstream.server:1081
+
+# Run server with control encryption
+CONTROL_SESSION_KEY=my-secret-key cargo run -p proxy-server -- -H 0.0.0.0 -p 1081
 
 # Run CLI client
 cargo run -p proxy-client -- -s <server-ip> -c <local-port>
 
 # Run TUI monitor
 cargo run -p proxy-tui
+```
+
+### Server CLI Options
+
+```
+http-proxy-server [OPTIONS]
+
+Options:
+  -H, --host <SERVER_HOST>              Listen address [default: 0.0.0.0]
+  -p, --port <SERVER_PORT>              Listen port [default: 1081] [env: SERVER_PORT]
+  -t, --turely-proxy-server <ADDR>      Upstream relay target [env: TURELY_PROXY_SERVER]
+  -h, --help                            Print help
+  -V, --version                         Print version
 ```
 
 ## Workspace Structure
@@ -206,6 +231,184 @@ cargo run -p proxy-tui
 | `REVERSE_GEO_PROXY` | Reverse geo logic (CN=proxy, overseas=direct) | false |
 | `TURELY_PROXY_SERVER` | Transparent proxy chain target (ip:port) | - |
 | `NEED_CODEC_IP` | Server IPs requiring encryption | SERVER_HOST + 64.23.159.180 |
+
+### Server-specific Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CONTROL_ADMIN_TOKEN` | Admin token for privileged control operations | - |
+| `CONTROL_REQUIRE_ENCRYPTION` | Require encryption for control protocol | true |
+| `CONTROL_SESSION_KEY` | Session key for control protocol encryption | - |
+| `NODE_ID` | Stable node identifier | NODE_ADVERTISE_ADDR |
+| `NODE_ADVERTISE_ADDR` | Address to advertise to other nodes | auto-detected |
+| `NODE_SYNC_INTERVAL_SECS` | Interval for node sync in seconds | 60 |
+
+## Dynamic Relay Configuration
+
+The server supports dynamic relay mode, allowing traffic to be forwarded to upstream proxy servers with load balancing.
+
+### Data Structures
+
+```rust
+// Load balancing algorithms
+pub enum LoadBalanceAlgo {
+    RoundRobin,  // Sequential rotation (default)
+    Random,      // Random selection
+    Weighted,    // Weight-based distribution
+    LeastConn,   // Least connections first
+}
+
+// Upstream target types
+pub enum UpstreamTarget {
+    Node { addr: String, weight: u32 },      // Direct address
+    NodeRef { node_id: String, weight: u32 }, // Reference to registered node
+    GroupRef { group_id: String },            // Reference to node group
+}
+
+// Relay configuration
+pub struct RelayConfig {
+    pub enabled: bool,
+    pub targets: Vec<UpstreamTarget>,
+    pub algo: LoadBalanceAlgo,
+    pub health_check_interval_secs: u64,
+}
+
+// Node group for organizing servers
+pub struct NodeGroup {
+    pub group_id: String,
+    pub name: String,
+    pub node_ids: Vec<String>,
+}
+```
+
+### Control Commands
+
+All commands are sent via the control protocol (ControlClient):
+
+| Command | Description |
+|---------|-------------|
+| `GetRelayConfig` | Get current relay configuration |
+| `SetRelayConfig { config }` | Set entire relay configuration |
+| `SetRelayEnabled { enabled }` | Enable/disable relay mode |
+| `AddRelayTarget { target }` | Add upstream target |
+| `RemoveRelayTarget { index }` | Remove target by index |
+| `SetRelayAlgo { algo }` | Change load balancing algorithm |
+| `GetRelayStatus` | Get relay status with health info |
+| `CreateGroup { group_id, name }` | Create node group |
+| `DeleteGroup { group_id }` | Delete node group |
+| `ListGroups` | List all groups |
+| `AddNodeToGroup { group_id, node_id }` | Add node to group |
+| `RemoveNodeFromGroup { group_id, node_id }` | Remove node from group |
+
+### Usage Example (via ControlClient)
+
+```rust
+use proxy_core::control::{ControlClient, ControlOp, ControlRequest};
+use proxy_core::relay::{LoadBalanceAlgo, RelayConfig, UpstreamTarget};
+
+// Connect to server
+let mut client = ControlClient::connect("127.0.0.1", 1081, None).await?;
+
+// Create a node group
+client.request(ControlRequest {
+    token: None,
+    op: ControlOp::CreateGroup {
+        group_id: "asia".to_string(),
+        name: "Asia Servers".to_string(),
+    },
+}).await?;
+
+// Add nodes to group
+client.request(ControlRequest {
+    token: None,
+    op: ControlOp::AddNode { addr: "10.0.0.1:1081".to_string() },
+}).await?;
+
+client.request(ControlRequest {
+    token: None,
+    op: ControlOp::AddNodeToGroup {
+        group_id: "asia".to_string(),
+        node_id: "10.0.0.1:1081".to_string(),
+    },
+}).await?;
+
+// Configure relay with group reference
+let config = RelayConfig {
+    enabled: true,
+    targets: vec![
+        UpstreamTarget::group_ref("asia"),
+        UpstreamTarget::node_weighted("backup.server:1081", 2),
+    ],
+    algo: LoadBalanceAlgo::Weighted,
+    health_check_interval_secs: 30,
+};
+
+client.request(ControlRequest {
+    token: None,
+    op: ControlOp::SetRelayConfig { config },
+}).await?;
+```
+
+### Configuration Persistence
+
+Relay configuration is automatically persisted to:
+```
+~/.proxy-everything/
+├── nodes.json      # Nodes and groups
+└── relay.json      # Relay configuration
+```
+
+### Backward Compatibility
+
+- `TURELY_PROXY_SERVER` environment variable is now integrated with dynamic relay:
+  - On first start, it's added as initial relay target and relay is enabled
+  - Once relay.json exists with targets, the env var is ignored
+  - You can start with env var and add more targets dynamically later
+- All load balancing algorithms work with the initial target
+
+## Server Configuration (Programmatic)
+
+For programmatic server setup, use `ServerConfig`:
+
+```rust
+use std::sync::Arc;
+use proxy_core::metrics::MetricsStore;
+use proxy_core::nodes::NodeStore;
+use proxy_server::{RelayManager, ServerConfig, run_server_with_listener};
+
+// Create stores
+let nodes = Arc::new(NodeStore::with_default_path());
+let metrics = Arc::new(MetricsStore::with_default_config());
+let relay = Arc::new(RelayManager::with_default_path(nodes.clone()));
+
+// Configure server
+let config = ServerConfig {
+    metrics,
+    nodes,
+    relay,
+    admin_token: Some("secret-admin-token".to_string()),
+    require_control_encryption: true,
+    control_session_key: Some("a-32-byte-long-session-key-here".to_string()),
+    self_node_id: Some("node-1".to_string()),
+};
+
+// Start server with custom listener
+let listener = TcpListener::bind("0.0.0.0:1081").await?;
+let cancel = CancellationToken::new();
+run_server_with_listener(listener, config, cancel, None).await;
+```
+
+### ServerConfig Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `metrics` | `Arc<MetricsStore>` | Connection metrics storage |
+| `nodes` | `Arc<NodeStore>` | Node and group management |
+| `relay` | `Arc<RelayManager>` | Dynamic relay configuration |
+| `admin_token` | `Option<String>` | Token for privileged operations |
+| `require_control_encryption` | `bool` | Require encrypted control protocol |
+| `control_session_key` | `Option<String>` | Key for control protocol encryption |
+| `self_node_id` | `Option<String>` | This server's node identifier |
 
 ## Release Workflow
 

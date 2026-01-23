@@ -6,4 +6,4 @@
 pub mod server;
 
 // Re-export main types
-pub use server::{ServerConfig, ServerError, run_server_with_listener, start_server};
+pub use server::{RelayManager, ServerConfig, ServerError, run_server_with_listener, start_server};

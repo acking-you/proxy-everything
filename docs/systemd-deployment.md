@@ -1,61 +1,43 @@
-# Systemd Deployment (Binary)
+# Systemd Deployment Guide
 
-This guide covers deploying proxy-server as a systemd service without Docker.
+Deploy proxy-server as a native systemd service (without Docker).
 
 ## Prerequisites
 
-- Linux server (Ubuntu/Debian/CentOS/RHEL)
+- Linux server (Ubuntu/Debian/CentOS/RHEL/Arch)
 - Root access
-- Port 1081 (or custom) open in firewall
+- Port 1081 open in firewall
+
+---
 
 ## Quick Start
 
 ### 1. Download Binary
 
 ```bash
-# x86_64
-curl -LO https://github.com/acking-you/proxy-everything/releases/latest/download/http-proxy-server-x86_64-unknown-linux-musl.tar.gz
-tar -xzf http-proxy-server-*.tar.gz
-mv http-proxy-server-*/http-proxy-server /root/
-chmod +x /root/http-proxy-server
+# Detect architecture and download
+ARCH=$(uname -m)
+case $ARCH in
+  x86_64)  TARGET="x86_64-unknown-linux-musl" ;;
+  aarch64) TARGET="aarch64-unknown-linux-musl" ;;
+  *)       echo "Unsupported: $ARCH"; exit 1 ;;
+esac
 
-# ARM64 (aarch64)
-curl -LO https://github.com/acking-you/proxy-everything/releases/latest/download/http-proxy-server-aarch64-unknown-linux-musl.tar.gz
+curl -LO "https://github.com/acking-you/proxy-everything/releases/latest/download/http-proxy-server-${TARGET}.tar.gz"
 tar -xzf http-proxy-server-*.tar.gz
-mv http-proxy-server-*/http-proxy-server /root/
-chmod +x /root/http-proxy-server
+mv http-proxy-server-*/http-proxy-server /usr/local/bin/
+chmod +x /usr/local/bin/http-proxy-server
+rm -rf http-proxy-server-*
 ```
 
-### 2. Run Management Script
+### 2. Create Service
 
 ```bash
-curl -LO https://raw.githubusercontent.com/acking-you/proxy-everything/dev/services/proxy-server-ctl.sh
-chmod +x proxy-server-ctl.sh
-sudo ./proxy-server-ctl.sh
-```
+# Generate random SECRET_KEY
+SECRET_KEY=$(head -c 32 /dev/urandom | base64 | head -c 32)
+echo "Your SECRET_KEY: $SECRET_KEY"
 
-### 3. Choose "Install/Configure"
-
-The script will prompt for:
-- `SECRET_KEY` (required, 32 characters)
-- `PORT` (default: 1081)
-- `Upstream proxy` (optional, for chain mode)
-- `Log level` (default: info)
-
-### 4. Start Service
-
-Choose option 2 to start the service.
-
----
-
-## Manual Installation
-
-If you prefer manual setup:
-
-### Create Service File
-
-```bash
-cat > /etc/systemd/system/proxy-server.service << 'EOF'
+cat > /etc/systemd/system/proxy-server.service << EOF
 [Unit]
 Description=Proxy Server
 After=network.target
@@ -64,9 +46,9 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/root
-Environment="SECRET_KEY=your-32-character-secret-key!!"
+Environment="SECRET_KEY=${SECRET_KEY}"
 Environment="RUST_LOG=info"
-ExecStart=/bin/sh -c 'ulimit -n 65535 && exec /root/http-proxy-server -p 1081'
+ExecStart=/bin/sh -c 'ulimit -n 65535 && exec /usr/local/bin/http-proxy-server -p 1081'
 Restart=on-failure
 RestartSec=5s
 
@@ -75,23 +57,37 @@ WantedBy=multi-user.target
 EOF
 ```
 
-### Enable and Start
+### 3. Start Service
 
 ```bash
 systemctl daemon-reload
 systemctl enable proxy-server
 systemctl start proxy-server
-```
-
-### Check Status
-
-```bash
 systemctl status proxy-server
 ```
 
 ---
 
-## Management Commands
+## Interactive Setup (Alternative)
+
+Use the management script for guided configuration:
+
+```bash
+curl -LO https://raw.githubusercontent.com/acking-you/proxy-everything/dev/services/proxy-server-ctl.sh
+chmod +x proxy-server-ctl.sh
+sudo ./proxy-server-ctl.sh
+```
+
+The script prompts for:
+- `SECRET_KEY` (32 characters)
+- `PORT` (default: 1081)
+- `Upstream proxy` (optional, for relay mode)
+- `CONTROL_SESSION_KEY` (optional, for encrypted control)
+- `Log level` (default: info)
+
+---
+
+## Service Management
 
 | Action | Command |
 |--------|---------|
@@ -99,67 +95,156 @@ systemctl status proxy-server
 | Stop | `systemctl stop proxy-server` |
 | Restart | `systemctl restart proxy-server` |
 | Status | `systemctl status proxy-server` |
-| Logs | `journalctl -u proxy-server -f` |
+| Logs (follow) | `journalctl -u proxy-server -f` |
+| Logs (last 100) | `journalctl -u proxy-server -n 100` |
 | Enable auto-start | `systemctl enable proxy-server` |
 | Disable auto-start | `systemctl disable proxy-server` |
 
 ---
 
-## Configuration Options
+## Configuration
 
 ### Environment Variables
 
+Add to service file under `[Service]` section:
+
+```ini
+Environment="SECRET_KEY=your-32-character-secret-key!!"
+Environment="RUST_LOG=info"
+Environment="TURELY_PROXY_SERVER=upstream:1081"        # Optional: initial relay target
+Environment="CONTROL_SESSION_KEY=another-32-char-key"  # Optional: control encryption
+Environment="CONTROL_ADMIN_TOKEN=admin-token"          # Optional: admin auth
+```
+
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `SECRET_KEY` | Yes | - | 32-byte encryption key |
+| `SECRET_KEY` | Yes | - | 32-character encryption key |
 | `SERVER_PORT` | No | 1081 | Listening port |
-| `TURELY_PROXY_SERVER` | No | - | Upstream proxy (chain mode) |
-| `RUST_LOG` | No | info | Log level (error/warn/info/debug) |
+| `TURELY_PROXY_SERVER` | No | - | Initial upstream (auto-added to relay) |
+| `RUST_LOG` | No | info | Log level: error/warn/info/debug |
+| `CONTROL_SESSION_KEY` | No | - | 32-char key for control encryption |
+| `CONTROL_ADMIN_TOKEN` | No | - | Admin token for privileged ops |
+| `NODE_ID` | No | auto | Stable node identifier |
+| `NODE_ADVERTISE_ADDR` | No | auto | Address for node sync |
 
-### Chain Mode
+### Data Persistence
 
-To forward traffic through another proxy:
+Configuration stored in `~/.proxy-everything/`:
+
+| File | Content |
+|------|---------|
+| `nodes.json` | Registered nodes and groups |
+| `relay.json` | Relay targets and load balancing |
+
+Files persist across restarts. Edit manually or via control protocol.
+
+---
+
+## Advanced Configuration
+
+### Relay Mode with Load Balancing
+
+Start with initial upstream, add more targets at runtime:
+
+```ini
+# In service file
+Environment="TURELY_PROXY_SERVER=primary-server:1081"
+```
+
+Then via control protocol:
+```rust
+AddRelayTarget { target: Node { addr: "backup-server:1081", weight: 1 } }
+SetRelayAlgo { algo: Weighted }
+```
+
+### High Connection Limits
+
+For high-traffic servers, increase file descriptor limits:
 
 ```bash
-Environment="TURELY_PROXY_SERVER=upstream-server:1081"
+# /etc/security/limits.conf
+* soft nofile 65535
+* hard nofile 65535
+```
+
+Or in service file:
+```ini
+LimitNOFILE=65535
+```
+
+### Custom Port
+
+```ini
+Environment="SERVER_PORT=8080"
+ExecStart=/bin/sh -c 'ulimit -n 65535 && exec /usr/local/bin/http-proxy-server -p 8080'
 ```
 
 ---
 
 ## Troubleshooting
 
-### Check if service is running
+### Service Won't Start
 
 ```bash
+# Check status and logs
 systemctl status proxy-server
+journalctl -u proxy-server -n 50 --no-pager
+
+# Common issues:
+# - SECRET_KEY not 32 characters
+# - Port already in use
+# - Binary not found or not executable
 ```
 
-### View logs
+### Port Already in Use
 
 ```bash
-# Last 100 lines
-journalctl -u proxy-server -n 100
-
-# Follow logs
-journalctl -u proxy-server -f
+lsof -i :1081
+kill -9 $(lsof -t -i :1081)
+systemctl start proxy-server
 ```
 
-### Check resource usage
+### Check Resource Usage
 
 ```bash
 # Find PID
 pgrep -f http-proxy-server
 
-# View resources
+# Monitor resources
 top -p $(pgrep -f http-proxy-server)
+
+# Memory details
+cat /proc/$(pgrep -f http-proxy-server)/status | grep -E "^(VmSize|VmRSS|Threads):"
 ```
 
-### Port already in use
+### Update Binary
 
 ```bash
-# Find process using port
-lsof -i :1081
+systemctl stop proxy-server
 
-# Kill if needed
-kill -9 $(lsof -t -i :1081)
+# Re-download (same as Quick Start step 1)
+ARCH=$(uname -m)
+case $ARCH in
+  x86_64)  TARGET="x86_64-unknown-linux-musl" ;;
+  aarch64) TARGET="aarch64-unknown-linux-musl" ;;
+esac
+curl -LO "https://github.com/acking-you/proxy-everything/releases/latest/download/http-proxy-server-${TARGET}.tar.gz"
+tar -xzf http-proxy-server-*.tar.gz
+mv http-proxy-server-*/http-proxy-server /usr/local/bin/
+rm -rf http-proxy-server-*
+
+systemctl start proxy-server
+```
+
+---
+
+## Uninstall
+
+```bash
+systemctl stop proxy-server
+systemctl disable proxy-server
+rm /etc/systemd/system/proxy-server.service
+rm /usr/local/bin/http-proxy-server
+rm -rf ~/.proxy-everything/  # Optional: remove data
+systemctl daemon-reload
 ```

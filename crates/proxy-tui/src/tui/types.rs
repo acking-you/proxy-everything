@@ -6,10 +6,18 @@ use clap::Parser;
 
 use proxy_core::config::SERVER_PORT;
 use proxy_core::metrics::{ConnectionRecord, RealtimeSnapshot, TimeBucket};
-use proxy_core::nodes::NodeInfo;
+use proxy_core::nodes::{NodeGroup, NodeInfo};
+use proxy_core::relay::{LoadBalanceAlgo, RelayConfig, RelayStatus, UpstreamTarget};
 
-pub const TAB_COUNT: usize = 4;
-pub const TAB_TITLES: [&str; TAB_COUNT] = ["Nodes", "Realtime", "Connections", "Top-N"];
+pub const TAB_COUNT: usize = 6;
+pub const TAB_TITLES: [&str; TAB_COUNT] = [
+    "Nodes",
+    "Groups",
+    "Relay",
+    "Realtime",
+    "Connections",
+    "Top-N",
+];
 
 #[derive(Parser, Clone)]
 #[command(author, version, about = "Proxy TUI - Terminal UI for monitoring")]
@@ -38,24 +46,30 @@ pub struct Cli {
 #[derive(Default, Clone)]
 pub struct FetchedData {
     pub nodes: Vec<NodeInfo>,
+    pub groups: Vec<NodeGroup>,
     pub realtime: Option<RealtimeSnapshot>,
     pub connections: Vec<ConnectionRecord>,
     pub buckets: Vec<TimeBucket>,
     pub top_hosts: Vec<(String, u64)>,
     pub top_ips: Vec<(String, u64)>,
+    pub relay_config: Option<RelayConfig>,
+    pub relay_status: Option<RelayStatus>,
 }
 
 /// UI state.
 pub struct AppState {
     pub tab_index: usize,
     pub selected_node: usize,
+    pub selected_group: usize,
+    pub selected_relay_target: usize,
     pub data: Option<FetchedData>,
     pub loading: bool,
     pub error: Option<String>,
-    // Add node dialog
-    pub show_add_dialog: bool,
-    pub add_node_input: String,
-    pub add_node_error: Option<String>,
+    // Input dialog
+    pub show_input_dialog: bool,
+    pub input_mode: Option<InputDialogMode>,
+    pub input_value: String,
+    pub input_error: Option<String>,
     // Server switching
     pub current_server: String,
     pub switching: bool,
@@ -79,11 +93,14 @@ impl AppState {
             current_server: format!("{}:{}", server_host, server_port),
             tab_index: 0,
             selected_node: 0,
+            selected_group: 0,
+            selected_relay_target: 0,
             data: None,
             error: None,
-            show_add_dialog: false,
-            add_node_input: String::new(),
-            add_node_error: None,
+            show_input_dialog: false,
+            input_mode: None,
+            input_value: String::new(),
+            input_error: None,
             switching: false,
             switch_target: None,
             anim_frame: 0,
@@ -97,6 +114,17 @@ impl AppState {
     }
 }
 
+/// Input dialog modes for mutating operations.
+#[derive(Debug, Clone)]
+pub enum InputDialogMode {
+    AddNode,
+    CreateGroup,
+    AddNodeToGroup { group_id: String },
+    RemoveNodeFromGroup { group_id: String },
+    AddRelayTarget,
+    SetRelayConfig,
+}
+
 /// Commands from UI to data fetcher.
 pub enum DataCommand {
     Refresh,
@@ -104,10 +132,26 @@ pub enum DataCommand {
     RemoveNode(String),
     SwitchServer(String),
     QueryGeo(Vec<String>),
+    // Group management
+    CreateGroup { group_id: String, name: String },
+    DeleteGroup(String),
+    AddNodeToGroup { group_id: String, node_id: String },
+    RemoveNodeFromGroup { group_id: String, node_id: String },
+    // Relay configuration
+    SetRelayEnabled(bool),
+    AddRelayTarget(UpstreamTarget),
+    RemoveRelayTarget(usize),
+    SetRelayAlgo(LoadBalanceAlgo),
+    SetRelayConfig(RelayConfig),
     Shutdown,
 }
 
 /// Results from data fetcher.
+///
+/// # Performance
+/// The `Data` variant carries a full snapshot to avoid extra allocations in
+/// the render loop, so we intentionally keep the enum size larger.
+#[allow(clippy::large_enum_variant)]
 pub enum DataResult {
     Data(FetchedData, Option<String>),
     Geo(HashMap<String, String>),

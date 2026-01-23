@@ -22,6 +22,7 @@ pub mod geo;
 pub mod metrics;
 pub mod nodes;
 pub mod protocol;
+pub mod relay;
 pub mod transport;
 pub mod util;
 

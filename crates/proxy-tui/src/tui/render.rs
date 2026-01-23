@@ -12,7 +12,9 @@ use ratatui::{
 
 use proxy_core::geo::country_to_flag;
 
-use super::types::{AppState, FetchedData, TAB_TITLES};
+use proxy_core::relay::UpstreamTarget;
+
+use super::types::{AppState, FetchedData, InputDialogMode, TAB_TITLES};
 use super::utils::format_bytes;
 
 pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -50,10 +52,19 @@ pub fn draw_ui(f: &mut Frame, state: &mut AppState) {
         draw_loading(f, chunks[1], state.anim_frame);
     } else if let Some(data) = &state.data {
         match state.tab_index {
-            0 => draw_nodes_tab(f, chunks[1], data, state.selected_node, &state.geo_cache),
-            1 => draw_realtime_tab(f, chunks[1], data),
-            2 => draw_connections_tab(f, chunks[1], data, state),
-            3 => draw_topn_tab(f, chunks[1], data, state),
+            0 => draw_nodes_tab(
+                f,
+                chunks[1],
+                data,
+                state.selected_node,
+                &state.geo_cache,
+                &state.current_server,
+            ),
+            1 => draw_groups_tab(f, chunks[1], data, state.selected_group),
+            2 => draw_relay_tab(f, chunks[1], data, state.selected_relay_target),
+            3 => draw_realtime_tab(f, chunks[1], data),
+            4 => draw_connections_tab(f, chunks[1], data, state),
+            5 => draw_topn_tab(f, chunks[1], data, state),
             _ => {}
         }
     } else {
@@ -75,7 +86,15 @@ pub fn draw_ui(f: &mut Frame, state: &mut AppState) {
                 "q:quit  ←→:tabs  ↑↓:select  Enter:switch  a:add  d:delete  r:refresh{}",
                 loading_indicator
             ),
-            2 | 3 => format!(
+            1 => format!(
+                "q:quit  ←→:tabs  ↑↓:select  a:create  d:delete  g:add-node  x:rm-node  r:refresh{}",
+                loading_indicator
+            ),
+            2 => format!(
+                "q:quit  ←→:tabs  ↑↓:select  a:add-target  d:remove  e:toggle  l:algo  c:set-config  r:refresh{}",
+                loading_indicator
+            ),
+            4 | 5 => format!(
                 "q:quit  ←→:tabs  /:filter  PgUp/PgDn:page  r:refresh{}",
                 loading_indicator
             ),
@@ -85,8 +104,8 @@ pub fn draw_ui(f: &mut Frame, state: &mut AppState) {
     };
     f.render_widget(Paragraph::new(Line::from(status)), chunks[2]);
 
-    if state.show_add_dialog {
-        draw_add_dialog(f, state);
+    if state.show_input_dialog {
+        draw_input_dialog(f, state);
     }
 
     if state.show_filter {
@@ -138,27 +157,47 @@ fn draw_loading(f: &mut Frame, area: Rect, anim_frame: usize) {
     f.render_widget(loading, area);
 }
 
-fn draw_add_dialog(f: &mut Frame, state: &AppState) {
+fn draw_input_dialog(f: &mut Frame, state: &AppState) {
     let area = f.area();
     let dialog_width = 50;
-    let dialog_height = 7;
+    let dialog_height = 9;
     let x = (area.width.saturating_sub(dialog_width)) / 2;
     let y = (area.height.saturating_sub(dialog_height)) / 2;
     let dialog_area = Rect::new(x, y, dialog_width, dialog_height);
 
     f.render_widget(Clear, dialog_area);
 
+    let (title, help) = match state.input_mode.as_ref() {
+        Some(InputDialogMode::AddNode) => {
+            ("Add Node", "Format: host:port (e.g., 192.168.1.100:1081)")
+        }
+        Some(InputDialogMode::CreateGroup) => ("Create Group", "Format: <group_id> <name>"),
+        Some(InputDialogMode::AddNodeToGroup { .. }) => ("Add Node to Group", "Format: <node_id>"),
+        Some(InputDialogMode::RemoveNodeFromGroup { .. }) => {
+            ("Remove Node from Group", "Format: <node_id>")
+        }
+        Some(InputDialogMode::AddRelayTarget) => (
+            "Add Relay Target",
+            "node <host:port> [weight] | node_ref <id> [weight] | group_ref <group_id>",
+        ),
+        Some(InputDialogMode::SetRelayConfig) => (
+            "Set Relay Config (JSON)",
+            "Example: {\"enabled\":true,\"targets\":[],\"algo\":\"round_robin\",\"health_check_interval_secs\":30}",
+        ),
+        None => ("Input", ""),
+    };
+
     let mut lines = vec![
         Line::from(""),
-        Line::from(format!("  Address: {}_", state.add_node_input)),
+        Line::from(format!("  Input: {}_", state.input_value)),
         Line::from(""),
         Line::from(Span::styled(
-            "  Format: host:port (e.g., 192.168.1.100:1081)",
+            format!("  {}", help),
             Style::default().fg(Color::DarkGray),
         )),
     ];
 
-    if let Some(err) = &state.add_node_error {
+    if let Some(err) = &state.input_error {
         lines.push(Line::from(Span::styled(
             format!("  Error: {}", err),
             Style::default().fg(Color::Red),
@@ -168,7 +207,7 @@ fn draw_add_dialog(f: &mut Frame, state: &AppState) {
     let dialog = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
-            .title("Add Node (Enter to confirm, Esc to cancel)")
+            .title(format!("{title} (Enter to confirm, Esc to cancel)"))
             .style(Style::default().bg(Color::DarkGray)),
     );
     f.render_widget(dialog, dialog_area);
@@ -209,6 +248,7 @@ fn draw_nodes_tab(
     data: &FetchedData,
     selected: usize,
     geo_cache: &HashMap<String, String>,
+    current_server: &str,
 ) {
     if data.nodes.is_empty() {
         let empty = Paragraph::new(vec![
@@ -228,6 +268,11 @@ fn draw_nodes_tab(
         return;
     }
 
+    let mut id_counts: HashMap<&str, usize> = HashMap::new();
+    for node in &data.nodes {
+        *id_counts.entry(node.node_id.as_str()).or_insert(0) += 1;
+    }
+
     let items: Vec<ListItem> = data
         .nodes
         .iter()
@@ -240,19 +285,27 @@ fn draw_nodes_tab(
             } else {
                 Style::default()
             };
+            // Heuristic: self node typically matches the current server address
+            // or appears with multiple addresses under the same node_id.
+            let is_self = node.addr == current_server
+                || id_counts
+                    .get(node.node_id.as_str())
+                    .map(|count| *count > 1)
+                    .unwrap_or(false);
             let marker = if node.node_id == node.addr {
                 "●"
             } else {
                 "○"
             };
+            let self_tag = if is_self { " [self]" } else { "" };
             let ip = node.addr.split(':').next().unwrap_or("");
             let geo_str = geo_cache
                 .get(ip)
                 .map(|code| format!("{} {} ", country_to_flag(code), code))
                 .unwrap_or_default();
             ListItem::new(format!(
-                "{} {}{} ({})",
-                marker, geo_str, node.node_id, node.addr
+                "{} {}{} ({}){}",
+                marker, geo_str, node.node_id, node.addr, self_tag
             ))
             .style(style)
         })
@@ -262,6 +315,190 @@ fn draw_nodes_tab(
         .block(Block::default().borders(Borders::ALL).title("Nodes"))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     f.render_widget(list, area);
+}
+
+fn draw_groups_tab(f: &mut Frame, area: Rect, data: &FetchedData, selected: usize) {
+    if data.groups.is_empty() {
+        let empty = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "  No groups configured",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "  Press 'a' to create a group",
+                Style::default().fg(Color::Yellow),
+            )),
+        ])
+        .block(Block::default().borders(Borders::ALL).title("Groups"));
+        f.render_widget(empty, area);
+        return;
+    }
+
+    let items: Vec<ListItem> = data
+        .groups
+        .iter()
+        .enumerate()
+        .map(|(i, group)| {
+            let style = if i == selected {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let nodes_preview = if group.node_ids.is_empty() {
+                "no nodes".to_string()
+            } else {
+                let preview: Vec<String> = group.node_ids.iter().take(3).cloned().collect();
+                if group.node_ids.len() > 3 {
+                    format!("{}, ...", preview.join(", "))
+                } else {
+                    preview.join(", ")
+                }
+            };
+            ListItem::new(format!(
+                "{} ({}) [{}]",
+                group.group_id, group.name, nodes_preview
+            ))
+            .style(style)
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title("Groups"))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    f.render_widget(list, area);
+}
+
+fn draw_relay_tab(f: &mut Frame, area: Rect, data: &FetchedData, selected: usize) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(5), Constraint::Min(0)])
+        .split(area);
+
+    let (enabled, algo) = if let Some(status) = &data.relay_status {
+        (status.enabled, Some(status.algo))
+    } else if let Some(config) = &data.relay_config {
+        (config.enabled, Some(config.algo))
+    } else {
+        (false, None)
+    };
+
+    let status_text = vec![
+        Line::from(format!("Enabled: {}", enabled)),
+        Line::from(format!(
+            "Algorithm: {}",
+            algo.map(|a| format!("{a:?}"))
+                .unwrap_or_else(|| "-".to_string())
+        )),
+        Line::from(format!(
+            "Targets: {}",
+            data.relay_status
+                .as_ref()
+                .map(|s| s.targets.len())
+                .or_else(|| data.relay_config.as_ref().map(|c| c.targets.len()))
+                .unwrap_or(0)
+        )),
+    ];
+    f.render_widget(
+        Paragraph::new(status_text)
+            .block(Block::default().borders(Borders::ALL).title("Relay Status")),
+        chunks[0],
+    );
+
+    let mut rows: Vec<Row> = Vec::new();
+    if let Some(status) = &data.relay_status {
+        for (idx, target) in status.targets.iter().enumerate() {
+            let style = if idx == selected {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            rows.push(
+                Row::new(vec![
+                    Cell::from(idx.to_string()),
+                    Cell::from(target.addr.clone()),
+                    Cell::from(target.weight.to_string()),
+                    Cell::from(if target.healthy { "yes" } else { "no" }),
+                    Cell::from(target.connections.to_string()),
+                ])
+                .style(style),
+            );
+        }
+    } else if let Some(config) = &data.relay_config {
+        for (idx, target) in config.targets.iter().enumerate() {
+            let style = if idx == selected {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let label = match target {
+                UpstreamTarget::Node { addr, weight } => format!("node:{addr} w={weight}"),
+                UpstreamTarget::NodeRef { node_id, weight } => {
+                    format!("node_ref:{node_id} w={weight}")
+                }
+                UpstreamTarget::GroupRef { group_id } => format!("group_ref:{group_id}"),
+            };
+            rows.push(
+                Row::new(vec![
+                    Cell::from(idx.to_string()),
+                    Cell::from(label),
+                    Cell::from("-"),
+                    Cell::from("-"),
+                    Cell::from("-"),
+                ])
+                .style(style),
+            );
+        }
+    }
+
+    if rows.is_empty() {
+        let empty = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "  No relay targets configured",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "  Press 'a' to add a target",
+                Style::default().fg(Color::Yellow),
+            )),
+        ])
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Relay Targets"),
+        );
+        f.render_widget(empty, chunks[1]);
+        return;
+    }
+
+    let header = Row::new(vec!["#", "Target", "Weight", "Healthy", "Conn"])
+        .style(Style::default().fg(Color::Yellow));
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(4),
+            Constraint::Min(20),
+            Constraint::Length(8),
+            Constraint::Length(8),
+            Constraint::Length(8),
+        ],
+    )
+    .header(header)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Relay Targets"),
+    );
+    f.render_widget(table, chunks[1]);
 }
 
 fn draw_realtime_tab(f: &mut Frame, area: Rect, data: &FetchedData) {

@@ -143,6 +143,175 @@ pub async fn data_fetcher_task(
                     }
                 }
             },
+            DataCommand::CreateGroup { group_id, name } => {
+                let result = create_group(
+                    &current_server,
+                    &cli.token,
+                    &session_key,
+                    &mut client,
+                    group_id,
+                    name,
+                )
+                .await;
+                handle_command_result(
+                    result,
+                    &current_server,
+                    cli.as_ref(),
+                    &session_key,
+                    &mut client,
+                    &data_tx,
+                )
+                .await;
+            }
+            DataCommand::DeleteGroup(group_id) => {
+                let result = delete_group(
+                    &current_server,
+                    &cli.token,
+                    &session_key,
+                    &mut client,
+                    group_id,
+                )
+                .await;
+                handle_command_result(
+                    result,
+                    &current_server,
+                    cli.as_ref(),
+                    &session_key,
+                    &mut client,
+                    &data_tx,
+                )
+                .await;
+            }
+            DataCommand::AddNodeToGroup { group_id, node_id } => {
+                let result = add_node_to_group(
+                    &current_server,
+                    &cli.token,
+                    &session_key,
+                    &mut client,
+                    group_id,
+                    node_id,
+                )
+                .await;
+                handle_command_result(
+                    result,
+                    &current_server,
+                    cli.as_ref(),
+                    &session_key,
+                    &mut client,
+                    &data_tx,
+                )
+                .await;
+            }
+            DataCommand::RemoveNodeFromGroup { group_id, node_id } => {
+                let result = remove_node_from_group(
+                    &current_server,
+                    &cli.token,
+                    &session_key,
+                    &mut client,
+                    group_id,
+                    node_id,
+                )
+                .await;
+                handle_command_result(
+                    result,
+                    &current_server,
+                    cli.as_ref(),
+                    &session_key,
+                    &mut client,
+                    &data_tx,
+                )
+                .await;
+            }
+            DataCommand::SetRelayEnabled(enabled) => {
+                let result = set_relay_enabled(
+                    &current_server,
+                    &cli.token,
+                    &session_key,
+                    &mut client,
+                    enabled,
+                )
+                .await;
+                handle_command_result(
+                    result,
+                    &current_server,
+                    cli.as_ref(),
+                    &session_key,
+                    &mut client,
+                    &data_tx,
+                )
+                .await;
+            }
+            DataCommand::AddRelayTarget(target) => {
+                let result = add_relay_target(
+                    &current_server,
+                    &cli.token,
+                    &session_key,
+                    &mut client,
+                    target,
+                )
+                .await;
+                handle_command_result(
+                    result,
+                    &current_server,
+                    cli.as_ref(),
+                    &session_key,
+                    &mut client,
+                    &data_tx,
+                )
+                .await;
+            }
+            DataCommand::RemoveRelayTarget(index) => {
+                let result = remove_relay_target(
+                    &current_server,
+                    &cli.token,
+                    &session_key,
+                    &mut client,
+                    index,
+                )
+                .await;
+                handle_command_result(
+                    result,
+                    &current_server,
+                    cli.as_ref(),
+                    &session_key,
+                    &mut client,
+                    &data_tx,
+                )
+                .await;
+            }
+            DataCommand::SetRelayAlgo(algo) => {
+                let result =
+                    set_relay_algo(&current_server, &cli.token, &session_key, &mut client, algo)
+                        .await;
+                handle_command_result(
+                    result,
+                    &current_server,
+                    cli.as_ref(),
+                    &session_key,
+                    &mut client,
+                    &data_tx,
+                )
+                .await;
+            }
+            DataCommand::SetRelayConfig(config) => {
+                let result = set_relay_config(
+                    &current_server,
+                    &cli.token,
+                    &session_key,
+                    &mut client,
+                    config,
+                )
+                .await;
+                handle_command_result(
+                    result,
+                    &current_server,
+                    cli.as_ref(),
+                    &session_key,
+                    &mut client,
+                    &data_tx,
+                )
+                .await;
+            }
         }
     }
 }
@@ -154,6 +323,9 @@ async fn switch_server(addr: &str, session_key: &Option<String>) -> Result<Fetch
         .map_err(|e| e.to_string())?;
 
     let nodes = client.list_nodes(None).await.map_err(|e| e.to_string())?;
+    let groups = client.list_groups(None).await.map_err(|e| e.to_string())?;
+    let relay_config = client.get_relay_config(None).await.ok();
+    let relay_status = client.get_relay_status(None).await.ok();
 
     let realtime = client
         .get_realtime_stats(None)
@@ -190,11 +362,14 @@ async fn switch_server(addr: &str, session_key: &Option<String>) -> Result<Fetch
 
     Ok(FetchedData {
         nodes,
+        groups,
         realtime,
         connections,
         buckets,
         top_hosts,
         top_ips,
+        relay_config,
+        relay_status,
     })
 }
 
@@ -219,6 +394,12 @@ async fn fetch_data_from_addr(
         .list_nodes(token.clone())
         .await
         .map_err(|e| e.to_string())?;
+    let groups = c
+        .list_groups(token.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+    let relay_config = c.get_relay_config(token.clone()).await.ok();
+    let relay_status = c.get_relay_status(token.clone()).await.ok();
 
     let realtime = c
         .get_realtime_stats(token.clone())
@@ -257,12 +438,39 @@ async fn fetch_data_from_addr(
 
     Ok(FetchedData {
         nodes,
+        groups,
         realtime,
         connections,
         buckets,
         top_hosts,
         top_ips,
+        relay_config,
+        relay_status,
     })
+}
+
+async fn handle_command_result(
+    result: Result<(), String>,
+    current_server: &str,
+    cli: &Cli,
+    session_key: &Option<String>,
+    client: &mut Option<ControlClient>,
+    data_tx: &mpsc::Sender<Result<DataResult, String>>,
+) {
+    if let Err(e) = result {
+        if data_tx.send(Err(e)).await.is_err() {
+            tracing::warn!("Main loop closed, exiting data fetcher");
+        }
+        return;
+    }
+    let result = fetch_data_from_addr(current_server, &cli.token, session_key, client).await;
+    if data_tx
+        .send(result.map(|d| DataResult::Data(d, Some(current_server.to_string()))))
+        .await
+        .is_err()
+    {
+        tracing::warn!("Main loop closed, exiting data fetcher");
+    }
 }
 
 async fn add_node(
@@ -303,6 +511,200 @@ async fn remove_node(
 
     let mut c = c;
     let result = c.remove_node(token.clone(), node_id.to_string()).await;
+    *client = Some(c);
+    result.map_err(|e| e.to_string())
+}
+
+async fn create_group(
+    server_addr: &str,
+    token: &Option<String>,
+    session_key: &Option<String>,
+    client: &mut Option<ControlClient>,
+    group_id: String,
+    name: String,
+) -> Result<(), String> {
+    let (host, port) = parse_addr(server_addr)?;
+    let c = match client.take() {
+        Some(c) => c,
+        None => ControlClient::connect(&host, port, session_key.clone())
+            .await
+            .map_err(|e| e.to_string())?,
+    };
+
+    let mut c = c;
+    let result = c.create_group(token.clone(), group_id, name).await;
+    *client = Some(c);
+    result.map_err(|e| e.to_string())
+}
+
+async fn delete_group(
+    server_addr: &str,
+    token: &Option<String>,
+    session_key: &Option<String>,
+    client: &mut Option<ControlClient>,
+    group_id: String,
+) -> Result<(), String> {
+    let (host, port) = parse_addr(server_addr)?;
+    let c = match client.take() {
+        Some(c) => c,
+        None => ControlClient::connect(&host, port, session_key.clone())
+            .await
+            .map_err(|e| e.to_string())?,
+    };
+
+    let mut c = c;
+    let result = c.delete_group(token.clone(), group_id).await;
+    *client = Some(c);
+    result.map_err(|e| e.to_string())
+}
+
+async fn add_node_to_group(
+    server_addr: &str,
+    token: &Option<String>,
+    session_key: &Option<String>,
+    client: &mut Option<ControlClient>,
+    group_id: String,
+    node_id: String,
+) -> Result<(), String> {
+    let (host, port) = parse_addr(server_addr)?;
+    let c = match client.take() {
+        Some(c) => c,
+        None => ControlClient::connect(&host, port, session_key.clone())
+            .await
+            .map_err(|e| e.to_string())?,
+    };
+
+    let mut c = c;
+    let result = c.add_node_to_group(token.clone(), group_id, node_id).await;
+    *client = Some(c);
+    result.map_err(|e| e.to_string())
+}
+
+async fn remove_node_from_group(
+    server_addr: &str,
+    token: &Option<String>,
+    session_key: &Option<String>,
+    client: &mut Option<ControlClient>,
+    group_id: String,
+    node_id: String,
+) -> Result<(), String> {
+    let (host, port) = parse_addr(server_addr)?;
+    let c = match client.take() {
+        Some(c) => c,
+        None => ControlClient::connect(&host, port, session_key.clone())
+            .await
+            .map_err(|e| e.to_string())?,
+    };
+
+    let mut c = c;
+    let result = c
+        .remove_node_from_group(token.clone(), group_id, node_id)
+        .await;
+    *client = Some(c);
+    result.map_err(|e| e.to_string())
+}
+
+async fn set_relay_enabled(
+    server_addr: &str,
+    token: &Option<String>,
+    session_key: &Option<String>,
+    client: &mut Option<ControlClient>,
+    enabled: bool,
+) -> Result<(), String> {
+    let (host, port) = parse_addr(server_addr)?;
+    let c = match client.take() {
+        Some(c) => c,
+        None => ControlClient::connect(&host, port, session_key.clone())
+            .await
+            .map_err(|e| e.to_string())?,
+    };
+
+    let mut c = c;
+    let result = c.set_relay_enabled(token.clone(), enabled).await;
+    *client = Some(c);
+    result.map_err(|e| e.to_string())
+}
+
+async fn add_relay_target(
+    server_addr: &str,
+    token: &Option<String>,
+    session_key: &Option<String>,
+    client: &mut Option<ControlClient>,
+    target: proxy_core::relay::UpstreamTarget,
+) -> Result<(), String> {
+    let (host, port) = parse_addr(server_addr)?;
+    let c = match client.take() {
+        Some(c) => c,
+        None => ControlClient::connect(&host, port, session_key.clone())
+            .await
+            .map_err(|e| e.to_string())?,
+    };
+
+    let mut c = c;
+    let result = c.add_relay_target(token.clone(), target).await;
+    *client = Some(c);
+    result.map_err(|e| e.to_string())
+}
+
+async fn remove_relay_target(
+    server_addr: &str,
+    token: &Option<String>,
+    session_key: &Option<String>,
+    client: &mut Option<ControlClient>,
+    index: usize,
+) -> Result<(), String> {
+    let (host, port) = parse_addr(server_addr)?;
+    let c = match client.take() {
+        Some(c) => c,
+        None => ControlClient::connect(&host, port, session_key.clone())
+            .await
+            .map_err(|e| e.to_string())?,
+    };
+
+    let mut c = c;
+    let result = c.remove_relay_target(token.clone(), index).await;
+    *client = Some(c);
+    result.map_err(|e| e.to_string())
+}
+
+async fn set_relay_algo(
+    server_addr: &str,
+    token: &Option<String>,
+    session_key: &Option<String>,
+    client: &mut Option<ControlClient>,
+    algo: proxy_core::relay::LoadBalanceAlgo,
+) -> Result<(), String> {
+    let (host, port) = parse_addr(server_addr)?;
+    let c = match client.take() {
+        Some(c) => c,
+        None => ControlClient::connect(&host, port, session_key.clone())
+            .await
+            .map_err(|e| e.to_string())?,
+    };
+
+    let mut c = c;
+    let result = c.set_relay_algo(token.clone(), algo).await;
+    *client = Some(c);
+    result.map_err(|e| e.to_string())
+}
+
+async fn set_relay_config(
+    server_addr: &str,
+    token: &Option<String>,
+    session_key: &Option<String>,
+    client: &mut Option<ControlClient>,
+    config: proxy_core::relay::RelayConfig,
+) -> Result<(), String> {
+    let (host, port) = parse_addr(server_addr)?;
+    let c = match client.take() {
+        Some(c) => c,
+        None => ControlClient::connect(&host, port, session_key.clone())
+            .await
+            .map_err(|e| e.to_string())?,
+    };
+
+    let mut c = c;
+    let result = c.set_relay_config(token.clone(), config).await;
     *client = Some(c);
     result.map_err(|e| e.to_string())
 }
