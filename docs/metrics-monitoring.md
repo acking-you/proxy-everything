@@ -63,10 +63,8 @@ the same value or requests will return `"unauthorized"`.
 
 ### Build
 
-`proxy-tui` is behind the `tui` feature.
-
 ```bash
-cargo build --release --features tui --bin proxy-tui
+cargo build --release -p proxy-tui
 ```
 
 ### Run
@@ -90,18 +88,48 @@ cargo build --release --features tui --bin proxy-tui
 ### TUI Tabs
 
 - **Nodes**: cluster node list (if node discovery is configured)
+- **Groups**: node group management
+- **Relay**: relay configuration and status
 - **Realtime**: active connections, CPU, memory, uptime + recent minute buckets
 - **Connections**: last 20 connection records
 - **Top-N**: top hosts and top client IPs by traffic
-- **Relay**: relay configuration and status (NEW)
-- **Groups**: node group management (NEW)
 
 ### Keys
 
 - `q` / `Esc` - quit
 - `Tab` / `Right` - next tab
 - `Shift+Tab` / `Left` - previous tab
-- `Up` / `Down` - move selection in Nodes tab
+- `r` - refresh
+- `Up` / `Down` - move selection in Nodes / Groups / Relay
+- `Enter` - switch server (Nodes tab)
+- `/` - filter (Connections / Top-N)
+- `PgUp` / `PgDn` - page (Connections / Top-N)
+
+#### Node management (Nodes tab)
+
+- `a` - add node (input: `host:port`)
+- `d` - delete node (selected)
+  - Self node cannot be removed and will show `[self]`
+
+#### Group management (Groups tab)
+
+- `a` - create group (input: `<group_id> <name>`)
+- `d` - delete group (selected)
+- `g` - add node to group (input: `<node_id>`, typically `host:port`)
+- `x` - remove node from group (input: `<node_id>`)
+
+#### Relay management (Relay tab)
+
+- `e` - enable/disable relay
+- `l` - cycle load-balancing algorithm
+- `a` - add relay target
+  - `node <host:port> [weight]`
+  - `node_ref <node_id> [weight]`
+  - `group_ref <group_id>`
+- `d` - remove selected relay target
+- `c` - set relay config (JSON)
+  - Example:
+    `{"enabled":true,"targets":[{"type":"group_ref","group_id":"asia"}],"algo":"round_robin","health_check_interval_secs":30}`
 
 ---
 

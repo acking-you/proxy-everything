@@ -72,6 +72,7 @@ pub use relay::RelayManager;
 use std::fmt::Debug;
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use snafu::{ResultExt, Snafu};
@@ -83,7 +84,7 @@ use tokio_util::task::TaskTracker;
 use proxy_core::MyAsyncWriteExt;
 use proxy_core::config::{
     CONTROL_ADMIN_TOKEN, CONTROL_REQUIRE_ENCRYPTION, CONTROL_SESSION_KEY, DEFAULT_KEY,
-    NODE_ADVERTISE_ADDR, NODE_ID, NODE_SYNC_INTERVAL_SECS, TURELY_PROXY_SERVER,
+    NODE_ADVERTISE_ADDR, NODE_ID, TURELY_PROXY_SERVER,
 };
 use proxy_core::control::{
     ControlCodec, ControlOp, ControlRequest, ControlResponse, ControlResult, TopNEntry,
@@ -91,6 +92,7 @@ use proxy_core::control::{
 };
 use proxy_core::metrics::{ConnectionRecord, MetricsStore, current_time_ms};
 use proxy_core::nodes::{NodeInfo, NodeStore};
+use tracing::{Instrument, field};
 
 #[derive(Debug, Snafu)]
 pub enum ServerError {
@@ -138,6 +140,18 @@ struct ServerContext {
     require_control_encryption: bool,
     control_session_key: Option<String>,
     self_node_id: Option<String>,
+    /// Monotonic trace id seed used to tag logs for each connection.
+    trace_id_seed: AtomicU64,
+}
+
+impl ServerContext {
+    /// Allocate a per-connection tracing id.
+    ///
+    /// The id is monotonically increasing for easier correlation across logs
+    /// and metrics snapshots.
+    fn allocate_trace_id(&self) -> u64 {
+        self.trace_id_seed.fetch_add(1, Ordering::Relaxed)
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -311,6 +325,7 @@ fn handle_control_request(request: ControlRequest, ctx: Arc<ServerContext>) -> C
                     result: None,
                 };
             }
+            ctx.nodes.unblock_peer(&addr);
             let node = NodeInfo {
                 node_id: addr.clone(),
                 addr,
@@ -338,7 +353,7 @@ fn handle_control_request(request: ControlRequest, ctx: Arc<ServerContext>) -> C
                     result: None,
                 };
             }
-            ctx.nodes.remove_peer(&node_id);
+            ctx.nodes.block_peer(&node_id);
             if let Err(err) = ctx.nodes.save() {
                 tracing::warn!("save nodes failed: {err}");
             }
@@ -360,7 +375,8 @@ fn handle_control_request(request: ControlRequest, ctx: Arc<ServerContext>) -> C
                 result: Some(ControlResult::Nodes { nodes }),
             }
         }
-        ControlOp::SyncNodes { nodes } => {
+        ControlOp::SyncNodes { nodes, blocked } => {
+            ctx.nodes.merge_blocked(blocked);
             ctx.nodes.upsert_peers(nodes);
             if let Err(err) = ctx.nodes.save() {
                 tracing::warn!("save nodes failed: {err}");
@@ -629,6 +645,7 @@ async fn broadcast_nodes(ctx: Arc<ServerContext>) {
         ctx.nodes.update_peer_seen(id);
     }
     let nodes = ctx.nodes.list_all_nodes();
+    let blocked = ctx.nodes.blocked_list();
     for node in nodes.iter() {
         if ctx.self_node_id.as_deref() == Some(node.node_id.as_str()) {
             continue;
@@ -653,6 +670,7 @@ async fn broadcast_nodes(ctx: Arc<ServerContext>) {
             token: ctx.admin_token.clone(),
             op: ControlOp::SyncNodes {
                 nodes: nodes.clone(),
+                blocked: blocked.clone(),
             },
         };
         match client.request(request).await {
@@ -680,41 +698,42 @@ fn control_session_key_fallback() -> (Option<String>, bool) {
     (Some(default_key), true)
 }
 
-fn spawn_node_sync(ctx: Arc<ServerContext>, cancel_token: CancellationToken) {
-    let Some(_) = ctx.self_node_id.as_ref() else {
-        return;
-    };
-    let interval = Duration::from_secs(*NODE_SYNC_INTERVAL_SECS);
-    tokio::spawn(async move {
-        broadcast_nodes(ctx.clone()).await;
-        loop {
-            tokio::select! {
-                _ = tokio::time::sleep(interval) => {
-                    broadcast_nodes(ctx.clone()).await;
-                }
-                _ = cancel_token.cancelled() => {
-                    break;
-                }
-            }
-        }
-    });
-}
-
+/// Handle a new TCP connection with a per-connection tracing span.
+///
+/// This attaches a `trace_id` to all logs emitted during the connection's
+/// lifecycle to simplify troubleshooting.
 async fn handle_connect(
     conn: TcpStream,
     peer_addr: SocketAddr,
     ctx: Arc<ServerContext>,
 ) -> Result<()> {
-    ctx.metrics.inc_active();
-    let result = handle_connect_inner(conn, peer_addr, ctx.clone()).await;
-    ctx.metrics.dec_active();
-    result
+    let trace_id = ctx.allocate_trace_id();
+    let span = tracing::info_span!(
+        "proxy_connection",
+        trace_id,
+        peer = %peer_addr,
+        dest = field::Empty,
+        mode = field::Empty
+    );
+    async move {
+        tracing::info!("connection accepted");
+        ctx.metrics.inc_active();
+        let result = handle_connect_inner(conn, peer_addr, ctx.clone(), trace_id).await;
+        ctx.metrics.dec_active();
+        if let Err(err) = &result {
+            tracing::error!("connection error: {err}");
+        }
+        result
+    }
+    .instrument(span)
+    .await
 }
 
 async fn handle_connect_inner(
     conn: TcpStream,
     peer_addr: SocketAddr,
     ctx: Arc<ServerContext>,
+    trace_id: u64,
 ) -> Result<()> {
     let started_at_ms = current_time_ms();
     let peer_ip = peer_addr.ip().to_string();
@@ -742,11 +761,11 @@ async fn handle_connect_inner(
     let relay_target = ctx.relay.select();
 
     if let Some(relay_server) = relay_target {
-        let relay_stream = TcpStream::connect(&relay_server)
-            .await
-            .context(IoSnafu {
-                detail: format!("Connect to relay_server:{}", relay_server),
-            })?;
+        tracing::Span::current().record("mode", "relay");
+        tracing::Span::current().record("dest", field::display(&relay_server));
+        let relay_stream = TcpStream::connect(&relay_server).await.context(IoSnafu {
+            detail: format!("Connect to relay_server:{}", relay_server),
+        })?;
         ctx.relay.on_connect(&relay_server);
         let (r, w) = relay_stream.into_split();
         let (server_reader, mut server_writer) = (AsyncReader::new(r), AsyncWriter::new(w));
@@ -772,6 +791,7 @@ async fn handle_connect_inner(
             &format!("relay:{}", relay_server),
             0,
             started_at_ms,
+            trace_id,
             &result,
         );
         return result.map(|_| ());
@@ -802,6 +822,8 @@ async fn handle_connect_inner(
         dest_host = header.host.clone();
         dest_port = header.port;
         if is_control_target(&header.host, header.port) {
+            tracing::Span::current().record("mode", "control");
+            tracing::Span::current().record("dest", field::display(&header.host));
             let session_key = header.key.as_ref().map(|k| k.as_ref());
             if ctx.require_control_encryption && session_key.is_none() {
                 tracing::warn!("control connection rejected: encryption required");
@@ -825,6 +847,11 @@ async fn handle_connect_inner(
     let header = header.ok_or_else(|| ServerError::Decryption {
         detail: "decrypt header failed".to_string(),
     })?;
+    tracing::Span::current().record("mode", "direct");
+    tracing::Span::current().record(
+        "dest",
+        field::display(format!("{}:{}", header.host, header.port)),
+    );
     let dest_stream = TcpStream::connect((header.host.as_str(), header.port))
         .await
         .context(IoSnafu {
@@ -851,6 +878,7 @@ async fn handle_connect_inner(
         &dest_host,
         dest_port,
         started_at_ms,
+        trace_id,
         &result,
     );
     result.map(|_| ())
@@ -862,6 +890,7 @@ fn record_connection(
     dest_host: &str,
     dest_port: u16,
     started_at_ms: i64,
+    trace_id: u64,
     result: &Result<TransferStats>,
 ) {
     let stats = match result {
@@ -881,7 +910,7 @@ fn record_connection(
     let duration_ms = (ended_at_ms - started_at_ms).max(0);
     let error_msg = result.as_ref().err().map(|e| e.to_string());
     let record = ConnectionRecord {
-        id: 0,
+        id: trace_id,
         client_ip: peer_ip.to_string(),
         dest_host: dest_host.to_string(),
         dest_port,
@@ -1028,9 +1057,10 @@ pub async fn run_server_with_listener(
         require_control_encryption: config.require_control_encryption,
         control_session_key: config.control_session_key,
         self_node_id: config.self_node_id,
+        trace_id_seed: AtomicU64::new(1),
     });
 
-    spawn_node_sync(ctx.clone(), cancel_token.clone());
+    // Node sync is change-driven; no periodic background sync.
 
     loop {
         tokio::select! {
@@ -1040,9 +1070,7 @@ pub async fn run_server_with_listener(
                         let ctx = ctx.clone();
                         let token = cancel_token.clone();
                         let task = async move {
-                            if let Err(e) = handle_connect(socket, peer_addr, ctx).await {
-                                tracing::error!("connection error: {e}");
-                            }
+                            let _ = handle_connect(socket, peer_addr, ctx).await;
                         };
                         let wrapped_task = async move {
                             tokio::select! {

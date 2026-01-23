@@ -166,6 +166,8 @@ pub struct ProxyContext<'a> {
     buffer: &'a [u8],
     #[cfg(feature = "auto-proxy")]
     sender: Option<&'a SenderChan>,
+    /// Force all connections to go through proxy, bypassing auto-proxy rules.
+    force_proxy: bool,
     /// TODO: let this stream abstract
     stream: TcpStream,
 }
@@ -573,6 +575,7 @@ pub struct ClientProxyContext {
     msg_key: Option<String>,
     #[cfg(feature = "auto-proxy")]
     sender: Option<SenderChan>,
+    force_proxy: bool,
 }
 
 #[inline]
@@ -619,6 +622,7 @@ pub async fn handle_client(mut context: ClientProxyContext) -> Result<()> {
         buffer: header,
         #[cfg(feature = "auto-proxy")]
         sender: context.sender.as_ref(),
+        force_proxy: context.force_proxy,
         stream: context.stream,
     };
 
@@ -679,6 +683,7 @@ pub async fn run_client_with_listener<const NEED_CODEC: bool>(
     config: Option<ClientConfig>,
 ) {
     let enable_auto_proxy = config.as_ref().map(|c| c.enable_auto_proxy).unwrap_or(true);
+    let force_proxy = !enable_auto_proxy;
     let cache_dir = config.as_ref().and_then(|c| c.cache_dir.clone());
 
     #[cfg(feature = "auto-proxy")]
@@ -716,6 +721,7 @@ pub async fn run_client_with_listener<const NEED_CODEC: bool>(
                     msg_key: if NEED_CODEC { Some(gen_random_key()) } else { None },
                     #[cfg(feature = "auto-proxy")]
                     sender,
+                    force_proxy,
                 });
                 let wrapped_task = async move {
                     tokio::select! {
@@ -736,10 +742,15 @@ pub async fn run_client_with_listener<const NEED_CODEC: bool>(
     }
 }
 
+/// Start client with optional runtime configuration.
+///
+/// This is useful when callers want to explicitly toggle auto-proxy behavior
+/// without relying on environment variables.
 #[tracing::instrument]
-pub async fn start_client<const NEED_CODEC: bool>(
+pub async fn start_client_with_config<const NEED_CODEC: bool>(
     host: impl AsRef<str> + Debug,
     port: u16,
+    config: Option<ClientConfig>,
 ) -> Result<()> {
     let listener = TcpListener::bind((host.as_ref(), port))
         .await
@@ -754,9 +765,17 @@ pub async fn start_client<const NEED_CODEC: bool>(
     let cancel_token = manager.cancellation_token();
     let tracker = manager.tracker().clone();
 
-    run_client_with_listener::<NEED_CODEC>(listener, cancel_token, Some(tracker), None).await;
+    run_client_with_listener::<NEED_CODEC>(listener, cancel_token, Some(tracker), config).await;
 
     tracing::info!("graceful shutdown, waiting for tasks to complete...");
     manager.wait().await;
     Ok(())
+}
+
+#[tracing::instrument]
+pub async fn start_client<const NEED_CODEC: bool>(
+    host: impl AsRef<str> + Debug,
+    port: u16,
+) -> Result<()> {
+    start_client_with_config::<NEED_CODEC>(host, port, None).await
 }

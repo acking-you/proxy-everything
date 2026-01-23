@@ -171,37 +171,56 @@ impl HttpProxierProvider {
     ) -> super::Result<(TcpStream, bool, Option<Cow<'static, str>>)> {
         // if we don't have ssl,only use proxy when host is part of `PROXY_KEYWORDS`
         if !self.has_ssl {
-            let proxy_keywords = runtime::proxy_keywords();
-            let has_proxy_status = proxy_keywords
-                .iter()
-                .find(|e| self.host.contains(&e.name_server));
             let server_host = runtime::server_host();
-            let (mut server_stream, msg_key) = match has_proxy_status {
-                Some(proxy_status) => {
-                    let server_ip = proxy_status.proxy_server.as_ref().unwrap_or(&server_host);
-                    let msg_key = change_msg_key(server_ip.as_str(), self.msg_key.clone());
-                    (
-                        get_tcp_proxy_stream(
-                            self.host.as_str(),
-                            self.port,
-                            server_ip,
-                            runtime::server_port(),
-                            msg_key.clone(),
-                            "[PROXY] we will proxy http",
-                        )
-                        .await?,
-                        msg_key,
-                    )
-                }
-                None => (
-                    get_tcp_stream(
-                        &self.host,
+            let (mut server_stream, need_proxy, msg_key) = if context.force_proxy {
+                let msg_key = change_msg_key(server_host.as_str(), self.msg_key.clone());
+                (
+                    get_tcp_proxy_stream(
+                        self.host.as_str(),
                         self.port,
-                        "[NOPROXY-HTTP] we will start connect http server directly",
+                        &server_host,
+                        runtime::server_port(),
+                        msg_key.clone(),
+                        "[PROXY] auto-proxy disabled; force proxy",
                     )
                     .await?,
-                    self.msg_key.clone(),
-                ),
+                    true,
+                    msg_key,
+                )
+            } else {
+                let proxy_keywords = runtime::proxy_keywords();
+                let has_proxy_status = proxy_keywords
+                    .iter()
+                    .find(|e| self.host.contains(&e.name_server));
+                match has_proxy_status {
+                    Some(proxy_status) => {
+                        let server_ip = proxy_status.proxy_server.as_ref().unwrap_or(&server_host);
+                        let msg_key = change_msg_key(server_ip.as_str(), self.msg_key.clone());
+                        (
+                            get_tcp_proxy_stream(
+                                self.host.as_str(),
+                                self.port,
+                                server_ip,
+                                runtime::server_port(),
+                                msg_key.clone(),
+                                "[PROXY] we will proxy http",
+                            )
+                            .await?,
+                            true,
+                            msg_key,
+                        )
+                    }
+                    None => (
+                        get_tcp_stream(
+                            &self.host,
+                            self.port,
+                            "[NOPROXY-HTTP] we will start connect http server directly",
+                        )
+                        .await?,
+                        false,
+                        self.msg_key.clone(),
+                    ),
+                }
             };
             server_stream
                 .write_all(context.buffer)
@@ -212,7 +231,7 @@ impl HttpProxierProvider {
                 })
                 .context(HttpProxySnafu)?;
 
-            Ok((server_stream, has_proxy_status.is_some(), msg_key))
+            Ok((server_stream, need_proxy, msg_key))
         } else {
             // HTTPS CONNECT: respond with 200 OK first
             context

@@ -388,7 +388,7 @@ let config = ServerConfig {
     relay,
     admin_token: Some("secret-admin-token".to_string()),
     require_control_encryption: true,
-    control_session_key: Some("32-byte-session-key-here!!!!!!!".to_string()),
+    control_session_key: Some("a-32-byte-long-session-key-here".to_string()),
     self_node_id: Some("node-1".to_string()),
 };
 

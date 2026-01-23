@@ -57,9 +57,7 @@ async fn send_op(
     client: &mut ControlClient,
     op: ControlOp,
 ) -> Result<ControlResult, proxy_core::control::ControlError> {
-    let resp = client
-        .request(ControlRequest { token: None, op })
-        .await?;
+    let resp = client.request(ControlRequest { token: None, op }).await?;
     if resp.ok {
         Ok(resp.result.unwrap())
     } else {
@@ -80,7 +78,9 @@ async fn test_relay_config_crud() {
     let mut client = ControlClient::connect(host, port, None).await.unwrap();
 
     // Get initial config (should be disabled)
-    let result = send_op(&mut client, ControlOp::GetRelayConfig).await.unwrap();
+    let result = send_op(&mut client, ControlOp::GetRelayConfig)
+        .await
+        .unwrap();
     if let ControlResult::RelayConfig { config } = result {
         assert!(!config.enabled);
         assert!(config.targets.is_empty());
@@ -95,7 +95,9 @@ async fn test_relay_config_crud() {
         .unwrap();
 
     // Verify target was added
-    let result = send_op(&mut client, ControlOp::GetRelayConfig).await.unwrap();
+    let result = send_op(&mut client, ControlOp::GetRelayConfig)
+        .await
+        .unwrap();
     if let ControlResult::RelayConfig { config } = result {
         assert_eq!(config.targets.len(), 1);
     } else {
@@ -108,7 +110,9 @@ async fn test_relay_config_crud() {
         .unwrap();
 
     // Verify enabled
-    let result = send_op(&mut client, ControlOp::GetRelayStatus).await.unwrap();
+    let result = send_op(&mut client, ControlOp::GetRelayStatus)
+        .await
+        .unwrap();
     if let ControlResult::RelayStatus { status } = result {
         assert!(status.enabled);
         assert_eq!(status.targets.len(), 1);
@@ -126,7 +130,9 @@ async fn test_relay_config_crud() {
     .await
     .unwrap();
 
-    let result = send_op(&mut client, ControlOp::GetRelayConfig).await.unwrap();
+    let result = send_op(&mut client, ControlOp::GetRelayConfig)
+        .await
+        .unwrap();
     if let ControlResult::RelayConfig { config } = result {
         assert_eq!(config.algo, LoadBalanceAlgo::Random);
     } else {
@@ -138,7 +144,9 @@ async fn test_relay_config_crud() {
         .await
         .unwrap();
 
-    let result = send_op(&mut client, ControlOp::GetRelayConfig).await.unwrap();
+    let result = send_op(&mut client, ControlOp::GetRelayConfig)
+        .await
+        .unwrap();
     if let ControlResult::RelayConfig { config } = result {
         assert!(config.targets.is_empty());
     } else {
@@ -178,7 +186,9 @@ async fn test_set_full_relay_config() {
     .unwrap();
 
     // Verify
-    let result = send_op(&mut client, ControlOp::GetRelayConfig).await.unwrap();
+    let result = send_op(&mut client, ControlOp::GetRelayConfig)
+        .await
+        .unwrap();
     if let ControlResult::RelayConfig { config: got } = result {
         assert!(got.enabled);
         assert_eq!(got.targets.len(), 2);
@@ -315,7 +325,9 @@ async fn test_relay_with_group_ref() {
         .unwrap();
 
     // Verify config
-    let result = send_op(&mut client, ControlOp::GetRelayConfig).await.unwrap();
+    let result = send_op(&mut client, ControlOp::GetRelayConfig)
+        .await
+        .unwrap();
     if let ControlResult::RelayConfig { config } = result {
         assert_eq!(config.targets.len(), 1);
         match &config.targets[0] {

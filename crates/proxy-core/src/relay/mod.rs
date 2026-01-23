@@ -5,7 +5,10 @@
 
 mod balancer;
 
-pub use balancer::{LoadBalancer, LeastConnBalancer, RandomBalancer, RoundRobinBalancer, WeightedBalancer, create_balancer};
+pub use balancer::{
+    LeastConnBalancer, LoadBalancer, RandomBalancer, RoundRobinBalancer, WeightedBalancer,
+    create_balancer,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -34,19 +37,30 @@ pub enum UpstreamTarget {
 
 impl UpstreamTarget {
     pub fn node(addr: impl Into<String>) -> Self {
-        Self::Node { addr: addr.into(), weight: 1 }
+        Self::Node {
+            addr: addr.into(),
+            weight: 1,
+        }
     }
 
     pub fn node_weighted(addr: impl Into<String>, weight: u32) -> Self {
-        Self::Node { addr: addr.into(), weight }
+        Self::Node {
+            addr: addr.into(),
+            weight,
+        }
     }
 
     pub fn node_ref(node_id: impl Into<String>) -> Self {
-        Self::NodeRef { node_id: node_id.into(), weight: 1 }
+        Self::NodeRef {
+            node_id: node_id.into(),
+            weight: 1,
+        }
     }
 
     pub fn group_ref(group_id: impl Into<String>) -> Self {
-        Self::GroupRef { group_id: group_id.into() }
+        Self::GroupRef {
+            group_id: group_id.into(),
+        }
     }
 }
 

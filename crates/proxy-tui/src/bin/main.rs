@@ -12,8 +12,8 @@ use crossterm::{
 };
 use proxy_core::config::{CONTROL_SESSION_KEY, DEFAULT_SECRET_KEY};
 use proxy_tui::tui::{
-    AppState, Cli, DataCommand, DataResult, TAB_COUNT, TerminalGuard, data_fetcher_task, draw_ui,
-    handle_add_dialog_input,
+    AppState, Cli, DataCommand, DataResult, InputDialogMode, TAB_COUNT, TerminalGuard,
+    data_fetcher_task, draw_ui, handle_input_dialog_input,
 };
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
@@ -99,12 +99,31 @@ async fn main() -> std::io::Result<()> {
                             state.switching = false;
                             state.switch_target = None;
                             state.selected_node = 0;
+                            state.selected_group = 0;
+                            state.selected_relay_target = 0;
                         } else if !state.switching {
                             // Normal refresh: update data without changing current_server
                             state.data = Some(data);
                         }
                     } else {
                         state.data = Some(data);
+                    }
+                    if let Some(ref data) = state.data {
+                        if state.selected_node >= data.nodes.len() {
+                            state.selected_node = data.nodes.len().saturating_sub(1);
+                        }
+                        if state.selected_group >= data.groups.len() {
+                            state.selected_group = data.groups.len().saturating_sub(1);
+                        }
+                        let relay_len = data
+                            .relay_status
+                            .as_ref()
+                            .map(|s| s.targets.len())
+                            .or_else(|| data.relay_config.as_ref().map(|c| c.targets.len()))
+                            .unwrap_or(0);
+                        if state.selected_relay_target >= relay_len {
+                            state.selected_relay_target = relay_len.saturating_sub(1);
+                        }
                     }
                     state.loading = false;
                     state.error = None;
@@ -133,8 +152,8 @@ async fn main() -> std::io::Result<()> {
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
-            if state.show_add_dialog {
-                handle_add_dialog_input(&mut state, key.code, &cmd_tx).await;
+            if state.show_input_dialog {
+                handle_input_dialog_input(&mut state, key.code, &cmd_tx).await;
             } else if state.show_filter {
                 match key.code {
                     KeyCode::Esc => {
@@ -171,28 +190,88 @@ async fn main() -> std::io::Result<()> {
                         state.tab_index = (state.tab_index + TAB_COUNT - 1) % TAB_COUNT;
                         state.page_offset = 0;
                     }
-                    KeyCode::Up => {
-                        if state.selected_node > 0 {
-                            state.selected_node -= 1;
+                    KeyCode::Up => match state.tab_index {
+                        0 => {
+                            if state.selected_node > 0 {
+                                state.selected_node -= 1;
+                            }
                         }
-                    }
+                        1 => {
+                            if state.selected_group > 0 {
+                                state.selected_group -= 1;
+                            }
+                        }
+                        2 => {
+                            if state.selected_relay_target > 0 {
+                                state.selected_relay_target -= 1;
+                            }
+                        }
+                        _ => {}
+                    },
                     KeyCode::Down => {
-                        if let Some(data) = &state.data
-                            && state.selected_node + 1 < data.nodes.len()
-                        {
-                            state.selected_node += 1;
+                        if let Some(data) = &state.data {
+                            match state.tab_index {
+                                0 => {
+                                    if state.selected_node + 1 < data.nodes.len() {
+                                        state.selected_node += 1;
+                                    }
+                                }
+                                1 => {
+                                    if state.selected_group + 1 < data.groups.len() {
+                                        state.selected_group += 1;
+                                    }
+                                }
+                                2 => {
+                                    if let Some(status) = &data.relay_status {
+                                        if state.selected_relay_target + 1 < status.targets.len() {
+                                            state.selected_relay_target += 1;
+                                        }
+                                    } else if let Some(config) = &data.relay_config
+                                        && state.selected_relay_target + 1 < config.targets.len()
+                                    {
+                                        state.selected_relay_target += 1;
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
                     }
                     KeyCode::Char('a') if state.tab_index == 0 => {
-                        state.show_add_dialog = true;
-                        state.add_node_input.clear();
-                        state.add_node_error = None;
+                        state.show_input_dialog = true;
+                        state.input_mode = Some(InputDialogMode::AddNode);
+                        state.input_value.clear();
+                        state.input_error = None;
+                    }
+                    KeyCode::Char('a') if state.tab_index == 1 => {
+                        state.show_input_dialog = true;
+                        state.input_mode = Some(InputDialogMode::CreateGroup);
+                        state.input_value.clear();
+                        state.input_error = None;
+                    }
+                    KeyCode::Char('a') if state.tab_index == 2 => {
+                        state.show_input_dialog = true;
+                        state.input_mode = Some(InputDialogMode::AddRelayTarget);
+                        state.input_value.clear();
+                        state.input_error = None;
                     }
                     KeyCode::Char('d') if state.tab_index == 0 => {
                         if let Some(data) = &state.data
                             && let Some(node) = data.nodes.get(state.selected_node)
                         {
-                            if cmd_tx
+                            // Prevent removing the self node to avoid confusing behavior.
+                            let is_self = node.addr == state.current_server
+                                || data
+                                    .nodes
+                                    .iter()
+                                    .filter(|n| n.node_id == node.node_id)
+                                    .count()
+                                    > 1;
+                            if is_self {
+                                state.error = Some(
+                                    "Cannot remove self node (use NODE_ADVERTISE_ADDR to change)"
+                                        .to_string(),
+                                );
+                            } else if cmd_tx
                                 .send(DataCommand::RemoveNode(node.node_id.clone()))
                                 .await
                                 .is_err()
@@ -203,6 +282,113 @@ async fn main() -> std::io::Result<()> {
                                 state.loading = true;
                             }
                         }
+                    }
+                    KeyCode::Char('d') if state.tab_index == 1 => {
+                        if let Some(data) = &state.data
+                            && let Some(group) = data.groups.get(state.selected_group)
+                        {
+                            if cmd_tx
+                                .send(DataCommand::DeleteGroup(group.group_id.clone()))
+                                .await
+                                .is_err()
+                            {
+                                state.error =
+                                    Some("Failed to send delete group command".to_string());
+                            } else {
+                                state.loading = true;
+                            }
+                        }
+                    }
+                    KeyCode::Char('d') if state.tab_index == 2 => {
+                        if cmd_tx
+                            .send(DataCommand::RemoveRelayTarget(state.selected_relay_target))
+                            .await
+                            .is_err()
+                        {
+                            state.error =
+                                Some("Failed to send remove relay target command".to_string());
+                        } else {
+                            state.loading = true;
+                        }
+                    }
+                    KeyCode::Char('g') if state.tab_index == 1 => {
+                        if let Some(data) = &state.data
+                            && let Some(group) = data.groups.get(state.selected_group)
+                        {
+                            state.show_input_dialog = true;
+                            state.input_mode = Some(InputDialogMode::AddNodeToGroup {
+                                group_id: group.group_id.clone(),
+                            });
+                            state.input_value.clear();
+                            state.input_error = None;
+                        }
+                    }
+                    KeyCode::Char('x') if state.tab_index == 1 => {
+                        if let Some(data) = &state.data
+                            && let Some(group) = data.groups.get(state.selected_group)
+                        {
+                            state.show_input_dialog = true;
+                            state.input_mode = Some(InputDialogMode::RemoveNodeFromGroup {
+                                group_id: group.group_id.clone(),
+                            });
+                            state.input_value.clear();
+                            state.input_error = None;
+                        }
+                    }
+                    KeyCode::Char('e') if state.tab_index == 2 => {
+                        if let Some(data) = &state.data {
+                            let enabled = data
+                                .relay_config
+                                .as_ref()
+                                .map(|c| c.enabled)
+                                .or_else(|| data.relay_status.as_ref().map(|s| s.enabled))
+                                .unwrap_or(false);
+                            if cmd_tx
+                                .send(DataCommand::SetRelayEnabled(!enabled))
+                                .await
+                                .is_err()
+                            {
+                                state.error =
+                                    Some("Failed to send relay enable command".to_string());
+                            } else {
+                                state.loading = true;
+                            }
+                        }
+                    }
+                    KeyCode::Char('l') if state.tab_index == 2 => {
+                        if let Some(data) = &state.data {
+                            let algo = data
+                                .relay_config
+                                .as_ref()
+                                .map(|c| c.algo)
+                                .or_else(|| data.relay_status.as_ref().map(|s| s.algo))
+                                .unwrap_or(proxy_core::relay::LoadBalanceAlgo::RoundRobin);
+                            let next = match algo {
+                                proxy_core::relay::LoadBalanceAlgo::RoundRobin => {
+                                    proxy_core::relay::LoadBalanceAlgo::Random
+                                }
+                                proxy_core::relay::LoadBalanceAlgo::Random => {
+                                    proxy_core::relay::LoadBalanceAlgo::Weighted
+                                }
+                                proxy_core::relay::LoadBalanceAlgo::Weighted => {
+                                    proxy_core::relay::LoadBalanceAlgo::LeastConn
+                                }
+                                proxy_core::relay::LoadBalanceAlgo::LeastConn => {
+                                    proxy_core::relay::LoadBalanceAlgo::RoundRobin
+                                }
+                            };
+                            if cmd_tx.send(DataCommand::SetRelayAlgo(next)).await.is_err() {
+                                state.error = Some("Failed to send relay algo command".to_string());
+                            } else {
+                                state.loading = true;
+                            }
+                        }
+                    }
+                    KeyCode::Char('c') if state.tab_index == 2 => {
+                        state.show_input_dialog = true;
+                        state.input_mode = Some(InputDialogMode::SetRelayConfig);
+                        state.input_value.clear();
+                        state.input_error = None;
                     }
                     KeyCode::Enter if state.tab_index == 0 => {
                         if let Some(data) = &state.data
@@ -229,13 +415,13 @@ async fn main() -> std::io::Result<()> {
                             state.loading = true;
                         }
                     }
-                    KeyCode::Char('/') if state.tab_index == 2 || state.tab_index == 3 => {
+                    KeyCode::Char('/') if state.tab_index == 4 || state.tab_index == 5 => {
                         state.show_filter = true;
                     }
-                    KeyCode::PageUp if state.tab_index == 2 || state.tab_index == 3 => {
+                    KeyCode::PageUp if state.tab_index == 4 || state.tab_index == 5 => {
                         state.page_offset = state.page_offset.saturating_sub(state.page_size);
                     }
-                    KeyCode::PageDown if state.tab_index == 2 || state.tab_index == 3 => {
+                    KeyCode::PageDown if state.tab_index == 4 || state.tab_index == 5 => {
                         state.page_offset += state.page_size;
                     }
                     _ => {}

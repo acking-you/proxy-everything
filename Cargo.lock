@@ -1966,6 +1966,7 @@ dependencies = [
  "crossterm",
  "proxy-core",
  "ratatui",
+ "serde_json",
  "tokio",
  "tracing",
 ]

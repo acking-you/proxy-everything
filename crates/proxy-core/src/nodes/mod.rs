@@ -19,8 +19,8 @@
 //! │                                                                         │
 //! │  Sync Protocol:                                                         │
 //! │  1. Node starts → loads nodes.json                                      │
-//! │  2. Periodically broadcasts SyncNodes to all known peers                │
-//! │  3. Receives SyncNodes → merges peer list                               │
+//! │  2. Change events broadcast SyncNodes to all known peers                │
+//! │  3. Receives SyncNodes → merges peer list + blocked tombstones          │
 //! │  4. Saves updated list to nodes.json (atomic write)                     │
 //! └─────────────────────────────────────────────────────────────────────────┘
 //! ```
@@ -32,11 +32,12 @@
 //!   "version": 1,
 //!   "self": { "node_id": "...", "addr": "...", "started_at_ms": ... },
 //!   "peers": [{ "node_id": "...", "addr": "...", "last_seen_ms": ... }],
+//!   "blocked": ["node-id-a", "node-id-b"],
 //!   "updated_at_ms": ...
 //! }
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -77,6 +78,8 @@ struct NodesFile {
     peers: Vec<NodeInfo>,
     #[serde(default)]
     groups: Vec<NodeGroup>,
+    #[serde(default)]
+    blocked: Vec<String>,
     updated_at_ms: i64,
 }
 
@@ -87,6 +90,7 @@ impl Default for NodesFile {
             self_node: None,
             peers: Vec::new(),
             groups: Vec::new(),
+            blocked: Vec::new(),
             updated_at_ms: current_time_ms(),
         }
     }
@@ -99,6 +103,8 @@ pub struct NodeStore {
     self_addrs: RwLock<Vec<String>>,
     peers: RwLock<HashMap<String, NodeInfo>>,
     groups: RwLock<HashMap<String, NodeGroup>>,
+    /// Blocked peer node IDs to prevent re-sync from re-adding removed nodes.
+    blocked: RwLock<HashSet<String>>,
     last_hash: RwLock<u64>,
 }
 
@@ -111,6 +117,7 @@ impl NodeStore {
             self_addrs: RwLock::new(Vec::new()),
             peers: RwLock::new(HashMap::new()),
             groups: RwLock::new(HashMap::new()),
+            blocked: RwLock::new(HashSet::new()),
             last_hash: RwLock::new(0),
         }
     }
@@ -157,6 +164,10 @@ impl NodeStore {
             groups.insert(group.group_id.clone(), group);
         }
 
+        let mut blocked = self.blocked.write().unwrap();
+        blocked.clear();
+        blocked.extend(file.blocked);
+
         Ok(())
     }
 
@@ -200,11 +211,13 @@ impl NodeStore {
         let self_node = self.self_node.read().unwrap().clone();
         let peers: Vec<_> = self.peers.read().unwrap().values().cloned().collect();
         let groups: Vec<_> = self.groups.read().unwrap().values().cloned().collect();
+        let blocked: Vec<_> = self.blocked.read().unwrap().iter().cloned().collect();
         NodesFile {
             version: 2,
             self_node,
             peers,
             groups,
+            blocked,
             updated_at_ms: current_time_ms(),
         }
     }
@@ -259,6 +272,9 @@ impl NodeStore {
         if self.is_self_addr(&peer.addr) {
             return;
         }
+        if self.blocked.read().unwrap().contains(&peer.node_id) {
+            return;
+        }
         self.peers
             .write()
             .unwrap()
@@ -269,10 +285,14 @@ impl NodeStore {
     pub fn upsert_peers(&self, peers: Vec<NodeInfo>) {
         let self_id = self.self_node_id();
         let self_addrs = self.self_addrs.read().unwrap().clone();
+        let blocked = self.blocked.read().unwrap().clone();
         let mut store = self.peers.write().unwrap();
         for mut peer in peers {
             // Don't store self as peer
             if self_id.as_ref() == Some(&peer.node_id) {
+                continue;
+            }
+            if blocked.contains(&peer.node_id) {
                 continue;
             }
             if self_addrs.iter().any(|addr| addr == &peer.addr) {
@@ -291,6 +311,47 @@ impl NodeStore {
     /// Remove a peer.
     pub fn remove_peer(&self, node_id: &str) -> bool {
         self.peers.write().unwrap().remove(node_id).is_some()
+    }
+
+    /// Block a peer by node id and remove it from the active peer list.
+    pub fn block_peer(&self, node_id: &str) -> bool {
+        self.peers.write().unwrap().remove(node_id);
+        for group in self.groups.write().unwrap().values_mut() {
+            group.node_ids.retain(|id| id != node_id);
+        }
+        self.blocked.write().unwrap().insert(node_id.to_string())
+    }
+
+    /// Unblock a peer by node id so it can be re-added or synced again.
+    pub fn unblock_peer(&self, node_id: &str) -> bool {
+        self.blocked.write().unwrap().remove(node_id)
+    }
+
+    /// Check if a peer is blocked.
+    pub fn is_blocked(&self, node_id: &str) -> bool {
+        self.blocked.read().unwrap().contains(node_id)
+    }
+
+    /// Get a snapshot of blocked node IDs.
+    pub fn blocked_list(&self) -> Vec<String> {
+        self.blocked.read().unwrap().iter().cloned().collect()
+    }
+
+    /// Merge blocked node IDs and remove any matching peers/groups.
+    pub fn merge_blocked(&self, blocked: Vec<String>) {
+        if blocked.is_empty() {
+            return;
+        }
+        let mut blocked_set = self.blocked.write().unwrap();
+        let mut peers = self.peers.write().unwrap();
+        let mut groups = self.groups.write().unwrap();
+        for node_id in blocked {
+            peers.remove(&node_id);
+            for group in groups.values_mut() {
+                group.node_ids.retain(|id| id != &node_id);
+            }
+            blocked_set.insert(node_id);
+        }
     }
 
     /// Update peer's last_seen timestamp.
@@ -461,9 +522,18 @@ mod tests {
             addr: "127.0.0.2:1081".to_string(),
             last_seen_ms: current_time_ms(),
         });
+        store.create_group("group-1".to_string(), "Group 1".to_string());
+        store.add_node_to_group("group-1", "node-2".to_string());
 
         assert_eq!(store.self_node_id(), Some("node-1".to_string()));
         assert_eq!(store.peer_count(), 1);
+
+        // Block peer and ensure it is removed.
+        assert!(store.block_peer("node-2"));
+        assert_eq!(store.peer_count(), 0);
+        assert!(store.is_blocked("node-2"));
+        let group = store.get_group("group-1").unwrap();
+        assert!(group.node_ids.is_empty());
 
         store.save().unwrap();
         assert!(path.exists());
@@ -472,6 +542,16 @@ mod tests {
         let store2 = NodeStore::new(&path);
         store2.load().unwrap();
         assert_eq!(store2.self_node_id(), Some("node-1".to_string()));
+        assert_eq!(store2.peer_count(), 0);
+        assert!(store2.is_blocked("node-2"));
+
+        // Unblock and re-add should succeed.
+        assert!(store2.unblock_peer("node-2"));
+        store2.upsert_peer(NodeInfo {
+            node_id: "node-2".to_string(),
+            addr: "127.0.0.2:1081".to_string(),
+            last_seen_ms: current_time_ms(),
+        });
         assert_eq!(store2.peer_count(), 1);
 
         std::fs::remove_file(&path).ok();

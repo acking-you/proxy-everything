@@ -5,8 +5,8 @@ use std::sync::{Arc, RwLock};
 
 use proxy_core::nodes::NodeStore;
 use proxy_core::relay::{
-    LoadBalanceAlgo, LoadBalancer, RelayConfig, RelayStatus, ResolvedTarget, TargetStatus,
-    UpstreamTarget, create_balancer,
+    LoadBalanceAlgo, LoadBalancer, RelayConfig, RelayStatus, ResolvedTarget, UpstreamTarget,
+    create_balancer,
 };
 
 fn default_config_dir() -> PathBuf {
@@ -64,9 +64,8 @@ impl RelayManager {
 
         let temp_path = self.config_path.with_extension("json.tmp");
         std::fs::write(&temp_path, &content)?;
-        std::fs::rename(&temp_path, &self.config_path).map_err(|e| {
+        std::fs::rename(&temp_path, &self.config_path).inspect_err(|_| {
             let _ = std::fs::remove_file(&temp_path);
-            e
         })
     }
 
@@ -131,22 +130,19 @@ impl RelayManager {
         let _ = self.save_config();
     }
 
-    /// Get relay status.
+    /// Get relay status with the latest load balancer snapshot.
+    ///
+    /// This refreshes the resolved targets before reading the balancer so
+    /// the status reflects current node/group membership while preserving
+    /// connection counts for existing targets.
     pub fn get_status(&self) -> RelayStatus {
+        self.refresh_targets();
         let config = self.config.read().unwrap();
-        let resolved = self.resolve_targets_inner(&config);
+        let targets = self.balancer.read().unwrap().get_statuses();
         RelayStatus {
             enabled: config.enabled,
             algo: config.algo,
-            targets: resolved
-                .into_iter()
-                .map(|t| TargetStatus {
-                    addr: t.addr,
-                    healthy: t.healthy,
-                    weight: t.weight,
-                    connections: 0,
-                })
-                .collect(),
+            targets,
         }
     }
 

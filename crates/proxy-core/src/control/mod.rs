@@ -89,32 +89,65 @@ pub struct ControlRequest {
 pub enum ControlOp {
     // Node management
     Ping,
-    AddNode { addr: String },
-    RemoveNode { node_id: String },
+    AddNode {
+        addr: String,
+    },
+    RemoveNode {
+        node_id: String,
+    },
     ListNodes,
-    SyncNodes { nodes: Vec<NodeInfo> },
+    SyncNodes {
+        nodes: Vec<NodeInfo>,
+        #[serde(default)]
+        blocked: Vec<String>,
+    },
 
     // Group management
-    CreateGroup { group_id: String, name: String },
-    DeleteGroup { group_id: String },
+    CreateGroup {
+        group_id: String,
+        name: String,
+    },
+    DeleteGroup {
+        group_id: String,
+    },
     ListGroups,
-    AddNodeToGroup { group_id: String, node_id: String },
-    RemoveNodeFromGroup { group_id: String, node_id: String },
+    AddNodeToGroup {
+        group_id: String,
+        node_id: String,
+    },
+    RemoveNodeFromGroup {
+        group_id: String,
+        node_id: String,
+    },
 
     // Relay configuration
     GetRelayConfig,
-    SetRelayConfig { config: RelayConfig },
-    SetRelayEnabled { enabled: bool },
-    AddRelayTarget { target: UpstreamTarget },
-    RemoveRelayTarget { index: usize },
-    SetRelayAlgo { algo: LoadBalanceAlgo },
+    SetRelayConfig {
+        config: RelayConfig,
+    },
+    SetRelayEnabled {
+        enabled: bool,
+    },
+    AddRelayTarget {
+        target: UpstreamTarget,
+    },
+    RemoveRelayTarget {
+        index: usize,
+    },
+    SetRelayAlgo {
+        algo: LoadBalanceAlgo,
+    },
     GetRelayStatus,
 
     // Metrics queries
     GetRealtimeStats,
     GetRecentConnections,
-    GetTimeBuckets { granularity: Granularity },
-    GetTopN { category: TopCategory },
+    GetTimeBuckets {
+        granularity: Granularity,
+    },
+    GetTopN {
+        category: TopCategory,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -475,6 +508,303 @@ impl ControlClient {
                         .unwrap_or_else(|| "remove node failed".to_string()),
                 },
             })
+        }
+    }
+
+    /// List all node groups configured on the server.
+    pub async fn list_groups(&mut self, token: Option<String>) -> Result<Vec<NodeGroup>> {
+        let resp = self
+            .request(ControlRequest {
+                token,
+                op: ControlOp::ListGroups,
+            })
+            .await?;
+        if !resp.ok {
+            return Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: resp
+                        .error
+                        .unwrap_or_else(|| "list groups failed".to_string()),
+                },
+            });
+        }
+        match resp.result {
+            Some(ControlResult::Groups { groups }) => Ok(groups),
+            _ => Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: "unexpected response type for list_groups".to_string(),
+                },
+            }),
+        }
+    }
+
+    /// Create a node group on the server.
+    pub async fn create_group(
+        &mut self,
+        token: Option<String>,
+        group_id: String,
+        name: String,
+    ) -> Result<()> {
+        let resp = self
+            .request(ControlRequest {
+                token,
+                op: ControlOp::CreateGroup { group_id, name },
+            })
+            .await?;
+        if resp.ok {
+            Ok(())
+        } else {
+            Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: resp
+                        .error
+                        .unwrap_or_else(|| "create group failed".to_string()),
+                },
+            })
+        }
+    }
+
+    /// Delete a node group from the server.
+    pub async fn delete_group(&mut self, token: Option<String>, group_id: String) -> Result<()> {
+        let resp = self
+            .request(ControlRequest {
+                token,
+                op: ControlOp::DeleteGroup { group_id },
+            })
+            .await?;
+        if resp.ok {
+            Ok(())
+        } else {
+            Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: resp
+                        .error
+                        .unwrap_or_else(|| "delete group failed".to_string()),
+                },
+            })
+        }
+    }
+
+    /// Add a node to a group by id.
+    pub async fn add_node_to_group(
+        &mut self,
+        token: Option<String>,
+        group_id: String,
+        node_id: String,
+    ) -> Result<()> {
+        let resp = self
+            .request(ControlRequest {
+                token,
+                op: ControlOp::AddNodeToGroup { group_id, node_id },
+            })
+            .await?;
+        if resp.ok {
+            Ok(())
+        } else {
+            Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: resp
+                        .error
+                        .unwrap_or_else(|| "add node to group failed".to_string()),
+                },
+            })
+        }
+    }
+
+    /// Remove a node from a group by id.
+    pub async fn remove_node_from_group(
+        &mut self,
+        token: Option<String>,
+        group_id: String,
+        node_id: String,
+    ) -> Result<()> {
+        let resp = self
+            .request(ControlRequest {
+                token,
+                op: ControlOp::RemoveNodeFromGroup { group_id, node_id },
+            })
+            .await?;
+        if resp.ok {
+            Ok(())
+        } else {
+            Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: resp
+                        .error
+                        .unwrap_or_else(|| "remove node from group failed".to_string()),
+                },
+            })
+        }
+    }
+
+    /// Fetch the current relay configuration.
+    pub async fn get_relay_config(&mut self, token: Option<String>) -> Result<RelayConfig> {
+        let resp = self
+            .request(ControlRequest {
+                token,
+                op: ControlOp::GetRelayConfig,
+            })
+            .await?;
+        if !resp.ok {
+            return Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: resp
+                        .error
+                        .unwrap_or_else(|| "get relay config failed".to_string()),
+                },
+            });
+        }
+        match resp.result {
+            Some(ControlResult::RelayConfig { config }) => Ok(config),
+            _ => Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: "unexpected response type for get_relay_config".to_string(),
+                },
+            }),
+        }
+    }
+
+    /// Replace the relay configuration in a single request.
+    pub async fn set_relay_config(
+        &mut self,
+        token: Option<String>,
+        config: RelayConfig,
+    ) -> Result<()> {
+        let resp = self
+            .request(ControlRequest {
+                token,
+                op: ControlOp::SetRelayConfig { config },
+            })
+            .await?;
+        if resp.ok {
+            Ok(())
+        } else {
+            Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: resp
+                        .error
+                        .unwrap_or_else(|| "set relay config failed".to_string()),
+                },
+            })
+        }
+    }
+
+    /// Enable or disable relay mode.
+    pub async fn set_relay_enabled(&mut self, token: Option<String>, enabled: bool) -> Result<()> {
+        let resp = self
+            .request(ControlRequest {
+                token,
+                op: ControlOp::SetRelayEnabled { enabled },
+            })
+            .await?;
+        if resp.ok {
+            Ok(())
+        } else {
+            Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: resp
+                        .error
+                        .unwrap_or_else(|| "set relay enabled failed".to_string()),
+                },
+            })
+        }
+    }
+
+    /// Add a relay target to the current configuration.
+    pub async fn add_relay_target(
+        &mut self,
+        token: Option<String>,
+        target: UpstreamTarget,
+    ) -> Result<()> {
+        let resp = self
+            .request(ControlRequest {
+                token,
+                op: ControlOp::AddRelayTarget { target },
+            })
+            .await?;
+        if resp.ok {
+            Ok(())
+        } else {
+            Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: resp
+                        .error
+                        .unwrap_or_else(|| "add relay target failed".to_string()),
+                },
+            })
+        }
+    }
+
+    /// Remove a relay target by index.
+    pub async fn remove_relay_target(&mut self, token: Option<String>, index: usize) -> Result<()> {
+        let resp = self
+            .request(ControlRequest {
+                token,
+                op: ControlOp::RemoveRelayTarget { index },
+            })
+            .await?;
+        if resp.ok {
+            Ok(())
+        } else {
+            Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: resp
+                        .error
+                        .unwrap_or_else(|| "remove relay target failed".to_string()),
+                },
+            })
+        }
+    }
+
+    /// Switch the relay load-balancing algorithm.
+    pub async fn set_relay_algo(
+        &mut self,
+        token: Option<String>,
+        algo: LoadBalanceAlgo,
+    ) -> Result<()> {
+        let resp = self
+            .request(ControlRequest {
+                token,
+                op: ControlOp::SetRelayAlgo { algo },
+            })
+            .await?;
+        if resp.ok {
+            Ok(())
+        } else {
+            Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: resp
+                        .error
+                        .unwrap_or_else(|| "set relay algo failed".to_string()),
+                },
+            })
+        }
+    }
+
+    /// Fetch a relay status snapshot (health + connection counts).
+    pub async fn get_relay_status(&mut self, token: Option<String>) -> Result<RelayStatus> {
+        let resp = self
+            .request(ControlRequest {
+                token,
+                op: ControlOp::GetRelayStatus,
+            })
+            .await?;
+        if !resp.ok {
+            return Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: resp
+                        .error
+                        .unwrap_or_else(|| "get relay status failed".to_string()),
+                },
+            });
+        }
+        match resp.result {
+            Some(ControlResult::RelayStatus { status }) => Ok(status),
+            _ => Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: "unexpected response type for get_relay_status".to_string(),
+                },
+            }),
         }
     }
 }

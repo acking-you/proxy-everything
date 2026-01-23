@@ -33,5 +33,8 @@ jobs:
         run: cargo clippy --workspace
       - name: cargo test
         run: cargo test --workspace
+      - name: integration test
+        if: matrix.os == 'ubuntu-latest'
+        run: scripts/integration-test.sh
       - name: cargo build
         run: cargo build --workspace --release

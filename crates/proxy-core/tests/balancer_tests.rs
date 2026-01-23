@@ -1,7 +1,7 @@
 //! Unit tests for load balancer algorithms.
 
 use proxy_core::relay::{
-    LoadBalanceAlgo, LoadBalancer, LeastConnBalancer, RandomBalancer, ResolvedTarget,
+    LeastConnBalancer, LoadBalanceAlgo, LoadBalancer, RandomBalancer, ResolvedTarget,
     RoundRobinBalancer, WeightedBalancer, create_balancer,
 };
 use std::collections::HashMap;
@@ -18,9 +18,21 @@ fn make_targets(count: usize) -> Vec<ResolvedTarget> {
 
 fn make_weighted_targets() -> Vec<ResolvedTarget> {
     vec![
-        ResolvedTarget { addr: "a:1".into(), weight: 1, healthy: true },
-        ResolvedTarget { addr: "b:1".into(), weight: 2, healthy: true },
-        ResolvedTarget { addr: "c:1".into(), weight: 1, healthy: true },
+        ResolvedTarget {
+            addr: "a:1".into(),
+            weight: 1,
+            healthy: true,
+        },
+        ResolvedTarget {
+            addr: "b:1".into(),
+            weight: 2,
+            healthy: true,
+        },
+        ResolvedTarget {
+            addr: "c:1".into(),
+            weight: 1,
+            healthy: true,
+        },
     ]
 }
 
@@ -204,4 +216,26 @@ fn test_update_targets_preserves_connections() {
     // Connection count should be preserved - second target should be preferred
     let selected = lb.select().unwrap();
     assert_eq!(selected, "10.0.0.2:1081");
+}
+
+#[test]
+fn test_status_reports_least_conn_connections() {
+    let lb = LeastConnBalancer::new();
+    lb.update_targets(make_targets(2));
+
+    lb.on_connect("10.0.0.1:1081");
+    lb.on_connect("10.0.0.1:1081");
+
+    let statuses = lb.get_statuses();
+    let first = statuses
+        .iter()
+        .find(|status| status.addr == "10.0.0.1:1081")
+        .unwrap();
+    let second = statuses
+        .iter()
+        .find(|status| status.addr == "10.0.0.2:1081")
+        .unwrap();
+
+    assert_eq!(first.connections, 2);
+    assert_eq!(second.connections, 0);
 }

@@ -7,7 +7,7 @@ use mimalloc_rust::GlobalMiMalloc;
 use proxy_client::cli_config::{
     Config, DEFAULT_CONFIG_TEMPLATE, SystemProxyGuard, find_config, get_default_config_path,
 };
-use proxy_client::client::start_client;
+use proxy_client::client::{ClientConfig, start_client_with_config};
 use proxy_core::config::{CLIENT_PORT, SERVER_HOST, SERVER_PORT, init_tracing};
 
 #[global_allocator]
@@ -46,6 +46,9 @@ struct Cli {
     /// [optional] Reverse geo-proxy logic: CN sites use proxy, others direct
     #[arg(long, env = "REVERSE_GEO_PROXY")]
     reverse_geo: bool,
+    /// [optional] Auto-proxy switch (true/false). false forces all traffic through proxy
+    #[arg(long, value_name = "AUTO_PROXY")]
+    auto_proxy: Option<bool>,
     /// [optional] Use local GeoIP database instead of ip-api.com API
     #[arg(long, env = "USE_LOCAL_GEOIP")]
     use_local_geoip: bool,
@@ -62,6 +65,7 @@ impl Cli {
             server_port: self.server_port,
             client_port: self.client_port,
             secret_key: self.secret_key.clone(),
+            auto_proxy: self.auto_proxy,
             nonproxy_keywords: self
                 .nonproxy_keywords
                 .as_ref()
@@ -97,7 +101,16 @@ impl Cli {
             || self.secret_key.is_some()
             || self.msg_key
             || self.reverse_geo
+            || self.auto_proxy.is_some()
             || self.set_system_proxy
+    }
+}
+
+fn parse_bool_env(value: &str) -> Option<bool> {
+    match value.trim().to_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
     }
 }
 
@@ -150,6 +163,15 @@ async fn main() -> Result<()> {
     let msg_key = cli.msg_key || config.msg_key.unwrap_or(false);
     let reverse_geo = cli.reverse_geo || config.reverse_geo.unwrap_or(false);
     let do_set_system_proxy = cli.set_system_proxy || config.set_system_proxy.unwrap_or(false);
+    let enable_auto_proxy = cli
+        .auto_proxy
+        .or(config.auto_proxy)
+        .or_else(|| {
+            std::env::var("AUTO_PROXY")
+                .ok()
+                .and_then(|v| parse_bool_env(&v))
+        })
+        .unwrap_or(true);
 
     // SAFETY: Environment variables are set before any async code runs.
     // The tokio runtime hasn't started yet, so there are no other threads
@@ -258,6 +280,10 @@ async fn main() -> Result<()> {
     ]);
     table.add_row(vec![Cell::new("Reverse Geo"), status_cell(reverse_geo)]);
     table.add_row(vec![
+        Cell::new("Auto Proxy"),
+        status_cell(enable_auto_proxy),
+    ]);
+    table.add_row(vec![
         Cell::new("System Proxy"),
         status_cell(do_set_system_proxy),
     ]);
@@ -283,10 +309,18 @@ async fn main() -> Result<()> {
         None
     };
 
+    let client_config = ClientConfig {
+        enable_auto_proxy,
+        cache_dir: None,
+    };
     if msg_key {
-        start_client::<true>("0.0.0.0", client_port).await.unwrap();
+        start_client_with_config::<true>("0.0.0.0", client_port, Some(client_config))
+            .await
+            .unwrap();
     } else {
-        start_client::<false>("0.0.0.0", client_port).await.unwrap();
+        start_client_with_config::<false>("0.0.0.0", client_port, Some(client_config))
+            .await
+            .unwrap();
     }
 
     Ok(())

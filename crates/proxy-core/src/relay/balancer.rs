@@ -1,9 +1,10 @@
 //! Load balancer implementations.
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::collections::HashMap;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use super::ResolvedTarget;
+use super::{ResolvedTarget, TargetStatus};
 
 /// Load balancer trait.
 pub trait LoadBalancer: Send + Sync {
@@ -19,6 +20,25 @@ pub trait LoadBalancer: Send + Sync {
     fn on_connect(&self, _addr: &str) {}
     /// Record connection end (for LeastConn).
     fn on_disconnect(&self, _addr: &str) {}
+    /// Get a snapshot of target statuses for monitoring.
+    ///
+    /// # Notes
+    /// - Balancers that track live connections should report them in `connections`.
+    /// - Balancers without connection tracking should return `connections = 0`.
+    fn get_statuses(&self) -> Vec<TargetStatus>;
+}
+
+/// Build a status snapshot for targets that do not track connections.
+fn statuses_from_targets(targets: &[ResolvedTarget]) -> Vec<TargetStatus> {
+    targets
+        .iter()
+        .map(|t| TargetStatus {
+            addr: t.addr.clone(),
+            healthy: t.healthy,
+            weight: t.weight,
+            connections: 0,
+        })
+        .collect()
 }
 
 /// Round-robin load balancer.
@@ -69,6 +89,11 @@ impl LoadBalancer for RoundRobinBalancer {
         if let Some(t) = targets.iter_mut().find(|t| t.addr == addr) {
             t.healthy = true;
         }
+    }
+
+    fn get_statuses(&self) -> Vec<TargetStatus> {
+        let targets = self.targets.read().unwrap();
+        statuses_from_targets(&targets)
     }
 }
 
@@ -123,6 +148,11 @@ impl LoadBalancer for RandomBalancer {
         if let Some(t) = targets.iter_mut().find(|t| t.addr == addr) {
             t.healthy = true;
         }
+    }
+
+    fn get_statuses(&self) -> Vec<TargetStatus> {
+        let targets = self.targets.read().unwrap();
+        statuses_from_targets(&targets)
     }
 }
 
@@ -187,6 +217,11 @@ impl LoadBalancer for WeightedBalancer {
             t.healthy = true;
         }
     }
+
+    fn get_statuses(&self) -> Vec<TargetStatus> {
+        let targets = self.targets.read().unwrap();
+        statuses_from_targets(&targets)
+    }
 }
 
 /// Target with connection count for LeastConn.
@@ -226,15 +261,20 @@ impl LoadBalancer for LeastConnBalancer {
 
     fn update_targets(&self, targets: Vec<ResolvedTarget>) {
         let mut store = self.targets.write().unwrap();
-        // Preserve connection counts for existing targets
+        // Preserve connection counts in O(n) by indexing the previous targets.
+        let old_connections: HashMap<_, _> = store
+            .iter()
+            .map(|old| {
+                (
+                    old.target.addr.clone(),
+                    old.connections.load(Ordering::Relaxed),
+                )
+            })
+            .collect();
         let new_targets: Vec<_> = targets
             .into_iter()
             .map(|t| {
-                let conns = store
-                    .iter()
-                    .find(|old| old.target.addr == t.addr)
-                    .map(|old| old.connections.load(Ordering::Relaxed))
-                    .unwrap_or(0);
+                let conns = old_connections.get(&t.addr).copied().unwrap_or(0);
                 LeastConnTarget {
                     target: t,
                     connections: AtomicU64::new(conns),
@@ -271,6 +311,19 @@ impl LoadBalancer for LeastConnBalancer {
             t.connections.fetch_sub(1, Ordering::Relaxed);
         }
     }
+
+    fn get_statuses(&self) -> Vec<TargetStatus> {
+        let targets = self.targets.read().unwrap();
+        targets
+            .iter()
+            .map(|t| TargetStatus {
+                addr: t.target.addr.clone(),
+                healthy: t.target.healthy,
+                weight: t.target.weight,
+                connections: t.connections.load(Ordering::Relaxed),
+            })
+            .collect()
+    }
 }
 
 /// Create a balancer from algorithm type.
@@ -289,9 +342,21 @@ mod tests {
 
     fn make_targets() -> Vec<ResolvedTarget> {
         vec![
-            ResolvedTarget { addr: "a".into(), weight: 1, healthy: true },
-            ResolvedTarget { addr: "b".into(), weight: 2, healthy: true },
-            ResolvedTarget { addr: "c".into(), weight: 1, healthy: true },
+            ResolvedTarget {
+                addr: "a".into(),
+                weight: 1,
+                healthy: true,
+            },
+            ResolvedTarget {
+                addr: "b".into(),
+                weight: 2,
+                healthy: true,
+            },
+            ResolvedTarget {
+                addr: "c".into(),
+                weight: 1,
+                healthy: true,
+            },
         ]
     }
 
