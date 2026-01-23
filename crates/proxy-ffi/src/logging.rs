@@ -106,6 +106,7 @@ impl tracing::field::Visit for MessageVisitor {
 /// Can be called multiple times safely.
 #[unsafe(no_mangle)]
 pub extern "C" fn proxy_init_logging() {
+    crate::init_allocator();
     use tracing_subscriber::Layer;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;

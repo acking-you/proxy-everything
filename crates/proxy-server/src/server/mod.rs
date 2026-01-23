@@ -92,6 +92,10 @@ use proxy_core::control::{
 };
 use proxy_core::metrics::{ConnectionRecord, MetricsStore, current_time_ms};
 use proxy_core::nodes::{NodeInfo, NodeStore};
+use sysinfo::{
+    CpuRefreshKind, DiskRefreshKind, Disks, MemoryRefreshKind, Networks, Pid, ProcessRefreshKind,
+    ProcessesToUpdate, RefreshKind, System,
+};
 use tracing::{Instrument, field};
 
 #[derive(Debug, Snafu)]
@@ -952,6 +956,53 @@ impl Default for ServerConfig {
     }
 }
 
+/// Minimal sysinfo state and refresh configuration for the metrics loop.
+///
+/// This intentionally avoids `System::new_all()` and full process/task
+/// enumeration. Enumerating all processes (and their tasks on Linux) causes
+/// extra allocations that can stay resident for the lifetime of the process,
+/// which shows up as "memory goes up and doesn't drop" under long-lived load.
+struct SysinfoMetrics {
+    sys: System,
+    cpu_refresh: CpuRefreshKind,
+    memory_refresh: MemoryRefreshKind,
+    process_refresh: ProcessRefreshKind,
+    pid_list: [Pid; 1],
+}
+
+impl SysinfoMetrics {
+    /// Build a constrained sysinfo collector for the current process.
+    ///
+    /// We only refresh:
+    /// - CPU usage (for host CPU utilization)
+    /// - RAM usage (total/used)
+    /// - The current process' CPU + memory stats (without tasks)
+    fn new(pid: Pid) -> Self {
+        let cpu_refresh = CpuRefreshKind::nothing().with_cpu_usage();
+        let memory_refresh = MemoryRefreshKind::nothing().with_ram();
+        let process_refresh = ProcessRefreshKind::nothing()
+            .with_cpu()
+            .with_memory()
+            .without_tasks();
+
+        let mut sys = System::new_with_specifics(
+            RefreshKind::nothing()
+                .with_cpu(cpu_refresh)
+                .with_memory(memory_refresh),
+        );
+        let pid_list = [pid];
+        sys.refresh_processes_specifics(ProcessesToUpdate::Some(&pid_list), true, process_refresh);
+
+        Self {
+            sys,
+            cpu_refresh,
+            memory_refresh,
+            process_refresh,
+            pid_list,
+        }
+    }
+}
+
 /// Run server with a pre-bound listener and cancellation token.
 ///
 /// This is the core server loop. Use `start_server` for production with
@@ -972,14 +1023,20 @@ pub async fn run_server_with_listener(
     let stats_cancel = cancel_token.clone();
     tokio::spawn(async move {
         use proxy_core::metrics::SystemStats;
-        use sysinfo::{Disks, Networks, Pid, ProcessesToUpdate, System};
         let pid = Pid::from_u32(std::process::id());
-        let mut sys = System::new_all();
-        let mut disks = Disks::new_with_refreshed_list();
+        let mut sysinfo_metrics = SysinfoMetrics::new(pid);
+        let mut disks =
+            Disks::new_with_refreshed_list_specifics(DiskRefreshKind::nothing().with_storage());
         let mut networks = Networks::new_with_refreshed_list();
         // Initial refresh for CPU baseline
-        sys.refresh_cpu_all();
-        sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+        sysinfo_metrics
+            .sys
+            .refresh_cpu_specifics(sysinfo_metrics.cpu_refresh);
+        sysinfo_metrics.sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&sysinfo_metrics.pid_list),
+            true,
+            sysinfo_metrics.process_refresh,
+        );
 
         // Track previous network bytes for rate calculation
         let mut prev_net_recv: u64 = 0;
@@ -991,20 +1048,33 @@ pub async fn run_server_with_listener(
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(interval_secs)) => {
                     // Refresh process stats
-                    sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
-                    if let Some(proc) = sys.process(pid) {
+                    sysinfo_metrics.sys.refresh_processes_specifics(
+                        ProcessesToUpdate::Some(&sysinfo_metrics.pid_list),
+                        true,
+                        sysinfo_metrics.process_refresh,
+                    );
+                    if let Some(proc) = sysinfo_metrics.sys.process(pid) {
                         metrics_for_stats.update_process_stats(proc.cpu_usage(), proc.memory());
                     }
 
                     // Refresh system stats
-                    sys.refresh_cpu_all();
-                    sys.refresh_memory();
-                    disks.refresh(true);
+                    sysinfo_metrics
+                        .sys
+                        .refresh_cpu_specifics(sysinfo_metrics.cpu_refresh);
+                    sysinfo_metrics
+                        .sys
+                        .refresh_memory_specifics(sysinfo_metrics.memory_refresh);
+                    disks.refresh_specifics(true, DiskRefreshKind::nothing().with_storage());
                     networks.refresh(true);
 
                     // Calculate system CPU (average of all cores)
-                    let cpu_percent = sys.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>()
-                        / sys.cpus().len().max(1) as f32;
+                    let cpu_percent = sysinfo_metrics
+                        .sys
+                        .cpus()
+                        .iter()
+                        .map(|c| c.cpu_usage())
+                        .sum::<f32>()
+                        / sysinfo_metrics.sys.cpus().len().max(1) as f32;
 
                     // Disk stats (sum of all disks)
                     let (disk_used, disk_total) = disks.iter().fold((0u64, 0u64), |(used, total), d| {
@@ -1032,8 +1102,8 @@ pub async fn run_server_with_listener(
 
                     metrics_for_stats.update_system_stats(SystemStats {
                         cpu_percent,
-                        memory_used: sys.used_memory(),
-                        memory_total: sys.total_memory(),
+                        memory_used: sysinfo_metrics.sys.used_memory(),
+                        memory_total: sysinfo_metrics.sys.total_memory(),
                         net_recv_bytes: net_recv,
                         net_sent_bytes: net_sent,
                         net_recv_rate: recv_rate,

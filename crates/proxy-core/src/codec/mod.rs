@@ -223,6 +223,10 @@ where
         }
     }
 
+    /// Resize the internal buffer to the requested length.
+    ///
+    /// When shrinking, explicitly reduce capacity to avoid holding on to
+    /// large allocations after a transient burst.
     #[inline]
     fn resize(&mut self) {
         let new_len = if self.need_resize >= MAX_BUF_SIZE {
@@ -230,7 +234,12 @@ where
         } else {
             self.need_resize
         };
-        self.buffer.resize(new_len, 0);
+        if new_len > self.buffer.len() {
+            self.buffer.resize(new_len, 0);
+        } else if new_len < self.buffer.len() {
+            self.buffer.truncate(new_len);
+            self.buffer.shrink_to(new_len);
+        }
     }
 
     #[inline]
@@ -309,6 +318,7 @@ impl<T: MyAsyncReadExt + Send + Unpin> MyAsyncCodecReader for AsyncNormalCodec<T
 pub struct AsyncDecryptCodec<T, D> {
     codec_normal: AsyncNormalCodec<T>,
     decryptor: D,
+    shrink_count: u8,
 }
 
 impl<T: MyAsyncReadExt + Unpin, D: Decryptor + Unpin> AsyncDecryptCodec<T, D> {
@@ -316,6 +326,7 @@ impl<T: MyAsyncReadExt + Unpin, D: Decryptor + Unpin> AsyncDecryptCodec<T, D> {
         Self {
             codec_normal: AsyncNormalCodec::new(reader),
             decryptor,
+            shrink_count: 0,
         }
     }
 }
@@ -334,7 +345,23 @@ impl<T: MyAsyncReadExt + Send + Unpin, D: Decryptor + Send + Unpin + 'static> My
 
         // Read length-prefixed data
         let data_size = get_data_size(reader).await?;
-        buffer.resize(data_size as usize, 0);
+        let data_len = data_size as usize;
+        let prev_len = buffer.len();
+        if data_len != prev_len {
+            buffer.resize(data_len, 0);
+        }
+
+        if data_len > prev_len {
+            self.shrink_count = 0;
+        } else if data_len != 0 && data_len < prev_len / 4 && prev_len > INIT_BUF_SIZE {
+            self.shrink_count = self.shrink_count.saturating_add(1);
+            if self.shrink_count >= SHRINK_THRESHOLD {
+                buffer.shrink_to(data_len.max(INIT_BUF_SIZE));
+                self.shrink_count = 0;
+            }
+        } else {
+            self.shrink_count = 0;
+        }
         reader.read_exact(buffer).await.context(IoSnafu {
             context: "decrypt_codec",
             detail: "read_exact".to_string(),

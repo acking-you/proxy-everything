@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use comfy_table::{Cell, Color, Table, presets};
-use mimalloc_rust::GlobalMiMalloc;
+use malloc_best_effort::BEMalloc;
 use proxy_client::cli_config::{
     Config, DEFAULT_CONFIG_TEMPLATE, SystemProxyGuard, find_config, get_default_config_path,
 };
@@ -11,7 +11,7 @@ use proxy_client::client::{ClientConfig, start_client_with_config};
 use proxy_core::config::{CLIENT_PORT, SERVER_HOST, SERVER_PORT, init_tracing};
 
 #[global_allocator]
-static GLOBAL_MIMALLOC: GlobalMiMalloc = GlobalMiMalloc;
+static GLOBAL_ALLOCATOR: BEMalloc = BEMalloc::new();
 
 #[derive(Parser)]
 #[command(author = "L_B__", version, about, long_about = None)]
@@ -116,6 +116,7 @@ fn parse_bool_env(value: &str) -> Option<bool> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    BEMalloc::init();
     let cli: Cli = Cli::parse();
 
     // Load config based on scenario:

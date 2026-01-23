@@ -1,5 +1,5 @@
 use clap::Parser;
-use mimalloc_rust::GlobalMiMalloc;
+use malloc_best_effort::BEMalloc;
 use proxy_core::config::{SERVER_PORT, init_tracing};
 use proxy_server::server::start_server;
 
@@ -36,10 +36,11 @@ struct Cli {
 }
 
 #[global_allocator]
-static GLOBAL_MIMALLOC: GlobalMiMalloc = GlobalMiMalloc;
+static GLOBAL_ALLOCATOR: BEMalloc = BEMalloc::new();
 
 #[tokio::main]
 async fn main() {
+    BEMalloc::init();
     let cli = Cli::parse();
     init_tracing();
     unsafe {

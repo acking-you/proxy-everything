@@ -34,6 +34,7 @@ pub struct ProxyHandle {
 /// Returns a pointer to ProxyHandle that must be freed with `proxy_destroy`.
 #[unsafe(no_mangle)]
 pub extern "C" fn proxy_create() -> *mut ProxyHandle {
+    crate::init_allocator();
     let runtime = match Runtime::new() {
         Ok(rt) => rt,
         Err(e) => {

@@ -3,11 +3,25 @@
 //! This module provides a C-compatible interface for external applications to use the proxy client.
 //! It reuses the existing client module logic.
 
+use malloc_best_effort::BEMalloc;
+use std::sync::Once;
+
 mod handle;
 mod latency;
 mod logging;
 mod nodes;
 mod types;
+
+#[global_allocator]
+static GLOBAL_ALLOCATOR: BEMalloc = BEMalloc::new();
+
+static ALLOCATOR_INIT: Once = Once::new();
+
+pub(crate) fn init_allocator() {
+    ALLOCATOR_INIT.call_once(|| {
+        BEMalloc::init();
+    });
+}
 
 // Re-export all public FFI functions and types
 pub use handle::{

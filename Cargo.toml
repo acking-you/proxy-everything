@@ -78,7 +78,7 @@ dirs = "6"
 sysinfo = "0.37"
 
 # Memory allocator
-mimalloc-rust = "0.2"
+malloc-best-effort = "0.1.4"
 
 # Random
 rand = "0.9"
