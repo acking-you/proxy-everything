@@ -78,7 +78,7 @@ dirs = "6"
 sysinfo = "0.37"
 
 # Memory allocator
-malloc-best-effort = "0.1.4"
+mimalloc = { path = "deps/better_mimalloc_rs", features = ["config"] }
 
 # Random
 rand = "0.9"

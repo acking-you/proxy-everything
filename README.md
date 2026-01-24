@@ -66,3 +66,20 @@ The `--set-system-proxy` flag auto-configures your OS proxy settings. Without it
 - Auto system proxy setup (`--set-system-proxy`): Linux/macOS/Windows
 - Transparent proxy chain mode
 - Multi-platform support
+
+## Allocator (advanced)
+
+This repo vendors a fork of the Rust mimalloc wrapper at `deps/better_mimalloc_rs`.
+It exists to:
+
+- Pin the C allocator to a specific fork (`https://github.com/acking-you/mimalloc`)
+- Expose RSS-related tuning knobs at build time and runtime
+
+The allocator is provided by the vendored `deps/better_mimalloc_rs` submodule,
+which gives us predictable tuning behavior for long-running proxy servers. See
+`deps/better_mimalloc_rs/README.md` for configuration details.
+
+### RSS tuning
+
+The binaries always use an aggressive RSS-reclaim configuration in code to
+prioritize faster memory return under load.

@@ -212,12 +212,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5dd9dc738b7a8311c7ade152424974d8115f2cdad61e8dab8dac9f2362298510"
 
 [[package]]
-name = "bytecount"
-version = "0.6.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "175812e0be2bccb6abe50bb8d566126198344f707e304f45c648fd8f2cc0365e"
-
-[[package]]
 name = "bytemuck"
 version = "1.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -251,8 +245,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a0aeaff4ff1a90589618835a598e545176939b97874f7abc7851caa0618f203"
 dependencies = [
  "find-msvc-tools",
- "jobserver",
- "libc",
  "shlex",
 ]
 
@@ -483,6 +475,12 @@ dependencies = [
  "lab",
  "phf",
 ]
+
+[[package]]
+name = "cty"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b365fabc795046672053e29c954733ec3b05e4be654ab130fe8f1f94d7051f35"
 
 [[package]]
 name = "darling"
@@ -1357,16 +1355,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
-name = "jobserver"
-version = "0.1.34"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9afb3de4395d6b3e67a780b6de64b51c978ecf11cb9a462c66be7d4ca9039d33"
-dependencies = [
- "getrandom 0.3.4",
- "libc",
-]
-
-[[package]]
 name = "js-sys"
 version = "0.3.83"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1429,10 +1417,9 @@ checksum = "c5a2d376baa530d1238d133232d15e239abad80d05838b4b59354e5268af431f"
 [[package]]
 name = "libmimalloc-sys"
 version = "0.1.44"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "667f4fec20f29dfc6bc7357c582d91796c169ad7e2fce709468aefeb2c099870"
 dependencies = [
  "cc",
+ "cty",
  "libc",
 ]
 
@@ -1444,19 +1431,6 @@ checksum = "3d0b95e02c851351f877147b7deea7b1afb1df71b63aa5f8270716e0c5720616"
 dependencies = [
  "bitflags 2.10.0",
  "libc",
-]
-
-[[package]]
-name = "libtcmalloc-sys"
-version = "0.1.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33e204268a3b09862788a2894346c768b95b2cb29cba42c5e2bb9ea7f48fa317"
-dependencies = [
- "cc",
- "document-features",
- "libc",
- "patch",
- "strum",
 ]
 
 [[package]]
@@ -1527,17 +1501,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "malloc-best-effort"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "399404882682b1ecd6f8c7ab022f62232edbc34ab795b37b1dfc1ec8b0df567e"
-dependencies = [
- "document-features",
- "mimalloc",
- "tcmalloc-better",
-]
-
-[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1592,8 +1555,6 @@ dependencies = [
 [[package]]
 name = "mimalloc"
 version = "0.1.48"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1ee66a4b64c74f4ef288bcbb9192ad9c3feaad75193129ac8509af543894fd8"
 dependencies = [
  "libmimalloc-sys",
 ]
@@ -1677,17 +1638,6 @@ checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
 dependencies = [
  "memchr",
  "minimal-lexical",
-]
-
-[[package]]
-name = "nom_locate"
-version = "4.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e3c83c053b0713da60c5b8de47fe8e494fe3ece5267b2f23090a07a053ba8f3"
-dependencies = [
- "bytecount",
- "memchr",
- "nom",
 ]
 
 [[package]]
@@ -1820,17 +1770,6 @@ dependencies = [
  "redox_syscall",
  "smallvec",
  "windows-link 0.2.1",
-]
-
-[[package]]
-name = "patch"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15c07fdcdd8b05bdcf2a25bc195b6c34cbd52762ada9dba88bf81e7686d14e7a"
-dependencies = [
- "chrono",
- "nom",
- "nom_locate",
 ]
 
 [[package]]
@@ -1999,7 +1938,7 @@ dependencies = [
  "futures",
  "hashbrown 0.16.1",
  "kanal 0.2.0-beta1",
- "malloc-best-effort",
+ "mimalloc",
  "proxy-core",
  "serde",
  "serde_json",
@@ -2047,7 +1986,7 @@ dependencies = [
 name = "proxy-ffi"
 version = "0.4.17"
 dependencies = [
- "malloc-best-effort",
+ "mimalloc",
  "proxy-client",
  "proxy-core",
  "reqwest",
@@ -2064,7 +2003,7 @@ version = "0.4.17"
 dependencies = [
  "anyhow",
  "clap",
- "malloc-best-effort",
+ "mimalloc",
  "proxy-core",
  "serde",
  "serde_json",
@@ -2799,16 +2738,6 @@ name = "tagptr"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
-
-[[package]]
-name = "tcmalloc-better"
-version = "0.1.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18b5ddc00f3d012cfe4227eb44c05f7b57b97e494968ea0d2ba114b5b7b3909a"
-dependencies = [
- "document-features",
- "libtcmalloc-sys",
-]
 
 [[package]]
 name = "terminfo"

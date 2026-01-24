@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use comfy_table::{Cell, Color, Table, presets};
-use malloc_best_effort::BEMalloc;
+use mimalloc::{MiMalloc, MiMallocConfig};
 use proxy_client::cli_config::{
     Config, DEFAULT_CONFIG_TEMPLATE, SystemProxyGuard, find_config, get_default_config_path,
 };
@@ -11,7 +11,22 @@ use proxy_client::client::{ClientConfig, start_client_with_config};
 use proxy_core::config::{CLIENT_PORT, SERVER_HOST, SERVER_PORT, init_tracing};
 
 #[global_allocator]
-static GLOBAL_ALLOCATOR: BEMalloc = BEMalloc::new();
+static GLOBAL_ALLOCATOR: MiMalloc = MiMalloc;
+
+fn init_allocator() {
+    // Aggressive RSS reclamation: prioritize faster decommit over raw throughput.
+    let config = MiMallocConfig {
+        eager_commit: Some(false),
+        eager_commit_delay: Some(0),
+        arena_eager_commit: Some(0),
+        purge_decommits: Some(true),
+        purge_delay: Some(0),
+        arena_purge_mult: Some(1),
+        purge_extend_delay: Some(0),
+        generic_collect: Some(200),
+    };
+    MiMalloc::init_with(&config);
+}
 
 #[derive(Parser)]
 #[command(author = "L_B__", version, about, long_about = None)]
@@ -116,7 +131,7 @@ fn parse_bool_env(value: &str) -> Option<bool> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    BEMalloc::init();
+    init_allocator();
     let cli: Cli = Cli::parse();
 
     // Load config based on scenario:

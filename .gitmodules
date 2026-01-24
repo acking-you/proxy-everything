@@ -10,3 +10,6 @@
 [submodule "deps/uni-stream"]
 	path = deps/uni-stream
 	url = git@github.com:acking-you/uni-stream.git
+[submodule "deps/better_mimalloc_rs"]
+	path = deps/better_mimalloc_rs
+	url = git@github.com:acking-you/better_mimalloc_rs.git
