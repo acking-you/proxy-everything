@@ -194,7 +194,7 @@ pub enum CodecError {
 /// ```
 ///
 /// - Initial size: 512B (INIT_BUF_SIZE)
-/// - Maximum size: 8MB (MAX_BUF_SIZE)
+/// - Maximum size: 32MB (MAX_BUF_SIZE)
 /// - Expansion: doubles when buffer is completely filled
 /// - Shrinking: halves after SHRINK_THRESHOLD (8) consecutive small reads
 ///
@@ -207,7 +207,7 @@ pub struct AsyncNormalCodec<T> {
 }
 
 const INIT_BUF_SIZE: usize = 512;
-const MAX_BUF_SIZE: usize = 8 * 1024 * 1024;
+const MAX_BUF_SIZE: usize = 32 * 1024 * 1024;
 const SHRINK_THRESHOLD: u8 = 8;
 
 impl<T> AsyncNormalCodec<T>
@@ -234,12 +234,7 @@ where
         } else {
             self.need_resize
         };
-        if new_len > self.buffer.len() {
-            self.buffer.resize(new_len, 0);
-        } else if new_len < self.buffer.len() {
-            self.buffer.truncate(new_len);
-            self.buffer.shrink_to(new_len);
-        }
+        self.buffer.resize(new_len, 0);
     }
 
     #[inline]
@@ -318,7 +313,6 @@ impl<T: MyAsyncReadExt + Send + Unpin> MyAsyncCodecReader for AsyncNormalCodec<T
 pub struct AsyncDecryptCodec<T, D> {
     codec_normal: AsyncNormalCodec<T>,
     decryptor: D,
-    shrink_count: u8,
 }
 
 impl<T: MyAsyncReadExt + Unpin, D: Decryptor + Unpin> AsyncDecryptCodec<T, D> {
@@ -326,7 +320,6 @@ impl<T: MyAsyncReadExt + Unpin, D: Decryptor + Unpin> AsyncDecryptCodec<T, D> {
         Self {
             codec_normal: AsyncNormalCodec::new(reader),
             decryptor,
-            shrink_count: 0,
         }
     }
 }
@@ -352,15 +345,15 @@ impl<T: MyAsyncReadExt + Send + Unpin, D: Decryptor + Send + Unpin + 'static> My
         }
 
         if data_len > prev_len {
-            self.shrink_count = 0;
+            self.codec_normal.shrink_count = 0;
         } else if data_len != 0 && data_len < prev_len / 4 && prev_len > INIT_BUF_SIZE {
-            self.shrink_count = self.shrink_count.saturating_add(1);
-            if self.shrink_count >= SHRINK_THRESHOLD {
+            self.codec_normal.shrink_count = self.codec_normal.shrink_count.saturating_add(1);
+            if self.codec_normal.shrink_count >= SHRINK_THRESHOLD {
                 buffer.shrink_to(data_len.max(INIT_BUF_SIZE));
-                self.shrink_count = 0;
+                self.codec_normal.shrink_count = 0;
             }
         } else {
-            self.shrink_count = 0;
+            self.codec_normal.shrink_count = 0;
         }
         reader.read_exact(buffer).await.context(IoSnafu {
             context: "decrypt_codec",
