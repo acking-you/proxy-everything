@@ -2,17 +2,13 @@
 
 use std::collections::HashMap;
 
-use ratatui::{
-    Frame,
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Tabs},
-};
-
 use proxy_core::geo::country_to_flag;
-
 use proxy_core::relay::UpstreamTarget;
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Tabs};
 
 use super::types::{AppState, FetchedData, InputDialogMode, TAB_TITLES};
 use super::utils::format_bytes;
@@ -87,11 +83,13 @@ pub fn draw_ui(f: &mut Frame, state: &mut AppState) {
                 loading_indicator
             ),
             1 => format!(
-                "q:quit  ←→:tabs  ↑↓:select  a:create  d:delete  g:add-node  x:rm-node  r:refresh{}",
+                "q:quit  ←→:tabs  ↑↓:select  a:create  d:delete  g:add-node  x:rm-node  \
+                 r:refresh{}",
                 loading_indicator
             ),
             2 => format!(
-                "q:quit  ←→:tabs  ↑↓:select  a:add-target  d:remove  e:toggle  l:algo  c:set-config  r:refresh{}",
+                "q:quit  ←→:tabs  ↑↓:select  a:add-target  d:remove  e:toggle  l:algo  \
+                 c:set-config  r:refresh{}",
                 loading_indicator
             ),
             4 | 5 => format!(
@@ -182,7 +180,8 @@ fn draw_input_dialog(f: &mut Frame, state: &AppState) {
         ),
         Some(InputDialogMode::SetRelayConfig) => (
             "Set Relay Config (JSON)",
-            "Example: {\"enabled\":true,\"targets\":[],\"algo\":\"round_robin\",\"health_check_interval_secs\":30}",
+            "Example: {\"enabled\":true,\"targets\":[],\"algo\":\"round_robin\",\"\
+             health_check_interval_secs\":30}",
         ),
         None => ("Input", ""),
     };

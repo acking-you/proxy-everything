@@ -1,10 +1,11 @@
 //! Unit tests for load balancer algorithms.
 
+use std::collections::HashMap;
+
 use proxy_core::relay::{
     LeastConnBalancer, LoadBalanceAlgo, LoadBalancer, RandomBalancer, ResolvedTarget,
     RoundRobinBalancer, WeightedBalancer, create_balancer,
 };
-use std::collections::HashMap;
 
 fn make_targets(count: usize) -> Vec<ResolvedTarget> {
     (0..count)

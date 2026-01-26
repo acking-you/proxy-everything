@@ -9,7 +9,6 @@ pub use balancer::{
     LeastConnBalancer, LoadBalancer, RandomBalancer, RoundRobinBalancer, WeightedBalancer,
     create_balancer,
 };
-
 use serde::{Deserialize, Serialize};
 
 /// Load balancing algorithm.

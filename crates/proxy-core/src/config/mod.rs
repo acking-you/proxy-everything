@@ -1,8 +1,9 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+
 use arc_swap::ArcSwap;
 use once_cell::sync::Lazy;
 use rand::Rng;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{Layer, fmt};
 
@@ -209,7 +210,10 @@ pub static SERVER_PORT: Lazy<u16> = Lazy::new(|| {
         Ok(port) => match port.parse::<u16>() {
             Ok(p) => p,
             Err(e) => {
-                tracing::error!("`SERVER_PORT` is invalid port! error:{e}");
+                tracing::error!(
+                    "`SERVER_PORT` is invalid port! error:{}",
+                    crate::util::error_report(&e)
+                );
                 default_port
             }
         },
@@ -229,7 +233,10 @@ pub static CLIENT_PORT: Lazy<u16> = Lazy::new(|| {
         Ok(port) => match port.parse::<u16>() {
             Ok(p) => p,
             Err(e) => {
-                tracing::error!("`CLIENT_PORT` is invalid port! error:{e}");
+                tracing::error!(
+                    "`CLIENT_PORT` is invalid port! error:{}",
+                    crate::util::error_report(&e)
+                );
                 default_port
             }
         },

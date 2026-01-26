@@ -19,6 +19,7 @@ serde_json = { workspace = true }
 snafu = { workspace = true }
 sysinfo = { workspace = true }
 ureq = { workspace = true }
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }

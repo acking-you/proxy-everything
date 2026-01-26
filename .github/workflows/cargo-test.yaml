@@ -25,7 +25,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.87.0
+          toolchain: nightly-2026-01-26
           components: clippy, rustfmt
       - name: cargo fmt
         run: cargo fmt -p proxy-core -p proxy-client -p proxy-server -p proxy-tui -p proxy-ffi -- --check

@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 
 use clap::Parser;
-
 use proxy_core::config::SERVER_PORT;
 use proxy_core::metrics::{ConnectionRecord, RealtimeSnapshot, TimeBucket};
 use proxy_core::nodes::{NodeGroup, NodeInfo};

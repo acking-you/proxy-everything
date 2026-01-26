@@ -1,16 +1,15 @@
 use std::borrow::Cow;
 
+use proxy_core::config::runtime;
 use snafu::{OptionExt, ResultExt, Snafu};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
-use super::HttpProxySnafu;
 use super::{
-    ForwardContext, ForwarderProvider, HeaderContext, ProxyContext, ServerConnection,
-    TcpForwardImpl, change_msg_key, get_tcp_proxy_stream, get_tcp_stream,
+    ForwardContext, ForwarderProvider, HeaderContext, HttpProxySnafu, ProxyContext,
+    ServerConnection, TcpForwardImpl, change_msg_key, get_tcp_proxy_stream, get_tcp_stream,
     resolve_server_connection, split_and_wrap,
 };
-use proxy_core::config::runtime;
 
 #[derive(Debug, Snafu)]
 pub enum HttpProxyError {

@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use futures::Future;
+use snafu::Report;
 #[cfg(not(target_env = "msvc"))]
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::task::JoinHandle;
@@ -10,6 +11,14 @@ use tokio_util::task::TaskTracker;
 
 pub type TaskId = i64;
 const SIGNAL_TASK_ID: TaskId = -1;
+
+pub fn error_report<E: std::error::Error + ?Sized>(err: &E) -> String {
+    Report::from_error(err).to_string()
+}
+
+pub fn display_report(err: impl std::fmt::Display) -> String {
+    err.to_string()
+}
 
 pub trait TaskIdGenerator {
     fn r#gen(&mut self) -> TaskId;
@@ -58,7 +67,7 @@ fn get_signal(kind: SignalKind) -> Option<Signal> {
     match signal(kind) {
         Ok(s) => Some(s),
         Err(e) => {
-            tracing::error!("Signal register error:{e}");
+            tracing::error!("Signal register error: {}", error_report(&e));
             None
         }
     }

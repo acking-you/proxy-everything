@@ -1,8 +1,9 @@
 //! Load balancer implementations.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+use parking_lot::RwLock;
 
 use super::{ResolvedTarget, TargetStatus};
 
@@ -64,7 +65,7 @@ impl Default for RoundRobinBalancer {
 
 impl LoadBalancer for RoundRobinBalancer {
     fn select(&self) -> Option<String> {
-        let targets = self.targets.read().unwrap();
+        let targets = self.targets.read();
         let healthy: Vec<_> = targets.iter().filter(|t| t.healthy).collect();
         if healthy.is_empty() {
             return None;
@@ -74,25 +75,25 @@ impl LoadBalancer for RoundRobinBalancer {
     }
 
     fn update_targets(&self, targets: Vec<ResolvedTarget>) {
-        *self.targets.write().unwrap() = targets;
+        *self.targets.write() = targets;
     }
 
     fn mark_unhealthy(&self, addr: &str) {
-        let mut targets = self.targets.write().unwrap();
+        let mut targets = self.targets.write();
         if let Some(t) = targets.iter_mut().find(|t| t.addr == addr) {
             t.healthy = false;
         }
     }
 
     fn mark_healthy(&self, addr: &str) {
-        let mut targets = self.targets.write().unwrap();
+        let mut targets = self.targets.write();
         if let Some(t) = targets.iter_mut().find(|t| t.addr == addr) {
             t.healthy = true;
         }
     }
 
     fn get_statuses(&self) -> Vec<TargetStatus> {
-        let targets = self.targets.read().unwrap();
+        let targets = self.targets.read();
         statuses_from_targets(&targets)
     }
 }
@@ -118,7 +119,7 @@ impl Default for RandomBalancer {
 
 impl LoadBalancer for RandomBalancer {
     fn select(&self) -> Option<String> {
-        let targets = self.targets.read().unwrap();
+        let targets = self.targets.read();
         let healthy: Vec<_> = targets.iter().filter(|t| t.healthy).collect();
         if healthy.is_empty() {
             return None;
@@ -133,25 +134,25 @@ impl LoadBalancer for RandomBalancer {
     }
 
     fn update_targets(&self, targets: Vec<ResolvedTarget>) {
-        *self.targets.write().unwrap() = targets;
+        *self.targets.write() = targets;
     }
 
     fn mark_unhealthy(&self, addr: &str) {
-        let mut targets = self.targets.write().unwrap();
+        let mut targets = self.targets.write();
         if let Some(t) = targets.iter_mut().find(|t| t.addr == addr) {
             t.healthy = false;
         }
     }
 
     fn mark_healthy(&self, addr: &str) {
-        let mut targets = self.targets.write().unwrap();
+        let mut targets = self.targets.write();
         if let Some(t) = targets.iter_mut().find(|t| t.addr == addr) {
             t.healthy = true;
         }
     }
 
     fn get_statuses(&self) -> Vec<TargetStatus> {
-        let targets = self.targets.read().unwrap();
+        let targets = self.targets.read();
         statuses_from_targets(&targets)
     }
 }
@@ -179,7 +180,7 @@ impl Default for WeightedBalancer {
 
 impl LoadBalancer for WeightedBalancer {
     fn select(&self) -> Option<String> {
-        let targets = self.targets.read().unwrap();
+        let targets = self.targets.read();
         let healthy: Vec<_> = targets.iter().filter(|t| t.healthy).collect();
         if healthy.is_empty() {
             return None;
@@ -201,25 +202,25 @@ impl LoadBalancer for WeightedBalancer {
     }
 
     fn update_targets(&self, targets: Vec<ResolvedTarget>) {
-        *self.targets.write().unwrap() = targets;
+        *self.targets.write() = targets;
     }
 
     fn mark_unhealthy(&self, addr: &str) {
-        let mut targets = self.targets.write().unwrap();
+        let mut targets = self.targets.write();
         if let Some(t) = targets.iter_mut().find(|t| t.addr == addr) {
             t.healthy = false;
         }
     }
 
     fn mark_healthy(&self, addr: &str) {
-        let mut targets = self.targets.write().unwrap();
+        let mut targets = self.targets.write();
         if let Some(t) = targets.iter_mut().find(|t| t.addr == addr) {
             t.healthy = true;
         }
     }
 
     fn get_statuses(&self) -> Vec<TargetStatus> {
-        let targets = self.targets.read().unwrap();
+        let targets = self.targets.read();
         statuses_from_targets(&targets)
     }
 }
@@ -251,7 +252,7 @@ impl Default for LeastConnBalancer {
 
 impl LoadBalancer for LeastConnBalancer {
     fn select(&self) -> Option<String> {
-        let targets = self.targets.read().unwrap();
+        let targets = self.targets.read();
         targets
             .iter()
             .filter(|t| t.target.healthy)
@@ -260,7 +261,7 @@ impl LoadBalancer for LeastConnBalancer {
     }
 
     fn update_targets(&self, targets: Vec<ResolvedTarget>) {
-        let mut store = self.targets.write().unwrap();
+        let mut store = self.targets.write();
         // Preserve connection counts in O(n) by indexing the previous targets.
         let old_connections: HashMap<_, _> = store
             .iter()
@@ -285,35 +286,35 @@ impl LoadBalancer for LeastConnBalancer {
     }
 
     fn mark_unhealthy(&self, addr: &str) {
-        let mut targets = self.targets.write().unwrap();
+        let mut targets = self.targets.write();
         if let Some(t) = targets.iter_mut().find(|t| t.target.addr == addr) {
             t.target.healthy = false;
         }
     }
 
     fn mark_healthy(&self, addr: &str) {
-        let mut targets = self.targets.write().unwrap();
+        let mut targets = self.targets.write();
         if let Some(t) = targets.iter_mut().find(|t| t.target.addr == addr) {
             t.target.healthy = true;
         }
     }
 
     fn on_connect(&self, addr: &str) {
-        let targets = self.targets.read().unwrap();
+        let targets = self.targets.read();
         if let Some(t) = targets.iter().find(|t| t.target.addr == addr) {
             t.connections.fetch_add(1, Ordering::Relaxed);
         }
     }
 
     fn on_disconnect(&self, addr: &str) {
-        let targets = self.targets.read().unwrap();
+        let targets = self.targets.read();
         if let Some(t) = targets.iter().find(|t| t.target.addr == addr) {
             t.connections.fetch_sub(1, Ordering::Relaxed);
         }
     }
 
     fn get_statuses(&self) -> Vec<TargetStatus> {
-        let targets = self.targets.read().unwrap();
+        let targets = self.targets.read();
         targets
             .iter()
             .map(|t| TargetStatus {

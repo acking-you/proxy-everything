@@ -70,6 +70,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: nightly-2026-01-26
           targets: ${{ matrix.target }}
 
       - name: Build http-proxy-server
@@ -205,6 +206,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: nightly-2026-01-26
           targets: ${{ matrix.target }}
 
       - name: Install cross-compilation tools (Linux)

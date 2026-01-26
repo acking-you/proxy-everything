@@ -1,5 +1,5 @@
-use clap::Parser;
 use better_mimalloc_rs::{MiMalloc, MiMallocConfig};
+use clap::Parser;
 use proxy_core::config::{SERVER_PORT, init_tracing};
 use proxy_server::server::start_server;
 

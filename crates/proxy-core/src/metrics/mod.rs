@@ -30,18 +30,17 @@
 mod shard;
 mod types;
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
 
 use dashmap::DashMap;
-
+use parking_lot::RwLock;
+use shard::ShardData;
+use types::shard_index;
 pub use types::{
     ConnectionRecord, Granularity, MetricsConfig, RealtimeSnapshot, RealtimeStats, SiteVisit,
     SystemStats, TimeBucket, TopCategory, TrafficStats, current_time_ms,
 };
-
-use shard::ShardData;
-use types::shard_index;
 
 /// Memory-bounded metrics storage with DashMap sharding.
 pub struct MetricsStore {
@@ -89,7 +88,7 @@ impl MetricsStore {
         let visit = record.to_site_visit();
 
         if let Some(shard_ref) = self.shards.get(&shard_idx) {
-            let mut shard = shard_ref.write().unwrap();
+            let mut shard = shard_ref.write();
 
             // Check minute rotation
             shard.maybe_rotate_minute(
@@ -126,7 +125,7 @@ impl MetricsStore {
             let mut evicted_this_round = 0;
 
             for shard_ref in self.shards.iter() {
-                let mut shard = shard_ref.value().write().unwrap();
+                let mut shard = shard_ref.value().write();
                 let evicted = shard.evict(self.config.evict_per_shard);
                 evicted_this_round += evicted;
                 self.total_visits.fetch_sub(evicted, Ordering::Relaxed);
@@ -143,7 +142,7 @@ impl MetricsStore {
         let mut all_visits: Vec<(Arc<str>, SiteVisit)> = Vec::new();
 
         for shard_ref in self.shards.iter() {
-            let shard = shard_ref.value().read().unwrap();
+            let shard = shard_ref.value().read();
             for (host, visits) in shard.recent_visits.iter() {
                 for visit in visits.iter() {
                     all_visits.push((host.clone(), visit.clone()));
@@ -152,7 +151,7 @@ impl MetricsStore {
         }
 
         // Sort by ended_at_ms descending
-        all_visits.sort_by(|a, b| b.1.ended_at_ms.cmp(&a.1.ended_at_ms));
+        all_visits.sort_by_key(|b| std::cmp::Reverse(b.1.ended_at_ms));
         all_visits.truncate(limit);
 
         // Convert to ConnectionRecord
@@ -182,7 +181,7 @@ impl MetricsStore {
         let mut merged: HashMap<i64, TimeBucket> = HashMap::new();
 
         for shard_ref in self.shards.iter() {
-            let shard = shard_ref.value().read().unwrap();
+            let shard = shard_ref.value().read();
             let buckets = match granularity {
                 Granularity::Minute => &shard.minute_buckets,
                 Granularity::Hour => &shard.hour_buckets,
@@ -201,7 +200,7 @@ impl MetricsStore {
         }
 
         let mut result: Vec<_> = merged.into_values().collect();
-        result.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms));
+        result.sort_by_key(|b| std::cmp::Reverse(b.timestamp_ms));
         result.truncate(count);
         result
     }
@@ -213,7 +212,7 @@ impl MetricsStore {
         let mut merged: HashMap<String, TrafficStats> = HashMap::new();
 
         for shard_ref in self.shards.iter() {
-            let shard = shard_ref.value().read().unwrap();
+            let shard = shard_ref.value().read();
             let map = match category {
                 TopCategory::Ips => &shard.top_ips,
                 TopCategory::Hosts => &shard.top_hosts,

@@ -2,14 +2,11 @@
 
 use std::io::stdout;
 
-use crossterm::{
-    event::KeyCode,
-    execute,
-    terminal::{LeaveAlternateScreen, disable_raw_mode},
-};
-use tokio::sync::mpsc;
-
+use crossterm::event::KeyCode;
+use crossterm::execute;
+use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
 use proxy_core::relay::{RelayConfig, UpstreamTarget};
+use tokio::sync::mpsc;
 
 use super::types::{AppState, DataCommand, InputDialogMode};
 

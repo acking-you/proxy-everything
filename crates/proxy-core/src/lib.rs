@@ -122,11 +122,16 @@ pub fn proxy_result_handle(host: impl AsRef<str>, ret: Result<DataSize>, detail:
         Err(e) => {
             if e.is_expected_disconnect() {
                 tracing::debug!(
-                    "Proxy closed by peer:{e}, detail:{detail} host:{}",
+                    "Proxy closed by peer: {}, detail:{detail} host:{}",
+                    crate::util::error_report(&e),
                     host.as_ref()
                 );
             } else {
-                tracing::error!("Proxy error:{e}, detail:{detail} host:{}", host.as_ref());
+                tracing::error!(
+                    "Proxy error: {}, detail:{detail} host:{}",
+                    crate::util::error_report(&e),
+                    host.as_ref()
+                );
             }
         }
     }

@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use proxy_core::util::error_report;
 use serde::{Deserialize, Serialize};
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 use sysproxy::Sysproxy;
@@ -119,7 +120,7 @@ impl SystemProxyGuard {
         let original = match Sysproxy::get_system_proxy() {
             Ok(p) => p,
             Err(e) => {
-                tracing::error!("Failed to get current system proxy: {e}");
+                tracing::error!("Failed to get current system proxy: {}", error_report(&e));
                 return None;
             }
         };
@@ -130,7 +131,7 @@ impl SystemProxyGuard {
             bypass: original.bypass.clone(),
         };
         if let Err(e) = new_proxy.set_system_proxy() {
-            tracing::error!("Failed to set system proxy: {e}");
+            tracing::error!("Failed to set system proxy: {}", error_report(&e));
             return None;
         }
         tracing::info!("System proxy set to 127.0.0.1:{port}");
@@ -148,7 +149,7 @@ impl Drop for SystemProxyGuard {
             bypass: self.original.bypass.clone(),
         };
         if let Err(e) = disabled.set_system_proxy() {
-            tracing::error!("Failed to disable system proxy: {e}");
+            tracing::error!("Failed to disable system proxy: {}", error_report(&e));
         } else {
             tracing::info!("System proxy disabled");
         }

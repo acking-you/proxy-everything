@@ -5,6 +5,8 @@ use std::ptr;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use proxy_core::util::error_report;
+
 use crate::handle::ProxyHandle;
 use crate::types::LatencyResult;
 
@@ -75,13 +77,19 @@ pub unsafe extern "C" fn proxy_test_latency(
             {
                 Ok(c) => *guard = Some(c),
                 Err(e) => {
-                    tracing::error!("proxy_test_latency: failed to create client: {}", e);
+                    tracing::error!(
+                        "proxy_test_latency: failed to create client: {}",
+                        error_report(&e)
+                    );
                     return LatencyResult {
                         success: 0,
                         latency_ms: 0,
-                        error: CString::new(format!("Failed to create client: {}", e))
-                            .unwrap()
-                            .into_raw(),
+                        error: CString::new(format!(
+                            "Failed to create client: {}",
+                            error_report(&e)
+                        ))
+                        .unwrap()
+                        .into_raw(),
                     };
                 }
             }
@@ -98,11 +106,11 @@ pub unsafe extern "C" fn proxy_test_latency(
                 error: ptr::null_mut(),
             },
             Err(e) => {
-                tracing::warn!("proxy_test_latency: request failed: {}", e);
+                tracing::warn!("proxy_test_latency: request failed: {}", error_report(&e));
                 LatencyResult {
                     success: 0,
                     latency_ms: start.elapsed().as_millis() as u64,
-                    error: CString::new(format!("Request failed: {}", e))
+                    error: CString::new(format!("Request failed: {}", error_report(&e)))
                         .unwrap()
                         .into_raw(),
                 }

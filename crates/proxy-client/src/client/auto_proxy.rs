@@ -79,14 +79,13 @@ pub enum ProxyStrategy {
     Direct,
 }
 
+use proxy_core::config::{USE_LOCAL_GEOIP, runtime};
+use proxy_core::geo::query_geo_single;
+use proxy_core::util::{QueryIpTaskId, TaskId, TaskIdGenerator, error_report};
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tracing::info;
-
-use proxy_core::config::{USE_LOCAL_GEOIP, runtime};
-use proxy_core::geo::query_geo_single;
-use proxy_core::util::{QueryIpTaskId, TaskId, TaskIdGenerator};
 
 /// Query country code and convert to proxy strategy.
 pub async fn get_country_code(host: impl AsRef<str>) -> Result<ProxyStrategy> {
@@ -228,9 +227,9 @@ impl CacheManager {
             .await
             .context(WALSnafu)
         {
-            tracing::error!(host, need_proxy, wal_error = ?e);
+            tracing::error!(host, need_proxy, wal_error = %error_report(&e));
         } else if let Err(e) = file.flush().await.context(WALSnafu) {
-            tracing::error!(host, need_proxy, flush_error = ?e);
+            tracing::error!(host, need_proxy, flush_error = %error_report(&e));
         }
     }
 }
@@ -274,13 +273,13 @@ pub async fn run_auto_proxy_by_country(receiver: ReceiverChan, cache_dir: Option
                 match receiver.recv().await {
                     Ok(item) => batch_buffer.push(item),
                     Err(e) => {
-                        tracing::error!(channel_msg_error = ?e);
+                        tracing::error!(channel_msg_error = %error_report(&e));
                         return;
                     }
                 }
             }
             Err(e) => {
-                tracing::error!(drain_error = ?e);
+                tracing::error!(drain_error = %error_report(&e));
                 return;
             }
         }
@@ -308,7 +307,11 @@ pub async fn run_auto_proxy_by_country(receiver: ReceiverChan, cache_dir: Option
 
 async fn cached_send(notifier: AsyncSender<bool>, need_proxy: bool, host: &str) {
     if let Err(e) = notifier.send(need_proxy).await {
-        tracing::error!(cached_proxy = need_proxy,proxy_host=host ,notifier_send_error = ?e);
+        tracing::error!(
+            cached_proxy = need_proxy,
+            proxy_host = host,
+            notifier_send_error = %error_report(&e)
+        );
     } else {
         tracing::info!(cached_proxy = need_proxy, proxy_host = host);
     }
@@ -316,7 +319,11 @@ async fn cached_send(notifier: AsyncSender<bool>, need_proxy: bool, host: &str) 
 
 async fn cache_miss_send(notifier: AsyncSender<bool>, need_proxy: bool, host: &str) {
     if let Err(e) = notifier.send(need_proxy).await {
-        tracing::error!(cache_miss = need_proxy,proxy_host = host,notifier_send_error = ?e);
+        tracing::error!(
+            cache_miss = need_proxy,
+            proxy_host = host,
+            notifier_send_error = %error_report(&e)
+        );
     } else {
         tracing::info!(cached_proxy = need_proxy, proxy_host = host);
     }
@@ -361,7 +368,11 @@ async fn check_proxy(context: TaskContext) {
                     cache_miss_send(notifier, r, &host).await;
                 }
                 Err(e) => {
-                    tracing::error!(task_id, host, receive_exist_task_error = ?e);
+                    tracing::error!(
+                        task_id,
+                        host,
+                        receive_exist_task_error = %error_report(&e)
+                    );
                     // On error: proxy in normal mode, direct in reverse mode
                     cache_miss_send(notifier, !runtime::reverse_geo(), &host).await;
                 }
@@ -384,7 +395,7 @@ async fn check_proxy(context: TaskContext) {
     // broadcast result & update cache
     match tx.broadcast(need_proxy).await {
         Ok(_) => tracing::info!(task_id, host, info = "broadcast ok!"),
-        Err(e) => tracing::error!(task_id, host, broadcast_error= ?e),
+        Err(e) => tracing::error!(task_id, host, broadcast_error = %error_report(&e)),
     }
 
     // Update cache (global PROXY_CACHE + WAL)

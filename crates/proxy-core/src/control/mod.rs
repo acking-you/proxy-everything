@@ -40,6 +40,9 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+use snafu::{ResultExt, Snafu};
+
 use crate::codec::{AsyncReader, AsyncWriter};
 use crate::metrics::{
     ConnectionRecord, Granularity, RealtimeSnapshot, TimeBucket, TopCategory, TrafficStats,
@@ -47,10 +50,9 @@ use crate::metrics::{
 use crate::nodes::{NodeGroup, NodeInfo};
 use crate::relay::{LoadBalanceAlgo, RelayConfig, RelayStatus, UpstreamTarget};
 use crate::transport::{TransportError, get_tcp_proxy_stream};
-use crate::{Aes256GcmCryption, MyAsyncReadExt, MyAsyncWriteExt};
-use crate::{ProxyError, get_data_size, set_data_size};
-use serde::{Deserialize, Serialize};
-use snafu::{ResultExt, Snafu};
+use crate::{
+    Aes256GcmCryption, MyAsyncReadExt, MyAsyncWriteExt, ProxyError, get_data_size, set_data_size,
+};
 
 pub const CONTROL_HOST: &str = "__control__";
 pub const CONTROL_PORT: u16 = 0;

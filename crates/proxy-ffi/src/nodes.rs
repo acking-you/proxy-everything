@@ -4,11 +4,11 @@ use std::ffi::{CStr, CString, c_char};
 use std::ptr;
 use std::time::Duration;
 
-use tokio::runtime::Runtime;
-
 use proxy_core::config::DEFAULT_SECRET_KEY;
 use proxy_core::control::ControlClient;
 use proxy_core::geo::query_geo_batch;
+use proxy_core::util::error_report;
+use tokio::runtime::Runtime;
 
 use crate::latency::DEFAULT_TIMEOUT_MS;
 use crate::types::{NodeInfoWithGeo, NodesResult};
@@ -72,12 +72,15 @@ pub unsafe extern "C" fn proxy_get_server_nodes(
     let runtime = match Runtime::new() {
         Ok(rt) => rt,
         Err(e) => {
-            tracing::error!("proxy_get_server_nodes: failed to create runtime: {}", e);
+            tracing::error!(
+                "proxy_get_server_nodes: failed to create runtime: {}",
+                error_report(&e)
+            );
             return NodesResult {
                 success: 0,
                 nodes: ptr::null_mut(),
                 count: 0,
-                error: CString::new(format!("Failed to create runtime: {}", e))
+                error: CString::new(format!("Failed to create runtime: {}", error_report(&e)))
                     .unwrap()
                     .into_raw(),
             };
@@ -99,13 +102,13 @@ pub unsafe extern "C" fn proxy_get_server_nodes(
                     "proxy_get_server_nodes: connection failed to {}:{}: {}",
                     host,
                     server_port,
-                    e
+                    error_report(&e)
                 );
                 return NodesResult {
                     success: 0,
                     nodes: ptr::null_mut(),
                     count: 0,
-                    error: CString::new(format!("Connection failed: {}", e))
+                    error: CString::new(format!("Connection failed: {}", error_report(&e)))
                         .unwrap()
                         .into_raw(),
                 };
@@ -129,12 +132,15 @@ pub unsafe extern "C" fn proxy_get_server_nodes(
         let nodes = match client.list_nodes(key.clone()).await {
             Ok(n) => n,
             Err(e) => {
-                tracing::error!("proxy_get_server_nodes: failed to list nodes: {}", e);
+                tracing::error!(
+                    "proxy_get_server_nodes: failed to list nodes: {}",
+                    error_report(&e)
+                );
                 return NodesResult {
                     success: 0,
                     nodes: ptr::null_mut(),
                     count: 0,
-                    error: CString::new(format!("Failed to list nodes: {}", e))
+                    error: CString::new(format!("Failed to list nodes: {}", error_report(&e)))
                         .unwrap()
                         .into_raw(),
                 };

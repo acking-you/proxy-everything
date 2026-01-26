@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
-
 use proxy_core::control::ControlClient;
 use proxy_core::geo::query_geo_batch;
 use proxy_core::metrics::{Granularity, TopCategory};
+use proxy_core::util::error_report;
+use tokio::sync::mpsc;
 
 use super::types::{Cli, DataCommand, DataResult, FetchedData};
 use super::utils::parse_addr;
@@ -132,10 +132,10 @@ pub async fn data_fetcher_task(
                     }
                 }
                 Err(e) => {
-                    tracing::error!("Geo query failed: {}", e);
+                    tracing::error!("Geo query failed: {}", error_report(&e));
                     let msg = format!(
                         "Geo query failed: {}. Try --use-local-geoip for offline lookup.",
-                        e
+                        error_report(&e)
                     );
                     if data_tx.send(Ok(DataResult::GeoError(msg))).await.is_err() {
                         tracing::warn!("Main loop closed, exiting data fetcher");

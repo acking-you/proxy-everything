@@ -39,9 +39,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 /// Node information.
@@ -143,8 +143,8 @@ impl NodeStore {
 
         // Single write lock scope for self_node and self_addrs
         {
-            let mut self_node = self.self_node.write().unwrap();
-            let mut self_addrs = self.self_addrs.write().unwrap();
+            let mut self_node = self.self_node.write();
+            let mut self_addrs = self.self_addrs.write();
             *self_node = file.self_node;
             self_addrs.clear();
             if let Some(ref node) = *self_node {
@@ -152,19 +152,19 @@ impl NodeStore {
             }
         }
 
-        let mut peers = self.peers.write().unwrap();
+        let mut peers = self.peers.write();
         peers.clear();
         for peer in file.peers {
             peers.insert(peer.node_id.clone(), peer);
         }
 
-        let mut groups = self.groups.write().unwrap();
+        let mut groups = self.groups.write();
         groups.clear();
         for group in file.groups {
             groups.insert(group.group_id.clone(), group);
         }
 
-        let mut blocked = self.blocked.write().unwrap();
+        let mut blocked = self.blocked.write();
         blocked.clear();
         blocked.extend(file.blocked);
 
@@ -183,7 +183,7 @@ impl NodeStore {
         // Check if content changed
         let hash = simple_hash(&content);
         {
-            let mut last = self.last_hash.write().unwrap();
+            let mut last = self.last_hash.write();
             if *last == hash {
                 return Ok(());
             }
@@ -208,10 +208,10 @@ impl NodeStore {
     }
 
     fn to_file(&self) -> NodesFile {
-        let self_node = self.self_node.read().unwrap().clone();
-        let peers: Vec<_> = self.peers.read().unwrap().values().cloned().collect();
-        let groups: Vec<_> = self.groups.read().unwrap().values().cloned().collect();
-        let blocked: Vec<_> = self.blocked.read().unwrap().iter().cloned().collect();
+        let self_node = self.self_node.read().clone();
+        let peers: Vec<_> = self.peers.read().values().cloned().collect();
+        let groups: Vec<_> = self.groups.read().values().cloned().collect();
+        let blocked: Vec<_> = self.blocked.read().iter().cloned().collect();
         NodesFile {
             version: 2,
             self_node,
@@ -225,12 +225,12 @@ impl NodeStore {
     /// Set self node information.
     pub fn set_self(&self, node_id: String, addr: String) {
         let addr_clone = addr.clone();
-        *self.self_node.write().unwrap() = Some(SelfNode {
+        *self.self_node.write() = Some(SelfNode {
             node_id,
             addr,
             started_at_ms: current_time_ms(),
         });
-        let mut self_addrs = self.self_addrs.write().unwrap();
+        let mut self_addrs = self.self_addrs.write();
         self_addrs.clear();
         self_addrs.push(addr_clone);
     }
@@ -248,23 +248,19 @@ impl NodeStore {
             }
             unique.push(trimmed.to_string());
         }
-        let mut self_addrs = self.self_addrs.write().unwrap();
+        let mut self_addrs = self.self_addrs.write();
         self_addrs.clear();
         self_addrs.extend(unique);
     }
 
     /// Get self node information.
     pub fn get_self(&self) -> Option<SelfNode> {
-        self.self_node.read().unwrap().clone()
+        self.self_node.read().clone()
     }
 
     /// Get self node ID.
     pub fn self_node_id(&self) -> Option<String> {
-        self.self_node
-            .read()
-            .unwrap()
-            .as_ref()
-            .map(|n| n.node_id.clone())
+        self.self_node.read().as_ref().map(|n| n.node_id.clone())
     }
 
     /// Update or add a peer.
@@ -272,21 +268,18 @@ impl NodeStore {
         if self.is_self_addr(&peer.addr) {
             return;
         }
-        if self.blocked.read().unwrap().contains(&peer.node_id) {
+        if self.blocked.read().contains(&peer.node_id) {
             return;
         }
-        self.peers
-            .write()
-            .unwrap()
-            .insert(peer.node_id.clone(), peer);
+        self.peers.write().insert(peer.node_id.clone(), peer);
     }
 
     /// Update multiple peers.
     pub fn upsert_peers(&self, peers: Vec<NodeInfo>) {
         let self_id = self.self_node_id();
-        let self_addrs = self.self_addrs.read().unwrap().clone();
-        let blocked = self.blocked.read().unwrap().clone();
-        let mut store = self.peers.write().unwrap();
+        let self_addrs = self.self_addrs.read().clone();
+        let blocked = self.blocked.read().clone();
+        let mut store = self.peers.write();
         for mut peer in peers {
             // Don't store self as peer
             if self_id.as_ref() == Some(&peer.node_id) {
@@ -310,31 +303,31 @@ impl NodeStore {
 
     /// Remove a peer.
     pub fn remove_peer(&self, node_id: &str) -> bool {
-        self.peers.write().unwrap().remove(node_id).is_some()
+        self.peers.write().remove(node_id).is_some()
     }
 
     /// Block a peer by node id and remove it from the active peer list.
     pub fn block_peer(&self, node_id: &str) -> bool {
-        self.peers.write().unwrap().remove(node_id);
-        for group in self.groups.write().unwrap().values_mut() {
+        self.peers.write().remove(node_id);
+        for group in self.groups.write().values_mut() {
             group.node_ids.retain(|id| id != node_id);
         }
-        self.blocked.write().unwrap().insert(node_id.to_string())
+        self.blocked.write().insert(node_id.to_string())
     }
 
     /// Unblock a peer by node id so it can be re-added or synced again.
     pub fn unblock_peer(&self, node_id: &str) -> bool {
-        self.blocked.write().unwrap().remove(node_id)
+        self.blocked.write().remove(node_id)
     }
 
     /// Check if a peer is blocked.
     pub fn is_blocked(&self, node_id: &str) -> bool {
-        self.blocked.read().unwrap().contains(node_id)
+        self.blocked.read().contains(node_id)
     }
 
     /// Get a snapshot of blocked node IDs.
     pub fn blocked_list(&self) -> Vec<String> {
-        self.blocked.read().unwrap().iter().cloned().collect()
+        self.blocked.read().iter().cloned().collect()
     }
 
     /// Merge blocked node IDs and remove any matching peers/groups.
@@ -342,9 +335,9 @@ impl NodeStore {
         if blocked.is_empty() {
             return;
         }
-        let mut blocked_set = self.blocked.write().unwrap();
-        let mut peers = self.peers.write().unwrap();
-        let mut groups = self.groups.write().unwrap();
+        let mut blocked_set = self.blocked.write();
+        let mut peers = self.peers.write();
+        let mut groups = self.groups.write();
         for node_id in blocked {
             peers.remove(&node_id);
             for group in groups.values_mut() {
@@ -356,21 +349,21 @@ impl NodeStore {
 
     /// Update peer's last_seen timestamp.
     pub fn update_peer_seen(&self, node_id: &str) {
-        if let Some(peer) = self.peers.write().unwrap().get_mut(node_id) {
+        if let Some(peer) = self.peers.write().get_mut(node_id) {
             peer.last_seen_ms = current_time_ms();
         }
     }
 
     /// List all peers.
     pub fn list_peers(&self) -> Vec<NodeInfo> {
-        self.peers.read().unwrap().values().cloned().collect()
+        self.peers.read().values().cloned().collect()
     }
 
     /// List all nodes (self + peers).
     pub fn list_all_nodes(&self) -> Vec<NodeInfo> {
         let mut nodes = Vec::new();
-        if let Some(self_node) = self.self_node.read().unwrap().as_ref() {
-            let self_addrs = self.self_addrs.read().unwrap().clone();
+        if let Some(self_node) = self.self_node.read().as_ref() {
+            let self_addrs = self.self_addrs.read().clone();
             let addrs = if self_addrs.is_empty() {
                 vec![self_node.addr.clone()]
             } else {
@@ -384,7 +377,7 @@ impl NodeStore {
                 });
             }
         }
-        let self_addrs = self.self_addrs.read().unwrap().clone();
+        let self_addrs = self.self_addrs.read().clone();
         nodes.extend(
             self.list_peers()
                 .into_iter()
@@ -395,19 +388,19 @@ impl NodeStore {
 
     /// Check if address belongs to this node.
     pub fn is_self_addr(&self, addr: &str) -> bool {
-        self.self_addrs.read().unwrap().iter().any(|v| v == addr)
+        self.self_addrs.read().iter().any(|v| v == addr)
     }
 
     /// Clean up stale peers (not seen for given duration).
     pub fn cleanup_stale(&self, max_age_ms: i64) {
         let now = current_time_ms();
-        let mut peers = self.peers.write().unwrap();
+        let mut peers = self.peers.write();
         peers.retain(|_, peer| now - peer.last_seen_ms < max_age_ms);
     }
 
     /// Get peer count.
     pub fn peer_count(&self) -> usize {
-        self.peers.read().unwrap().len()
+        self.peers.read().len()
     }
 
     // ========================================================================
@@ -416,7 +409,7 @@ impl NodeStore {
 
     /// Create a new group.
     pub fn create_group(&self, group_id: String, name: String) -> bool {
-        let mut groups = self.groups.write().unwrap();
+        let mut groups = self.groups.write();
         if groups.contains_key(&group_id) {
             return false;
         }
@@ -434,22 +427,22 @@ impl NodeStore {
 
     /// Delete a group.
     pub fn delete_group(&self, group_id: &str) -> bool {
-        self.groups.write().unwrap().remove(group_id).is_some()
+        self.groups.write().remove(group_id).is_some()
     }
 
     /// List all groups.
     pub fn list_groups(&self) -> Vec<NodeGroup> {
-        self.groups.read().unwrap().values().cloned().collect()
+        self.groups.read().values().cloned().collect()
     }
 
     /// Get a group by ID.
     pub fn get_group(&self, group_id: &str) -> Option<NodeGroup> {
-        self.groups.read().unwrap().get(group_id).cloned()
+        self.groups.read().get(group_id).cloned()
     }
 
     /// Add a node to a group.
     pub fn add_node_to_group(&self, group_id: &str, node_id: String) -> bool {
-        let mut groups = self.groups.write().unwrap();
+        let mut groups = self.groups.write();
         if let Some(group) = groups.get_mut(group_id) {
             if !group.node_ids.contains(&node_id) {
                 group.node_ids.push(node_id);
@@ -462,7 +455,7 @@ impl NodeStore {
 
     /// Remove a node from a group.
     pub fn remove_node_from_group(&self, group_id: &str, node_id: &str) -> bool {
-        let mut groups = self.groups.write().unwrap();
+        let mut groups = self.groups.write();
         if let Some(group) = groups.get_mut(group_id) {
             let len_before = group.node_ids.len();
             group.node_ids.retain(|id| id != node_id);
@@ -474,8 +467,8 @@ impl NodeStore {
 
     /// Get all node addresses in a group.
     pub fn get_group_addrs(&self, group_id: &str) -> Vec<String> {
-        let groups = self.groups.read().unwrap();
-        let peers = self.peers.read().unwrap();
+        let groups = self.groups.read();
+        let peers = self.peers.read();
         let Some(group) = groups.get(group_id) else {
             return Vec::new();
         };
@@ -488,7 +481,7 @@ impl NodeStore {
 
     /// Get group count.
     pub fn group_count(&self) -> usize {
-        self.groups.read().unwrap().len()
+        self.groups.read().len()
     }
 }
 
@@ -508,8 +501,9 @@ fn simple_hash(s: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::env::temp_dir;
+
+    use super::*;
 
     #[test]
     fn test_node_store() {

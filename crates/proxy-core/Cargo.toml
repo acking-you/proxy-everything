@@ -28,6 +28,7 @@ tracing-subscriber = { workspace = true }
 dashmap = { workspace = true }
 arc-swap = { workspace = true }
 once_cell = { workspace = true }
+parking_lot = { workspace = true }
 
 # Collections
 indexmap = { workspace = true }

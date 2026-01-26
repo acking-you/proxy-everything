@@ -21,16 +21,14 @@
 //!
 //! # Security Considerations
 //!
-//! - **Nonce uniqueness**: Uses a counter-based nonce sequence to ensure
-//!   each encryption operation uses a unique nonce. The counter is stored
-//!   in the last 4 bytes of the 12-byte nonce.
+//! - **Nonce uniqueness**: Uses a counter-based nonce sequence to ensure each encryption operation
+//!   uses a unique nonce. The counter is stored in the last 4 bytes of the 12-byte nonce.
 //!
-//! - **Per-connection instances**: Each connection should create its own
-//!   `Aes256GcmCryption` instance to maintain independent nonce counters.
-//!   Sharing instances across connections would cause nonce reuse.
+//! - **Per-connection instances**: Each connection should create its own `Aes256GcmCryption`
+//!   instance to maintain independent nonce counters. Sharing instances across connections would
+//!   cause nonce reuse.
 //!
-//! - **Key requirements**: The encryption key must be exactly 32 bytes
-//!   (256 bits) for AES-256-GCM.
+//! - **Key requirements**: The encryption key must be exactly 32 bytes (256 bits) for AES-256-GCM.
 //!
 //! # Example
 //!

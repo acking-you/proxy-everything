@@ -57,24 +57,22 @@ use std::path::PathBuf;
 
 #[cfg(feature = "auto-proxy")]
 use auto_proxy::{SenderChan, run_auto_proxy_by_country};
-use snafu::{Report, ResultExt, Snafu};
-
-use tokio::io::AsyncReadExt;
-use tokio::net::TcpListener;
-use tokio::net::TcpStream;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-
-use self::http::{HttpProxierProvider, HttpProxyError};
-use self::socks::{SocksError, SocksProxierProvider};
 use proxy_core::codec::{AsyncReader, AsyncReaderWriterRef, AsyncWriter};
 use proxy_core::config::{gen_random_key, runtime};
-use proxy_core::util::{GracefulShutdownManager, GracefulShutdownManagerImpl};
+use proxy_core::util::{GracefulShutdownManager, GracefulShutdownManagerImpl, error_report};
 use proxy_core::{
     Aes256GcmCryption, MyAsyncWriteExt, ProxyHeader, client_proxy_with_cryptor_codec,
     proxy_with_norlmal_codec, set_data_size,
 };
+use snafu::{Report, ResultExt, Snafu};
+use tokio::io::AsyncReadExt;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+
+use self::http::{HttpProxierProvider, HttpProxyError};
+use self::socks::{SocksError, SocksProxierProvider};
 
 #[derive(Debug, Snafu)]
 pub enum ClientError {
@@ -418,10 +416,10 @@ pub async fn need_proxy(
                 }
                 Err(e) => {
                     tracing::error!(
-                        "{}:{} check ip error:{},we will use normal proxy by default",
+                        "{}:{} check ip error: {},we will use normal proxy by default",
                         host.as_ref(),
                         port,
-                        e
+                        error_report(&e)
                     );
                     Ok(ProxyStatus::NorlmalProxy)
                 }

@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use better_mimalloc_rs::{MiMalloc, MiMallocConfig};
 use clap::Parser;
 use comfy_table::{Cell, Color, Table, presets};
-use better_mimalloc_rs::{MiMalloc, MiMallocConfig};
 use proxy_client::cli_config::{
     Config, DEFAULT_CONFIG_TEMPLATE, SystemProxyGuard, find_config, get_default_config_path,
 };

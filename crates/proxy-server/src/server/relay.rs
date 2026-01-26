@@ -1,13 +1,23 @@
 //! Relay manager for dynamic upstream configuration.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use parking_lot::RwLock;
 use proxy_core::nodes::NodeStore;
 use proxy_core::relay::{
     LoadBalanceAlgo, LoadBalancer, RelayConfig, RelayStatus, ResolvedTarget, UpstreamTarget,
     create_balancer,
 };
+use tokio::net::TcpStream;
+use tokio_util::sync::CancellationToken;
+
+const HEALTHY_PING_INTERVAL: Duration = Duration::from_secs(60 * 3);
+const UNHEALTHY_PING_INTERVAL: Duration = Duration::from_secs(30);
+const PING_TIMEOUT: Duration = Duration::from_secs(3);
+const HEALTH_CHECK_TICK: Duration = Duration::from_secs(5);
 
 fn default_config_dir() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
@@ -53,7 +63,7 @@ impl RelayManager {
     }
 
     fn save_config(&self) -> std::io::Result<()> {
-        let config = self.config.read().unwrap();
+        let config = self.config.read();
         let content = serde_json::to_string_pretty(&*config)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         drop(config);
@@ -71,7 +81,7 @@ impl RelayManager {
 
     /// Check if relay is enabled.
     pub fn is_enabled(&self) -> bool {
-        self.config.read().unwrap().enabled
+        self.config.read().enabled
     }
 
     /// Select an upstream target.
@@ -79,18 +89,18 @@ impl RelayManager {
         if !self.is_enabled() {
             return None;
         }
-        self.balancer.read().unwrap().select()
+        self.balancer.read().select()
     }
 
     /// Get current config.
     pub fn get_config(&self) -> RelayConfig {
-        self.config.read().unwrap().clone()
+        self.config.read().clone()
     }
 
     /// Set entire config.
     pub fn set_config(&self, config: RelayConfig) {
         let algo = config.algo;
-        *self.config.write().unwrap() = config;
+        *self.config.write() = config;
         self.update_balancer(algo);
         self.refresh_targets();
         let _ = self.save_config();
@@ -98,20 +108,20 @@ impl RelayManager {
 
     /// Set relay enabled state.
     pub fn set_enabled(&self, enabled: bool) {
-        self.config.write().unwrap().enabled = enabled;
+        self.config.write().enabled = enabled;
         let _ = self.save_config();
     }
 
     /// Add a target.
     pub fn add_target(&self, target: UpstreamTarget) {
-        self.config.write().unwrap().targets.push(target);
+        self.config.write().targets.push(target);
         self.refresh_targets();
         let _ = self.save_config();
     }
 
     /// Remove a target by index.
     pub fn remove_target(&self, index: usize) -> bool {
-        let mut config = self.config.write().unwrap();
+        let mut config = self.config.write();
         if index >= config.targets.len() {
             return false;
         }
@@ -124,7 +134,7 @@ impl RelayManager {
 
     /// Set load balance algorithm.
     pub fn set_algo(&self, algo: LoadBalanceAlgo) {
-        self.config.write().unwrap().algo = algo;
+        self.config.write().algo = algo;
         self.update_balancer(algo);
         self.refresh_targets();
         let _ = self.save_config();
@@ -137,8 +147,8 @@ impl RelayManager {
     /// connection counts for existing targets.
     pub fn get_status(&self) -> RelayStatus {
         self.refresh_targets();
-        let config = self.config.read().unwrap();
-        let targets = self.balancer.read().unwrap().get_statuses();
+        let config = self.config.read();
+        let targets = self.balancer.read().get_statuses();
         RelayStatus {
             enabled: config.enabled,
             algo: config.algo,
@@ -146,35 +156,99 @@ impl RelayManager {
         }
     }
 
+    /// Periodically ping relay targets to update health status.
+    ///
+    /// Healthy targets are checked every few minutes. Unhealthy targets are
+    /// checked every 30 seconds to speed up recovery.
+    pub async fn run_health_checks(self: Arc<Self>, cancel_token: CancellationToken) {
+        let mut last_check: HashMap<String, Instant> = HashMap::new();
+        let mut ticker = tokio::time::interval(HEALTH_CHECK_TICK);
+
+        loop {
+            tokio::select! {
+                _ = cancel_token.cancelled() => break,
+                _ = ticker.tick() => {}
+            }
+
+            if !self.is_enabled() {
+                continue;
+            }
+
+            let status = self.get_status();
+            let now = Instant::now();
+
+            let mut current = HashMap::new();
+            for target in status.targets {
+                let interval = if target.healthy {
+                    HEALTHY_PING_INTERVAL
+                } else {
+                    UNHEALTHY_PING_INTERVAL
+                };
+                let last = last_check
+                    .entry(target.addr.clone())
+                    .or_insert_with(|| now - interval);
+                current.insert(target.addr.clone(), ());
+                if now.duration_since(*last) < interval {
+                    continue;
+                }
+                *last = now;
+
+                let addr = target.addr.clone();
+                let ok = ping_target(&addr).await;
+                if ok {
+                    self.mark_healthy(&addr);
+                } else {
+                    self.mark_unhealthy(&addr);
+                }
+            }
+
+            last_check.retain(|addr, _| current.contains_key(addr));
+        }
+    }
+
     /// Mark a target as unhealthy.
     pub fn mark_unhealthy(&self, addr: &str) {
-        self.balancer.read().unwrap().mark_unhealthy(addr);
+        self.balancer.read().mark_unhealthy(addr);
     }
 
     /// Mark a target as healthy.
     pub fn mark_healthy(&self, addr: &str) {
-        self.balancer.read().unwrap().mark_healthy(addr);
+        self.balancer.read().mark_healthy(addr);
     }
 
     /// Notify connection start (for LeastConn).
     pub fn on_connect(&self, addr: &str) {
-        self.balancer.read().unwrap().on_connect(addr);
+        self.balancer.read().on_connect(addr);
     }
 
     /// Notify connection end (for LeastConn).
     pub fn on_disconnect(&self, addr: &str) {
-        self.balancer.read().unwrap().on_disconnect(addr);
+        self.balancer.read().on_disconnect(addr);
     }
 
     fn update_balancer(&self, algo: LoadBalanceAlgo) {
-        *self.balancer.write().unwrap() = create_balancer(algo);
+        *self.balancer.write() = create_balancer(algo);
     }
 
     fn refresh_targets(&self) {
-        let config = self.config.read().unwrap();
-        let resolved = self.resolve_targets_inner(&config);
+        let config = self.config.read();
+        let mut resolved = self.resolve_targets_inner(&config);
         drop(config);
-        self.balancer.read().unwrap().update_targets(resolved);
+
+        let health_map: HashMap<String, bool> = self
+            .balancer
+            .read()
+            .get_statuses()
+            .into_iter()
+            .map(|s| (s.addr, s.healthy))
+            .collect();
+        for target in &mut resolved {
+            if let Some(healthy) = health_map.get(&target.addr) {
+                target.healthy = *healthy;
+            }
+        }
+
+        self.balancer.read().update_targets(resolved);
     }
 
     fn resolve_targets_inner(&self, config: &RelayConfig) -> Vec<ResolvedTarget> {
@@ -219,10 +293,21 @@ impl RelayManager {
     }
 }
 
+async fn ping_target(addr: &str) -> bool {
+    match tokio::time::timeout(PING_TIMEOUT, TcpStream::connect(addr)).await {
+        Ok(Ok(stream)) => {
+            drop(stream);
+            true
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::env::temp_dir;
+
+    use super::*;
 
     #[test]
     fn test_relay_manager() {

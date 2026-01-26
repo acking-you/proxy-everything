@@ -4,7 +4,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use clap::Parser;
-
 use proxy_core::control::{ControlClient, ControlResponse, ControlResult};
 use proxy_core::nodes::{NodeGroup, NodeInfo};
 use proxy_core::relay::{LoadBalanceAlgo, RelayConfig, RelayStatus, UpstreamTarget};

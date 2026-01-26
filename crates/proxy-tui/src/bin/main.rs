@@ -5,11 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
-    execute,
-    terminal::{EnterAlternateScreen, enable_raw_mode},
-};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::execute;
+use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use proxy_core::config::{CONTROL_SESSION_KEY, DEFAULT_SECRET_KEY};
 use proxy_tui::tui::{
     AppState, Cli, DataCommand, DataResult, InputDialogMode, TAB_COUNT, TerminalGuard,

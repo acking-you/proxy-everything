@@ -6,13 +6,13 @@ use std::ptr;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tokio::net::TcpListener;
-use tokio::runtime::Runtime;
-use tokio_util::sync::CancellationToken;
-
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 use proxy_client::cli_config::SystemProxyGuard;
 use proxy_client::client::{ClientConfig, run_client_with_listener};
+use proxy_core::util::error_report;
+use tokio::net::TcpListener;
+use tokio::runtime::Runtime;
+use tokio_util::sync::CancellationToken;
 
 use crate::logging::send_log;
 use crate::types::{ProxyConfig, ProxyResult};
@@ -169,7 +169,7 @@ pub unsafe extern "C" fn proxy_start(
         let listener = match TcpListener::bind(("127.0.0.1", local_port)).await {
             Ok(l) => l,
             Err(e) => {
-                tracing::error!("Failed to bind listener: {}", e);
+                tracing::error!("Failed to bind listener: {}", error_report(&e));
                 return;
             }
         };

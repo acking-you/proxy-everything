@@ -1,4 +1,5 @@
 TAG ?= dev
+CRATES ?= proxy-core proxy-client proxy-server proxy-tui proxy-ffi
 
 build-client-release:
 	bash ./scripts/build/build-client-release.sh
@@ -20,4 +21,17 @@ build-client-podman-image: build-client-release
 
 build-server-podman-image: build-server-release
 	bash ./scripts/release/build-server-podman-image.sh ${TAG}
-.PHONY:
+
+fmt:
+	cargo fmt $(foreach c,$(CRATES),-p $(c))
+
+clippy:
+	cargo clippy $(foreach c,$(CRATES),-p $(c))
+
+test:
+	cargo test $(foreach c,$(CRATES),-p $(c))
+
+.PHONY: build-client-release build-cli-release build-server-release \
+	build-client-docker-image build-server-docker-image \
+	build-client-podman-image build-server-podman-image \
+	fmt clippy test

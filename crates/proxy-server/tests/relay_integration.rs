@@ -3,14 +3,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::net::TcpListener;
-use tokio_util::sync::CancellationToken;
-
 use proxy_core::control::{ControlClient, ControlOp, ControlRequest, ControlResult};
 use proxy_core::metrics::MetricsStore;
 use proxy_core::nodes::NodeStore;
 use proxy_core::relay::{LoadBalanceAlgo, RelayConfig, UpstreamTarget};
 use proxy_server::{RelayManager, ServerConfig, run_server_with_listener};
+use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 
 fn unique_test_dir() -> std::path::PathBuf {
     let test_id = std::time::SystemTime::now()
