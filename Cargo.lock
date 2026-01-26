@@ -161,6 +161,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "better_mimalloc_rs"
+version = "0.1.0"
+dependencies = [
+ "better_mimalloc_sys",
+]
+
+[[package]]
+name = "better_mimalloc_sys"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "cty",
+ "libc",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1375,9 +1391,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "kanal"
-version = "0.2.0-beta2"
-source = "git+https://github.com/acking-you/kanal.git?branch=dev%2Fpb-mapper#1a6cd92a8dc714836def1767512b1034c0963107"
+name = "kanal-plus"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b95b5999547076732485ad2dda0bee60b861563aba3eaa614e4e40a851eb750"
 dependencies = [
  "branches",
  "cacheguard",
@@ -1413,15 +1430,6 @@ name = "libc"
 version = "0.2.179"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c5a2d376baa530d1238d133232d15e239abad80d05838b4b59354e5268af431f"
-
-[[package]]
-name = "libmimalloc-sys"
-version = "0.1.44"
-dependencies = [
- "cc",
- "cty",
- "libc",
-]
 
 [[package]]
 name = "libredox"
@@ -1550,13 +1558,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
-]
-
-[[package]]
-name = "mimalloc"
-version = "0.1.48"
-dependencies = [
- "libmimalloc-sys",
 ]
 
 [[package]]
@@ -1930,6 +1931,7 @@ version = "0.4.17"
 dependencies = [
  "anyhow",
  "async-broadcast",
+ "better_mimalloc_rs",
  "clap",
  "comfy-table",
  "crossterm",
@@ -1937,8 +1939,7 @@ dependencies = [
  "dirs",
  "futures",
  "hashbrown 0.16.1",
- "kanal 0.2.0-beta1",
- "mimalloc",
+ "kanal",
  "proxy-core",
  "serde",
  "serde_json",
@@ -1964,7 +1965,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "indexmap",
  "indicatif",
- "kanal 0.2.0-beta1",
+ "kanal",
  "lru",
  "maxminddb",
  "once_cell",
@@ -1986,7 +1987,7 @@ dependencies = [
 name = "proxy-ffi"
 version = "0.4.17"
 dependencies = [
- "mimalloc",
+ "better_mimalloc_rs",
  "proxy-client",
  "proxy-core",
  "reqwest",
@@ -2002,8 +2003,8 @@ name = "proxy-server"
 version = "0.4.17"
 dependencies = [
  "anyhow",
+ "better_mimalloc_rs",
  "clap",
- "mimalloc",
  "proxy-core",
  "serde",
  "serde_json",
@@ -3117,13 +3118,13 @@ checksum = "2896d95c02a80c6d6a5d6e953d479f5ddf2dfdb6a244441010e373ac0fb88971"
 
 [[package]]
 name = "uni-stream"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bytes",
  "futures",
  "hashbrown 0.16.1",
  "hickory-resolver",
- "kanal 0.2.0-beta2",
+ "kanal-plus",
  "once_cell",
  "socket2 0.6.1",
  "tokio",

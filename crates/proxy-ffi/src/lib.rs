@@ -3,7 +3,7 @@
 //! This module provides a C-compatible interface for external applications to use the proxy client.
 //! It reuses the existing client module logic.
 
-use mimalloc::{MiMalloc, MiMallocConfig};
+use better_mimalloc_rs::{MiMalloc, MiMallocConfig};
 use std::sync::Once;
 
 mod handle;
