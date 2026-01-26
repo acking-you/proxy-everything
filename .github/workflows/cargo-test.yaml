@@ -28,7 +28,7 @@ jobs:
           toolchain: 1.87.0
           components: clippy, rustfmt
       - name: cargo fmt
-        run: cargo fmt -- --check
+        run: cargo fmt -p proxy-core -p proxy-client -p proxy-server -p proxy-tui -p proxy-ffi -- --check
       - name: cargo clippy
         run: cargo clippy --workspace
       - name: cargo test
