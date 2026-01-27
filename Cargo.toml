@@ -90,3 +90,4 @@ rand = "0.9"
 # Local dependencies
 kanal = { path = "deps/kanal" }
 sysproxy = { path = "deps/sysproxy-rs" }
+smallvec = { path = "deps/rust-smallvec", features = ["std"] }

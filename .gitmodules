@@ -13,3 +13,6 @@
 [submodule "deps/better_mimalloc_rs"]
 	path = deps/better_mimalloc_rs
 	url = git@github.com:acking-you/better_mimalloc_rs.git
+[submodule "deps/rust-smallvec"]
+	path = deps/rust-smallvec
+	url = git@github.com:acking-you/rust-smallvec.git

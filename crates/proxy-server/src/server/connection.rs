@@ -14,6 +14,7 @@ use proxy_core::{
     Aes256GcmCryption, Aes256GcmDecryptor, Aes256GcmEncryptor, DataSize, MyAsyncCodecReader,
     MyAsyncReadExt, MyAsyncWriteExt, ProxyHeader, get_data_size, set_data_size,
 };
+use smallvec::{SmallVec, smallvec};
 use snafu::ResultExt;
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
@@ -207,13 +208,17 @@ async fn handle_connect_inner(
         return Err(ServerError::HeaderSize { size: msg_len });
     }
 
-    let mut header_buf = vec![0u8; msg_len as usize];
+    const STACK_SIZE: usize = MAX_HEADER_SIZE as usize / 2;
+    let mut header_buf: SmallVec<u8, STACK_SIZE> = smallvec![0u8; msg_len as usize];
     client_reader
         .read_exact(&mut header_buf)
         .await
         .context(IoSnafu {
             detail: "Read Header(addr,tag)",
         })?;
+
+    // Get relay context before mutate
+    let relay_context = ctx.relay.select().map(|v| (v, header_buf.clone()));
 
     // Attempt to decode header for control handling.
     let header = match Aes256GcmCryption::try_new_with_default_key() {
@@ -262,10 +267,7 @@ async fn handle_connect_inner(
         }
     }
 
-    // Relay selection after control handling.
-    let relay_target = ctx.relay.select();
-
-    if let Some(relay_server) = relay_target {
+    if let Some((relay_server, header_buf)) = relay_context {
         tracing::Span::current().record("mode", "relay");
         tracing::Span::current().record("dest", field::display(&relay_server));
         let relay_stream = TcpStream::connect(&relay_server).await.context(IoSnafu {
