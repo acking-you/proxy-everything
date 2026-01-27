@@ -26,7 +26,7 @@ Application → Client(local:1080) → [AES-256-GCM] → Server(remote:1081) →
 │                    Application Layer                         │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
 │  │ Flutter UI   │  │ CLI Client   │  │ TUI Monitor  │      │
-│  │ (ui/flutter) │  │ (http-proxy- │  │ (proxy-tui)  │      │
+│  │ (ui/)        │  │ (http-proxy- │  │ (proxy-tui)  │      │
 │  │              │  │  cli)        │  │              │      │
 │  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘      │
 │         │ FFI             │ Direct          │ Direct        │
@@ -126,7 +126,7 @@ proxy-everything/
 │   │       └── bin/main.rs       # proxy-tui binary
 │   └── proxy-ffi/                # FFI interface for Flutter
 │       └── src/lib.rs            # C-compatible interface
-├── ui/flutter/                   # Flutter UI (submodule)
+├── ui/                           # Flutter UI and related assets
 ├── deps/                         # External dependencies (submodules)
 │   ├── sysproxy-rs/              # System proxy library
 │   └── kanal/                    # Channel library
@@ -166,26 +166,35 @@ cargo test --workspace
 cargo test <test_name>
 
 # Run clippy checks
-cargo clippy --workspace --all-targets
+make clippy
+```
+
+### Pre-commit Requirement
+
+Before every commit, run:
+
+```bash
+make clippy
+make fmt
 ```
 
 ### Run Binaries
 
 ```bash
 # Run server (direct mode)
-cargo run -p proxy-server -- -H 0.0.0.0 -p 1081
+cargo run -p proxy-server --bin http-proxy-server -- -H 0.0.0.0 -p 1081
 
 # Run server (chain mode - relay to upstream)
-cargo run -p proxy-server -- -H 0.0.0.0 -p 1081 -t upstream.server:1081
+cargo run -p proxy-server --bin http-proxy-server -- -H 0.0.0.0 -p 1081 -t upstream.server:1081
 
 # Run server with control encryption
-CONTROL_SESSION_KEY=my-secret-key cargo run -p proxy-server -- -H 0.0.0.0 -p 1081
+CONTROL_SESSION_KEY=my-secret-key cargo run -p proxy-server --bin http-proxy-server -- -H 0.0.0.0 -p 1081
 
 # Run CLI client
-cargo run -p proxy-client -- -s <server-ip> -c <local-port>
+cargo run -p proxy-client --bin http-proxy-cli -- -s <server-ip> -c <local-port>
 
 # Run TUI monitor
-cargo run -p proxy-tui
+cargo run -p proxy-tui --bin proxy-tui
 ```
 
 ### Server CLI Options
