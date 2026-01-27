@@ -37,7 +37,8 @@ rm -rf http-proxy-server-*
 SECRET_KEY=$(head -c 32 /dev/urandom | base64 | head -c 32)
 echo "Your SECRET_KEY: $SECRET_KEY"
 
-cat > /etc/systemd/system/proxy-server.service << EOF
+SERVICE_NAME=proxy-server
+cat > /etc/systemd/system/${SERVICE_NAME}.service << EOF
 [Unit]
 Description=Proxy Server
 After=network.target
@@ -60,10 +61,11 @@ EOF
 ### 3. Start Service
 
 ```bash
+SERVICE_NAME=proxy-server
 systemctl daemon-reload
-systemctl enable proxy-server
-systemctl start proxy-server
-systemctl status proxy-server
+systemctl enable ${SERVICE_NAME}
+systemctl start ${SERVICE_NAME}
+systemctl status ${SERVICE_NAME}
 ```
 
 ---
@@ -99,6 +101,43 @@ The script prompts for:
 | Logs (last 100) | `journalctl -u proxy-server -n 100` |
 | Enable auto-start | `systemctl enable proxy-server` |
 | Disable auto-start | `systemctl disable proxy-server` |
+
+> Tip: Replace `proxy-server` with your custom service name if you run multiple instances.
+
+---
+
+## Multiple Instances (Different Ports)
+
+Use a unique systemd service name per port to avoid conflicts:
+
+```bash
+# Instance on 1081
+SERVICE_NAME=proxy-server-1081
+SECRET_KEY=$(head -c 32 /dev/urandom | base64 | head -c 32)
+cat > /etc/systemd/system/${SERVICE_NAME}.service << EOF
+[Unit]
+Description=Proxy Server (1081)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root
+Environment="SECRET_KEY=${SECRET_KEY}"
+Environment="RUST_LOG=info"
+ExecStart=/bin/sh -c 'ulimit -n 65535 && exec /usr/local/bin/http-proxy-server -p 1081'
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now ${SERVICE_NAME}
+```
+
+Repeat with a different `SERVICE_NAME` and `-p` value (for example `proxy-server-1082` on port `1082`).
 
 ---
 

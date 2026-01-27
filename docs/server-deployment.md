@@ -67,6 +67,13 @@ export SECRET_KEY=your-32-character-secret-key!!
 
 See [systemd-deployment.md](./systemd-deployment.md) for detailed instructions.
 
+For multiple instances on one host, use a unique service name per port, for example:
+
+```bash
+SERVICE_NAME=proxy-server-1081 PORT=1081 bash install-proxy-server.sh
+SERVICE_NAME=proxy-server-1082 PORT=1082 bash install-proxy-server.sh
+```
+
 ---
 
 ## Configuration

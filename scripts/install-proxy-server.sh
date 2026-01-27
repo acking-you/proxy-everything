@@ -29,8 +29,7 @@ BASE_URL="https://mybucket-1331094534.cos.ap-hongkong.myqcloud.com/proxy-everyth
 DEFAULT_FILE="http-proxy-server-x86_64-unknown-linux-musl.tar.gz"
 BIN_NAME="http-proxy-server"
 INSTALL_DIR="/opt/proxy-everything"
-SERVICE_NAME="proxy-server"
-SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
+DEFAULT_SERVICE_NAME="proxy-server"
 DEFAULT_HOST="0.0.0.0"
 DEFAULT_PORT="1081"
 DEFAULT_SECRET_KEY="my-secret-key123my-secret-key123"
@@ -40,15 +39,23 @@ HOST="${HOST:-$DEFAULT_HOST}"
 PORT="${PORT:-$DEFAULT_PORT}"
 SECRET_KEY="${SECRET_KEY:-$DEFAULT_SECRET_KEY}"
 RUST_LOG="${RUST_LOG:-info}"
+SERVICE_NAME="${SERVICE_NAME:-$DEFAULT_SERVICE_NAME}"
+SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 
 info "Configuration:"
 info "  - Host: $HOST"
 info "  - Port: $PORT"
+info "  - Service name: $SERVICE_NAME"
 info "  - Install dir: $INSTALL_DIR"
 
 is_valid_port() {
   local port="$1"
   [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]
+}
+
+is_valid_service_name() {
+  local name="$1"
+  [[ -n "$name" ]] && [[ "$name" =~ ^[A-Za-z0-9_.@-]+$ ]]
 }
 
 port_in_use() {
@@ -143,6 +150,13 @@ ensure_port_available() {
     esac
   done
 }
+
+# Validate service name early to avoid systemd errors later
+if ! is_valid_service_name "$SERVICE_NAME"; then
+  error "Invalid SERVICE_NAME: $SERVICE_NAME"
+  error "Allowed characters: A-Z a-z 0-9 . _ @ -"
+  exit 1
+fi
 
 # Resolve download URL (first arg is filename or full URL)
 REQUESTED_FILE="${1:-$DEFAULT_FILE}"
@@ -289,13 +303,13 @@ if systemctl is-active --quiet "${SERVICE_NAME}.service"; then
   echo -e "${GREEN}  Installation completed successfully!  ${NC}"
   echo -e "${GREEN}========================================${NC}"
   echo ""
-  echo "Service name: ${SERVICE_NAME}.service"
-  echo "Listening on: ${HOST}:${PORT}"
-  echo ""
-  echo "Useful commands:"
-  echo "  systemctl status ${SERVICE_NAME}    # Check status"
-  echo "  journalctl -u ${SERVICE_NAME} -f    # View logs"
-  echo "  systemctl restart ${SERVICE_NAME}   # Restart service"
+echo "Service name: ${SERVICE_NAME}.service"
+echo "Listening on: ${HOST}:${PORT}"
+echo ""
+echo "Useful commands:"
+echo "  systemctl status ${SERVICE_NAME}    # Check status"
+echo "  journalctl -u ${SERVICE_NAME} -f    # View logs"
+echo "  systemctl restart ${SERVICE_NAME}   # Restart service"
 else
   error "Service failed to start!"
   echo ""

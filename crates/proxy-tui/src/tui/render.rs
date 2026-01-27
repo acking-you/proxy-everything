@@ -303,8 +303,8 @@ fn draw_nodes_tab(
                 .map(|code| format!("{} {} ", country_to_flag(code), code))
                 .unwrap_or_default();
             ListItem::new(format!(
-                "{} {}{} ({}){}",
-                marker, geo_str, node.node_id, node.addr, self_tag
+                "{} {}{} [node_id: {}]{}",
+                marker, geo_str, node.addr, node.node_id, self_tag
             ))
             .style(style)
         })

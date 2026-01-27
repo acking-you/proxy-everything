@@ -5,7 +5,7 @@
 
 set -e
 
-SERVICE_NAME="proxy-server"
+SERVICE_NAME="${SERVICE_NAME:-proxy-server}"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 BINARY_PATH="/root/http-proxy-server"
 
