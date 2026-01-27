@@ -1942,7 +1942,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-client"
-version = "0.4.17"
+version = "0.4.21"
 dependencies = [
  "anyhow",
  "async-broadcast",
@@ -1969,7 +1969,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-core"
-version = "0.4.17"
+version = "0.4.21"
 dependencies = [
  "arc-swap",
  "async-broadcast",
@@ -2001,7 +2001,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-ffi"
-version = "0.4.17"
+version = "0.4.21"
 dependencies = [
  "better_mimalloc_rs",
  "proxy-client",
@@ -2016,7 +2016,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-server"
-version = "0.4.17"
+version = "0.4.21"
 dependencies = [
  "anyhow",
  "better_mimalloc_rs",
@@ -2037,7 +2037,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-tui"
-version = "0.4.17"
+version = "0.4.21"
 dependencies = [
  "chrono",
  "clap",

@@ -51,11 +51,30 @@ pub struct NodeInfoWithGeo {
     pub region: *mut c_char,
 }
 
+/// Node group information.
+#[repr(C)]
+pub struct NodeGroupInfo {
+    pub group_id: *mut c_char,
+    pub name: *mut c_char,
+    pub node_ids: *mut *mut c_char,
+    pub node_ids_count: usize,
+    pub created_at_ms: i64,
+}
+
 /// Result of get server nodes.
 #[repr(C)]
 pub struct NodesResult {
     pub success: c_int,
     pub nodes: *mut NodeInfoWithGeo,
+    pub count: usize,
+    pub error: *mut c_char,
+}
+
+/// Result of get server groups.
+#[repr(C)]
+pub struct GroupsResult {
+    pub success: c_int,
+    pub groups: *mut NodeGroupInfo,
     pub count: usize,
     pub error: *mut c_char,
 }

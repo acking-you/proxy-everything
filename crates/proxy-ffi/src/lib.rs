@@ -7,6 +7,7 @@ use std::sync::Once;
 
 use better_mimalloc_rs::{MiMalloc, MiMallocConfig};
 
+mod groups;
 mod handle;
 mod latency;
 mod logging;
@@ -36,6 +37,7 @@ pub(crate) fn init_allocator() {
 }
 
 // Re-export all public FFI functions and types
+pub use groups::{proxy_free_groups_result, proxy_get_server_groups};
 pub use handle::{
     ProxyHandle, proxy_create, proxy_destroy, proxy_is_running, proxy_start, proxy_stop,
 };
@@ -43,5 +45,6 @@ pub use latency::{proxy_free_latency_result, proxy_test_latency};
 pub use logging::{proxy_free_string, proxy_init_logging, proxy_set_log_callback};
 pub use nodes::{proxy_free_nodes_result, proxy_get_server_nodes};
 pub use types::{
-    LatencyResult, LogCallback, NodeInfoWithGeo, NodesResult, ProxyConfig, ProxyResult,
+    GroupsResult, LatencyResult, LogCallback, NodeGroupInfo, NodeInfoWithGeo, NodesResult,
+    ProxyConfig, ProxyResult,
 };
