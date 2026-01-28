@@ -687,13 +687,163 @@ Rust 的 `arrow-row` 是 DataFusion 项目驱动的优化，专门为多列排�
 
 这意味着它是 Rust 实现的内部优化，而非跨语言标准。
 
-### 类似实现
+### DuckDB 的排序实现（对比研究）
 
-如果在 C++ 生态中需要类似的保序编码，可以参考：
+经过源码调研，DuckDB **确实有**类似 arrow-row 的保序编码，而且实现非常成熟。
 
-- **DuckDB** 的 row 格式：也实现了类似的保序编码用于排序
-- **ClickHouse** 的 key 编码：用于主键排序和索引
-- 自行实现：按照本文描述的编码规则
+**核心思想**：将多列排序键编码成二进制字符串，使 `memcmp` 比较等价于语义比较。
+
+**1. 整数编码（src/include/duckdb/common/radix.hpp）**
+
+```cpp
+// 有符号整数：大端序 + 符号位翻转
+template<>
+void Radix::EncodeData(data_ptr_t dataptr, int32_t value) {
+    uint32_t bytes = BSwapIfLE(value);  // 转大端序
+    bytes = FlipSign(bytes);             // 翻转符号位 (XOR 0x80000000)
+    Store<uint32_t>(bytes, dataptr);
+}
+```
+
+**2. 浮点数编码**
+
+DuckDB 的浮点编码比 arrow-row 更复杂，专门处理特殊值：
+
+```cpp
+// 正数：翻转符号位
+// 负数：翻转所有位 (~buff)
+// NaN → UINT_MAX
+// +Inf → UINT_MAX - 1
+// -Inf → 0
+// ±0 → 设置符号位
+```
+
+**3. 字符串编码**
+
+- 短字符串：复制前缀 + 用 0x00 填充
+- 长字符串：存储前缀，相等时再比较完整数据
+
+```cpp
+// 字符串前缀编码
+if (len < prefix_len) {
+    memcpy(dataptr, str, len);
+    memset(dataptr + len, 0, prefix_len - len);  // 填充 0x00
+} else {
+    memcpy(dataptr, str, prefix_len);
+}
+```
+
+**4. 降序处理**
+
+对整个编码结果按位取反：
+
+```
+// 降序：翻转所有位
+for (idx_t i = 0; i < size; i++) {
+    dataptr[i] = ~dataptr[i];
+}
+```
+
+**5. NULL 处理**
+
+使用额外字节标记 NULL：
+- `nulls_first + ASC`: NULL = 0x00, 非空 = 0x01
+- `nulls_last + ASC`: NULL = 0x01, 非空 = 0x00
+
+**6. 多列组合**
+
+多列按顺序串联编码，与 arrow-row 相同：
+
+```
+Row = [col1 编码] + [col2 编码] + ... + [colN 编码]
+```
+
+**7. 2025 年新优化（v1.4.0）**
+
+DuckDB 在 2025 年进一步优化了排序：
+- 提供 `create_sort_key()` SQL 函数生成保序 BLOB
+- 短键（≤16字节）转为两个 `uint64_t` 做整数比较
+- 结合 Vergesort + Ska Sort + pdqsort 自适应算法
+
+**对比总结：**
+
+| 特性 | DuckDB | arrow-row |
+|------|--------|-----------|
+| 整数编码 | 大端序 + 符号位翻转 | 大端序 + 符号位翻转 |
+| 浮点编码 | 特殊值映射 + 符号处理 | IEEE754 total order |
+| 字符串编码 | 前缀 + 0x00 填充 | block + 填充 + sentinel |
+| NULL 处理 | 额外字节标记 | sentinel 字节 |
+| 降序处理 | 按位取反 | 按位取反 |
+| 多列组合 | 串联 | 串联 |
+
+**DuckDB 参考资料：**
+- [Fastest Table Sort in the West (2021)](https://duckdb.org/2021/08/27/external-sorting.html)
+- [Redesigning DuckDB's Sort, Again (2025)](https://duckdb.org/2025/09/24/sorting-again)
+- [radix.hpp 源码](https://github.com/duckdb/duckdb/blob/main/src/include/duckdb/common/radix.hpp)
+
+### ClickHouse 的排序实现（对比研究）
+
+经过源码调研，ClickHouse **没有**类似 arrow-row 的完整保序行编码，而是采用不同的策略：
+
+**1. 排序比较：逐列比较**
+
+ClickHouse 的 `SortCursor` 使用逐列 `compareAt()` 方法：
+
+```cpp
+// src/Core/SortCursor.h
+for (size_t i = 0; i < impl->sort_columns_size; ++i)
+{
+    int res = direction * impl->sort_columns[i]->compareAt(lhs_pos, rhs_pos, ...);
+    if (res > 0) return true;
+    if (res < 0) return false;
+}
+```
+
+**2. RadixSort：有符号位翻转**
+
+ClickHouse 在单列 RadixSort 中使用了符号位翻转（与 arrow-row 相同的技术）：
+
+```cpp
+// src/Common/RadixSort.h
+template <typename KeyBits>
+struct RadixSortSignedTransform
+{
+    static KeyBits forward(KeyBits x) {
+        return x ^ (KeyBits(1) << (sizeof(KeyBits) * 8 - 1));
+    }
+};
+```
+
+但这**仅用于单列 RadixSort**，不是多列行编码。
+
+**3. Hash Join 键序列化：原始字节**
+
+```cpp
+// src/Interpreters/AggregationCommon.h
+memcpy(bytes + offset, column->getRawDataBegin<1>() + index, 1);
+```
+
+直接 memcpy，没有保序变换。
+
+**对比总结：**
+
+| 特性 | ClickHouse | arrow-row |
+|------|------------|-----------|
+| 排序方式 | 逐列 `compareAt()` | 单次 memcmp |
+| 整数编码 | RadixSort 时翻转符号位 | 始终翻转符号位 |
+| 浮点编码 | 无特殊处理 | IEEE754 total order |
+| 字符串编码 | 原始字节 | block + 填充 + sentinel |
+| 多列编码 | 无统一行格式 | 串联成保序字节 |
+
+**为什么 ClickHouse 不需要保序行编码？**
+
+1. **列式存储**：数据按列存储，逐列比较是自然选择
+2. **MergeTree 引擎**：主键排序在写入时完成，查询时利用稀疏索引
+3. **向量化执行**：比较操作在列级别向量化
+
+**ClickHouse 参考源码：**
+- [SortCursor.h](https://github.com/ClickHouse/ClickHouse/blob/master/src/Core/SortCursor.h)
+- [RadixSort.h](https://github.com/ClickHouse/ClickHouse/blob/master/src/Common/RadixSort.h)
 
 ### 参考链接
 
