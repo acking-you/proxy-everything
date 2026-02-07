@@ -3,8 +3,8 @@
 use std::ffi::{CStr, c_int};
 use std::path::PathBuf;
 use std::ptr;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 use proxy_client::cli_config::SystemProxyGuard;
@@ -21,7 +21,7 @@ use crate::types::{ProxyConfig, ProxyResult};
 pub struct ProxyHandle {
     pub(crate) runtime: Runtime,
     pub(crate) cancel_token: Option<CancellationToken>,
-    pub(crate) running: AtomicBool,
+    pub(crate) running: Arc<AtomicBool>,
     pub(crate) local_port: u16,
     pub(crate) http_client: Mutex<Option<reqwest::Client>>,
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
@@ -46,7 +46,7 @@ pub extern "C" fn proxy_create() -> *mut ProxyHandle {
     Box::into_raw(Box::new(ProxyHandle {
         runtime,
         cancel_token: None,
-        running: AtomicBool::new(false),
+        running: Arc::new(AtomicBool::new(false)),
         local_port: 0,
         http_client: Mutex::new(None),
         #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
@@ -122,18 +122,6 @@ pub unsafe extern "C" fn proxy_start(
     let force_codec = config.force_codec != 0;
     let set_system_proxy = config.set_system_proxy != 0;
 
-    // Set system proxy for desktop platforms
-    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-    {
-        handle._system_proxy_guard = if set_system_proxy {
-            SystemProxyGuard::new(local_port)
-        } else {
-            None
-        };
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    let _ = set_system_proxy;
-
     // Initialize runtime config directly (no env vars needed)
     proxy_core::config::runtime::init_config(
         server_host.clone(),
@@ -149,10 +137,46 @@ pub unsafe extern "C" fn proxy_start(
         cache_dir,
     };
 
+    // Bind listener synchronously before reporting start success.
+    // This prevents false-positive "running" state when the port is already in use.
+    let listener = match handle
+        .runtime
+        .block_on(async { TcpListener::bind(("127.0.0.1", local_port)).await })
+    {
+        Ok(listener) => listener,
+        Err(e) => {
+            send_log(
+                4,
+                &format!(
+                    "Failed to bind listener on 127.0.0.1:{}: {}",
+                    local_port,
+                    error_report(&e)
+                ),
+            );
+            return ProxyResult::ConnectionFailed;
+        }
+    };
+
+    // Set system proxy only after local listener is confirmed available.
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    {
+        handle._system_proxy_guard = if set_system_proxy {
+            SystemProxyGuard::new(local_port)
+        } else {
+            None
+        };
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    let _ = set_system_proxy;
+
     let cancel_token = CancellationToken::new();
     handle.cancel_token = Some(cancel_token.clone());
     handle.running.store(true, Ordering::SeqCst);
     handle.local_port = local_port;
+    let running_flag = Arc::clone(&handle.running);
+    if let Ok(mut http_client) = handle.http_client.lock() {
+        *http_client = None;
+    }
 
     // Spawn proxy task using existing client logic
     handle.runtime.spawn(async move {
@@ -166,14 +190,6 @@ pub unsafe extern "C" fn proxy_start(
             force_codec
         );
 
-        let listener = match TcpListener::bind(("127.0.0.1", local_port)).await {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::error!("Failed to bind listener: {}", error_report(&e));
-                return;
-            }
-        };
-
         // Use force_codec to determine NEED_CODEC constant
         if force_codec {
             run_client_with_listener::<true>(listener, cancel_token, None, Some(client_config))
@@ -183,6 +199,7 @@ pub unsafe extern "C" fn proxy_start(
                 .await;
         }
 
+        running_flag.store(false, Ordering::SeqCst);
         tracing::info!("Proxy stopped");
     });
 
@@ -208,6 +225,9 @@ pub unsafe extern "C" fn proxy_stop(handle: *mut ProxyHandle) -> ProxyResult {
     if let Some(token) = handle.cancel_token.take() {
         token.cancel();
         handle.running.store(false, Ordering::SeqCst);
+        if let Ok(mut http_client) = handle.http_client.lock() {
+            *http_client = None;
+        }
 
         // Clear system proxy guard to restore system proxy settings
         #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
