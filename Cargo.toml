@@ -10,7 +10,7 @@ members = [
 exclude = ["deps/kanal", "deps/uni-stream", "deps/sysproxy-rs"]
 
 [workspace.package]
-version = "0.4.21"
+version = "0.4.23"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/acking-you/proxy-everything"
