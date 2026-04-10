@@ -74,6 +74,11 @@ SERVICE_NAME=proxy-server-1081 PORT=1081 bash install-proxy-server.sh
 SERVICE_NAME=proxy-server-1082 PORT=1082 bash install-proxy-server.sh
 ```
 
+The installer keeps the legacy state path for the default `proxy-server` service.
+For any custom `SERVICE_NAME`, it now assigns an isolated state directory under
+`/opt/proxy-everything/state/<service-name>` unless you explicitly set
+`PROXY_DATA_DIR`.
+
 ---
 
 ## Configuration
@@ -84,6 +89,7 @@ SERVICE_NAME=proxy-server-1082 PORT=1082 bash install-proxy-server.sh
 |----------|----------|---------|-------------|
 | `SECRET_KEY` | Yes | - | 32-character encryption key |
 | `SERVER_PORT` | No | 1081 | Listening port |
+| `PROXY_DATA_DIR` | No | `~/.proxy-everything` | Override persisted node/relay state directory |
 | `TURELY_PROXY_SERVER` | No | - | Initial upstream target (auto-added to relay) |
 | `CONTROL_SESSION_KEY` | No | - | 32-char key for control protocol encryption |
 | `CONTROL_REQUIRE_ENCRYPTION` | No | true | Require encrypted control messages |
@@ -93,7 +99,11 @@ SERVICE_NAME=proxy-server-1082 PORT=1082 bash install-proxy-server.sh
 
 ### Data Persistence
 
-Server stores configuration in `/root/.proxy-everything/`:
+Server stores configuration in `~/.proxy-everything/` by default. If
+`PROXY_DATA_DIR` is set, that directory is used instead. The one-click systemd
+installer keeps the legacy path `/opt/proxy-everything/conf/.proxy-everything`
+for the default `proxy-server` service and uses
+`/opt/proxy-everything/state/<service-name>` for custom service names.
 
 | File | Content |
 |------|---------|

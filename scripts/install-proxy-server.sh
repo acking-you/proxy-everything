@@ -41,11 +41,18 @@ SECRET_KEY="${SECRET_KEY:-$DEFAULT_SECRET_KEY}"
 RUST_LOG="${RUST_LOG:-info}"
 SERVICE_NAME="${SERVICE_NAME:-$DEFAULT_SERVICE_NAME}"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
+LEGACY_STATE_DIR="${INSTALL_DIR}/conf/.proxy-everything"
+if [ "$SERVICE_NAME" = "$DEFAULT_SERVICE_NAME" ]; then
+  STATE_DIR="${PROXY_DATA_DIR:-$LEGACY_STATE_DIR}"
+else
+  STATE_DIR="${PROXY_DATA_DIR:-${INSTALL_DIR}/state/${SERVICE_NAME}}"
+fi
 
 info "Configuration:"
 info "  - Host: $HOST"
 info "  - Port: $PORT"
 info "  - Service name: $SERVICE_NAME"
+info "  - State dir: $STATE_DIR"
 info "  - Install dir: $INSTALL_DIR"
 
 is_valid_port() {
@@ -234,8 +241,16 @@ success "Binary extracted: $BIN_PATH"
 info "Installing binary to $INSTALL_DIR..."
 mkdir -p "$INSTALL_DIR"
 mkdir -p "$INSTALL_DIR/conf"
+mkdir -p "$STATE_DIR"
 install -m 0755 "$BIN_PATH" "${INSTALL_DIR}/${BIN_NAME}"
 success "Binary installed"
+
+if [ -z "${PROXY_DATA_DIR:-}" ] && [ "$SERVICE_NAME" != "$DEFAULT_SERVICE_NAME" ] \
+  && [ -d "$LEGACY_STATE_DIR" ] \
+  && [ ! -e "${STATE_DIR}/nodes.json" ] \
+  && [ ! -e "${STATE_DIR}/relay.json" ]; then
+  warn "Legacy shared state found at ${LEGACY_STATE_DIR}. New service ${SERVICE_NAME} will use isolated state at ${STATE_DIR}."
+fi
 
 # Verify port availability BEFORE removing existing service
 # This prevents leaving the system without a service if port check fails
@@ -274,6 +289,7 @@ Environment=HOME=${INSTALL_DIR}/conf
 Environment=RUST_LOG=${RUST_LOG}
 Environment=SECRET_KEY=${SECRET_KEY}
 Environment=SERVER_PORT=${PORT}
+Environment=PROXY_DATA_DIR=${STATE_DIR}
 ExecStart=${INSTALL_DIR}/${BIN_NAME} -H ${HOST} -p ${PORT}
 Restart=on-failure
 RestartSec=3
@@ -305,6 +321,7 @@ if systemctl is-active --quiet "${SERVICE_NAME}.service"; then
   echo ""
 echo "Service name: ${SERVICE_NAME}.service"
 echo "Listening on: ${HOST}:${PORT}"
+echo "State dir: ${STATE_DIR}"
 echo ""
 echo "Useful commands:"
 echo "  systemctl status ${SERVICE_NAME}    # Check status"

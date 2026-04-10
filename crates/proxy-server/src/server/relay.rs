@@ -20,11 +20,7 @@ const PING_TIMEOUT: Duration = Duration::from_secs(3);
 const HEALTH_CHECK_TICK: Duration = Duration::from_secs(5);
 
 fn default_config_dir() -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".proxy-everything")
-    } else {
-        PathBuf::from(".proxy-everything")
-    }
+    proxy_core::config::default_state_dir()
 }
 
 /// Relay manager for dynamic upstream selection.

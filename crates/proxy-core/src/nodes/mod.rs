@@ -124,10 +124,7 @@ impl NodeStore {
 
     /// Create with default path (~/.proxy-everything/nodes.json).
     pub fn with_default_path() -> Self {
-        let path = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".proxy-everything")
-            .join("nodes.json");
+        let path = crate::config::default_state_dir().join("nodes.json");
         Self::new(path)
     }
 

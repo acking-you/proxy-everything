@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 
@@ -257,6 +258,26 @@ pub static SERVER_HOST: Lazy<String> = Lazy::new(|| match std::env::var("SERVER_
         "127.0.0.1".to_string()
     }
 });
+
+/// Optional override for the persisted server state directory.
+pub fn proxy_data_dir() -> Option<PathBuf> {
+    std::env::var_os("PROXY_DATA_DIR").and_then(|value| {
+        if value.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(value))
+        }
+    })
+}
+
+/// Default directory used to store relay and node state.
+pub fn default_state_dir() -> PathBuf {
+    proxy_data_dir().unwrap_or_else(|| {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".proxy-everything")
+    })
+}
 
 /// Turly proxy server (ip/addr:port)
 pub static TURELY_PROXY_SERVER: Lazy<Option<String>> =
@@ -558,15 +579,75 @@ pub static NEED_CODEC_IP: Lazy<Vec<String>> = Lazy::new(|| {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::path::PathBuf;
+    use std::sync::{LazyLock, Mutex};
 
     use tokio::time::Instant;
     use uni_stream::addr::get_ip_addrs;
+
+    use crate::config::{default_state_dir, proxy_data_dir};
+
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct EnvVarGuard {
+        key: &'static str,
+        value: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn preserve(key: &'static str) -> Self {
+            Self {
+                key,
+                value: std::env::var_os(key),
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.value {
+                // SAFETY: tests serialize environment mutation with ENV_LOCK.
+                unsafe { std::env::set_var(self.key, value) };
+            } else {
+                // SAFETY: tests serialize environment mutation with ENV_LOCK.
+                unsafe { std::env::remove_var(self.key) };
+            }
+        }
+    }
 
     #[test]
     fn test_ipaddr_parse() {
         let ipaddr = "127.0.0.1".parse::<IpAddr>().unwrap();
         assert_eq!(ipaddr, IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+    }
+
+    #[test]
+    fn test_proxy_data_dir_override_wins() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvVarGuard::preserve("PROXY_DATA_DIR");
+
+        let custom = std::env::temp_dir().join("proxy-everything-config-test");
+        // SAFETY: tests serialize environment mutation with ENV_LOCK.
+        unsafe { std::env::set_var("PROXY_DATA_DIR", &custom) };
+
+        assert_eq!(proxy_data_dir(), Some(custom.clone()));
+        assert_eq!(default_state_dir(), custom);
+    }
+
+    #[test]
+    fn test_proxy_data_dir_default_falls_back_to_home_proxy_everything() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvVarGuard::preserve("PROXY_DATA_DIR");
+
+        // SAFETY: tests serialize environment mutation with ENV_LOCK.
+        unsafe { std::env::remove_var("PROXY_DATA_DIR") };
+
+        let expected = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".proxy-everything");
+        assert_eq!(default_state_dir(), expected);
     }
 
     #[tokio::test]

@@ -47,6 +47,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/root
+Environment="PROXY_DATA_DIR=/var/lib/proxy-everything/${SERVICE_NAME}"
 Environment="SECRET_KEY=${SECRET_KEY}"
 Environment="RUST_LOG=info"
 ExecStart=/bin/sh -c 'ulimit -n 65535 && exec /usr/local/bin/http-proxy-server -p 1081'
@@ -150,6 +151,7 @@ Add to service file under `[Service]` section:
 ```ini
 Environment="SECRET_KEY=your-32-character-secret-key!!"
 Environment="RUST_LOG=info"
+Environment="PROXY_DATA_DIR=/var/lib/proxy-everything/proxy-server" # Optional: isolated state dir
 Environment="TURELY_PROXY_SERVER=upstream:1081"        # Optional: initial relay target
 Environment="CONTROL_SESSION_KEY=another-32-char-key"  # Optional: control encryption
 Environment="CONTROL_ADMIN_TOKEN=admin-token"          # Optional: admin auth
@@ -159,6 +161,7 @@ Environment="CONTROL_ADMIN_TOKEN=admin-token"          # Optional: admin auth
 |----------|----------|---------|-------------|
 | `SECRET_KEY` | Yes | - | 32-character encryption key |
 | `SERVER_PORT` | No | 1081 | Listening port |
+| `PROXY_DATA_DIR` | No | `~/.proxy-everything` | Override persisted node/relay state directory |
 | `TURELY_PROXY_SERVER` | No | - | Initial upstream (auto-added to relay) |
 | `RUST_LOG` | No | info | Log level: error/warn/info/debug |
 | `CONTROL_SESSION_KEY` | No | - | 32-char key for control encryption |
@@ -168,7 +171,10 @@ Environment="CONTROL_ADMIN_TOKEN=admin-token"          # Optional: admin auth
 
 ### Data Persistence
 
-Configuration stored in `~/.proxy-everything/`:
+Configuration is stored in `~/.proxy-everything/` by default. If
+`PROXY_DATA_DIR` is set, the server uses that directory instead. For single-host
+multi-instance deployments, set a unique `PROXY_DATA_DIR` per service to avoid
+sharing `nodes.json` and `relay.json`.
 
 | File | Content |
 |------|---------|
