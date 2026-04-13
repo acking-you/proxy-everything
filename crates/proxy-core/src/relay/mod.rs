@@ -9,6 +9,7 @@ pub use balancer::{
     LeastConnBalancer, LoadBalancer, RandomBalancer, RoundRobinBalancer, WeightedBalancer,
     create_balancer,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
 /// Load balancing algorithm.
@@ -32,6 +33,8 @@ pub enum UpstreamTarget {
     NodeRef { node_id: String, weight: u32 },
     /// Reference to a node group.
     GroupRef { group_id: String },
+    /// External SOCKS5/HTTP proxy URL.
+    ExternalProxy { proxy_url: String, weight: u32 },
 }
 
 impl UpstreamTarget {
@@ -61,12 +64,120 @@ impl UpstreamTarget {
             group_id: group_id.into(),
         }
     }
+
+    pub fn external_proxy(proxy_url: impl Into<String>, weight: u32) -> Self {
+        Self::ExternalProxy {
+            proxy_url: proxy_url.into(),
+            weight,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalProxyKind {
+    Socks5,
+    Http,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalProxyTarget {
+    pub kind: ExternalProxyKind,
+    pub host: String,
+    pub port: u16,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub remote_dns: bool,
+}
+
+impl ExternalProxyTarget {
+    pub fn parse(proxy_url: &str) -> Result<Self, String> {
+        let url = Url::parse(proxy_url).map_err(|e| format!("Invalid proxy URL: {e}"))?;
+        if url.cannot_be_a_base() {
+            return Err("Proxy URL must include a host".to_string());
+        }
+
+        let (kind, remote_dns) = match url.scheme() {
+            "socks5" => (ExternalProxyKind::Socks5, false),
+            "socks5h" => (ExternalProxyKind::Socks5, true),
+            "http" => (ExternalProxyKind::Http, false),
+            scheme => {
+                return Err(format!(
+                    "Unsupported proxy scheme `{scheme}`. Use socks5, socks5h, or http"
+                ));
+            }
+        };
+
+        let host = url
+            .host_str()
+            .ok_or_else(|| "Proxy URL must include a host".to_string())?
+            .to_string();
+        let port = url
+            .port()
+            .ok_or_else(|| "Proxy URL must include an explicit port".to_string())?;
+        let username = match url.username() {
+            "" => None,
+            value => Some(value.to_string()),
+        };
+        let password = url.password().map(ToString::to_string);
+        if password.is_some() && username.is_none() {
+            return Err("Proxy URL password requires a username".to_string());
+        }
+
+        Ok(Self {
+            kind,
+            host,
+            port,
+            username,
+            password,
+            remote_dns,
+        })
+    }
+
+    pub fn display_url(&self) -> String {
+        let scheme = match (self.kind, self.remote_dns) {
+            (ExternalProxyKind::Socks5, true) => "socks5h",
+            (ExternalProxyKind::Socks5, false) => "socks5",
+            (ExternalProxyKind::Http, _) => "http",
+        };
+        match &self.username {
+            Some(username) => format!("{scheme}://{username}@{}:{}", self.host, self.port),
+            None => format!("{scheme}://{}:{}", self.host, self.port),
+        }
+    }
+
+    pub fn stable_id(&self) -> String {
+        self.display_url()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelayRoute {
+    ProxyServer { addr: String },
+    ExternalProxy(ExternalProxyTarget),
+}
+
+impl RelayRoute {
+    pub fn stable_id(&self) -> String {
+        match self {
+            Self::ProxyServer { addr } => addr.clone(),
+            Self::ExternalProxy(proxy) => proxy.stable_id(),
+        }
+    }
+
+    pub fn display_addr(&self) -> String {
+        match self {
+            Self::ProxyServer { addr } => addr.clone(),
+            Self::ExternalProxy(proxy) => proxy.display_url(),
+        }
+    }
 }
 
 /// Resolved target with address and weight.
 #[derive(Debug, Clone)]
 pub struct ResolvedTarget {
+    pub id: String,
     pub addr: String,
+    pub route: RelayRoute,
     pub weight: u32,
     pub healthy: bool,
 }
@@ -139,6 +250,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_external_proxy_target_serde() {
+        let config = RelayConfig {
+            enabled: true,
+            targets: vec![UpstreamTarget::external_proxy(
+                "socks5://user:secret@127.0.0.1:1080",
+                3,
+            )],
+            algo: LoadBalanceAlgo::Weighted,
+            health_check_interval_secs: 45,
+        };
+
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        assert!(json.contains("\"type\": \"external_proxy\""));
+
+        let parsed: RelayConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.targets, config.targets);
+    }
+
+    #[test]
+    fn test_parse_external_proxy_target_masks_password() {
+        let proxy = ExternalProxyTarget::parse("socks5://user:secret@127.0.0.1:1080").unwrap();
+        assert_eq!(proxy.kind, ExternalProxyKind::Socks5);
+        assert_eq!(proxy.host, "127.0.0.1");
+        assert_eq!(proxy.port, 1080);
+        assert_eq!(proxy.username.as_deref(), Some("user"));
+        assert_eq!(proxy.password.as_deref(), Some("secret"));
+        assert_eq!(proxy.display_url(), "socks5://user@127.0.0.1:1080");
+    }
+
+    #[test]
+    fn test_parse_external_http_proxy_without_auth() {
+        let proxy = ExternalProxyTarget::parse("http://proxy.example.com:8080").unwrap();
+        assert_eq!(proxy.kind, ExternalProxyKind::Http);
+        assert_eq!(proxy.host, "proxy.example.com");
+        assert_eq!(proxy.port, 8080);
+        assert!(proxy.username.is_none());
+        assert!(proxy.password.is_none());
+        assert_eq!(proxy.display_url(), "http://proxy.example.com:8080");
+    }
+
+    #[test]
     fn test_relay_config_serde() {
         let config = RelayConfig {
             enabled: true,
@@ -147,6 +299,7 @@ mod tests {
                 UpstreamTarget::node_weighted("127.0.0.2:1081", 2),
                 UpstreamTarget::node_ref("node-1"),
                 UpstreamTarget::group_ref("group-1"),
+                UpstreamTarget::external_proxy("http://127.0.0.1:8080", 2),
             ],
             algo: LoadBalanceAlgo::Weighted,
             health_check_interval_secs: 60,
@@ -156,7 +309,7 @@ mod tests {
         let parsed: RelayConfig = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed.enabled, config.enabled);
-        assert_eq!(parsed.targets.len(), 4);
+        assert_eq!(parsed.targets.len(), 5);
         assert_eq!(parsed.algo, LoadBalanceAlgo::Weighted);
     }
 
@@ -174,5 +327,9 @@ mod tests {
         };
         let json = serde_json::to_string(&target).unwrap();
         assert!(json.contains("\"type\":\"group_ref\""));
+
+        let target = UpstreamTarget::external_proxy("socks5://user:pass@127.0.0.1:1080", 1);
+        let json = serde_json::to_string(&target).unwrap();
+        assert!(json.contains("\"type\":\"external_proxy\""));
     }
 }

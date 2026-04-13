@@ -9,18 +9,18 @@ use super::{ResolvedTarget, TargetStatus};
 
 /// Load balancer trait.
 pub trait LoadBalancer: Send + Sync {
-    /// Select a target address.
-    fn select(&self) -> Option<String>;
+    /// Select a resolved target.
+    fn select(&self) -> Option<ResolvedTarget>;
     /// Update the target list.
     fn update_targets(&self, targets: Vec<ResolvedTarget>);
     /// Mark a target as unhealthy.
-    fn mark_unhealthy(&self, addr: &str);
+    fn mark_unhealthy(&self, target_id: &str);
     /// Mark a target as healthy.
-    fn mark_healthy(&self, addr: &str);
+    fn mark_healthy(&self, target_id: &str);
     /// Record connection start (for LeastConn).
-    fn on_connect(&self, _addr: &str) {}
+    fn on_connect(&self, _target_id: &str) {}
     /// Record connection end (for LeastConn).
-    fn on_disconnect(&self, _addr: &str) {}
+    fn on_disconnect(&self, _target_id: &str) {}
     /// Get a snapshot of target statuses for monitoring.
     ///
     /// # Notes
@@ -64,30 +64,30 @@ impl Default for RoundRobinBalancer {
 }
 
 impl LoadBalancer for RoundRobinBalancer {
-    fn select(&self) -> Option<String> {
+    fn select(&self) -> Option<ResolvedTarget> {
         let targets = self.targets.read();
         let healthy: Vec<_> = targets.iter().filter(|t| t.healthy).collect();
         if healthy.is_empty() {
             return None;
         }
         let idx = self.index.fetch_add(1, Ordering::Relaxed) % healthy.len();
-        Some(healthy[idx].addr.clone())
+        Some(healthy[idx].clone())
     }
 
     fn update_targets(&self, targets: Vec<ResolvedTarget>) {
         *self.targets.write() = targets;
     }
 
-    fn mark_unhealthy(&self, addr: &str) {
+    fn mark_unhealthy(&self, target_id: &str) {
         let mut targets = self.targets.write();
-        if let Some(t) = targets.iter_mut().find(|t| t.addr == addr) {
+        if let Some(t) = targets.iter_mut().find(|t| t.id == target_id) {
             t.healthy = false;
         }
     }
 
-    fn mark_healthy(&self, addr: &str) {
+    fn mark_healthy(&self, target_id: &str) {
         let mut targets = self.targets.write();
-        if let Some(t) = targets.iter_mut().find(|t| t.addr == addr) {
+        if let Some(t) = targets.iter_mut().find(|t| t.id == target_id) {
             t.healthy = true;
         }
     }
@@ -118,7 +118,7 @@ impl Default for RandomBalancer {
 }
 
 impl LoadBalancer for RandomBalancer {
-    fn select(&self) -> Option<String> {
+    fn select(&self) -> Option<ResolvedTarget> {
         let targets = self.targets.read();
         let healthy: Vec<_> = targets.iter().filter(|t| t.healthy).collect();
         if healthy.is_empty() {
@@ -130,23 +130,23 @@ impl LoadBalancer for RandomBalancer {
             .map(|d| d.as_nanos() as usize)
             .unwrap_or(0))
             % healthy.len();
-        Some(healthy[idx].addr.clone())
+        Some(healthy[idx].clone())
     }
 
     fn update_targets(&self, targets: Vec<ResolvedTarget>) {
         *self.targets.write() = targets;
     }
 
-    fn mark_unhealthy(&self, addr: &str) {
+    fn mark_unhealthy(&self, target_id: &str) {
         let mut targets = self.targets.write();
-        if let Some(t) = targets.iter_mut().find(|t| t.addr == addr) {
+        if let Some(t) = targets.iter_mut().find(|t| t.id == target_id) {
             t.healthy = false;
         }
     }
 
-    fn mark_healthy(&self, addr: &str) {
+    fn mark_healthy(&self, target_id: &str) {
         let mut targets = self.targets.write();
-        if let Some(t) = targets.iter_mut().find(|t| t.addr == addr) {
+        if let Some(t) = targets.iter_mut().find(|t| t.id == target_id) {
             t.healthy = true;
         }
     }
@@ -179,7 +179,7 @@ impl Default for WeightedBalancer {
 }
 
 impl LoadBalancer for WeightedBalancer {
-    fn select(&self) -> Option<String> {
+    fn select(&self) -> Option<ResolvedTarget> {
         let targets = self.targets.read();
         let healthy: Vec<_> = targets.iter().filter(|t| t.healthy).collect();
         if healthy.is_empty() {
@@ -195,26 +195,26 @@ impl LoadBalancer for WeightedBalancer {
         for t in &healthy {
             acc += t.weight;
             if idx < acc {
-                return Some(t.addr.clone());
+                return Some((*t).clone());
             }
         }
-        healthy.last().map(|t| t.addr.clone())
+        healthy.last().map(|t| (*t).clone())
     }
 
     fn update_targets(&self, targets: Vec<ResolvedTarget>) {
         *self.targets.write() = targets;
     }
 
-    fn mark_unhealthy(&self, addr: &str) {
+    fn mark_unhealthy(&self, target_id: &str) {
         let mut targets = self.targets.write();
-        if let Some(t) = targets.iter_mut().find(|t| t.addr == addr) {
+        if let Some(t) = targets.iter_mut().find(|t| t.id == target_id) {
             t.healthy = false;
         }
     }
 
-    fn mark_healthy(&self, addr: &str) {
+    fn mark_healthy(&self, target_id: &str) {
         let mut targets = self.targets.write();
-        if let Some(t) = targets.iter_mut().find(|t| t.addr == addr) {
+        if let Some(t) = targets.iter_mut().find(|t| t.id == target_id) {
             t.healthy = true;
         }
     }
@@ -251,13 +251,13 @@ impl Default for LeastConnBalancer {
 }
 
 impl LoadBalancer for LeastConnBalancer {
-    fn select(&self) -> Option<String> {
+    fn select(&self) -> Option<ResolvedTarget> {
         let targets = self.targets.read();
         targets
             .iter()
             .filter(|t| t.target.healthy)
             .min_by_key(|t| t.connections.load(Ordering::Relaxed))
-            .map(|t| t.target.addr.clone())
+            .map(|t| t.target.clone())
     }
 
     fn update_targets(&self, targets: Vec<ResolvedTarget>) {
@@ -267,7 +267,7 @@ impl LoadBalancer for LeastConnBalancer {
             .iter()
             .map(|old| {
                 (
-                    old.target.addr.clone(),
+                    old.target.id.clone(),
                     old.connections.load(Ordering::Relaxed),
                 )
             })
@@ -275,7 +275,7 @@ impl LoadBalancer for LeastConnBalancer {
         let new_targets: Vec<_> = targets
             .into_iter()
             .map(|t| {
-                let conns = old_connections.get(&t.addr).copied().unwrap_or(0);
+                let conns = old_connections.get(&t.id).copied().unwrap_or(0);
                 LeastConnTarget {
                     target: t,
                     connections: AtomicU64::new(conns),
@@ -285,30 +285,30 @@ impl LoadBalancer for LeastConnBalancer {
         *store = new_targets;
     }
 
-    fn mark_unhealthy(&self, addr: &str) {
+    fn mark_unhealthy(&self, target_id: &str) {
         let mut targets = self.targets.write();
-        if let Some(t) = targets.iter_mut().find(|t| t.target.addr == addr) {
+        if let Some(t) = targets.iter_mut().find(|t| t.target.id == target_id) {
             t.target.healthy = false;
         }
     }
 
-    fn mark_healthy(&self, addr: &str) {
+    fn mark_healthy(&self, target_id: &str) {
         let mut targets = self.targets.write();
-        if let Some(t) = targets.iter_mut().find(|t| t.target.addr == addr) {
+        if let Some(t) = targets.iter_mut().find(|t| t.target.id == target_id) {
             t.target.healthy = true;
         }
     }
 
-    fn on_connect(&self, addr: &str) {
+    fn on_connect(&self, target_id: &str) {
         let targets = self.targets.read();
-        if let Some(t) = targets.iter().find(|t| t.target.addr == addr) {
+        if let Some(t) = targets.iter().find(|t| t.target.id == target_id) {
             t.connections.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    fn on_disconnect(&self, addr: &str) {
+    fn on_disconnect(&self, target_id: &str) {
         let targets = self.targets.read();
-        if let Some(t) = targets.iter().find(|t| t.target.addr == addr) {
+        if let Some(t) = targets.iter().find(|t| t.target.id == target_id) {
             t.connections.fetch_sub(1, Ordering::Relaxed);
         }
     }
@@ -340,21 +340,28 @@ pub fn create_balancer(algo: super::LoadBalanceAlgo) -> Box<dyn LoadBalancer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::relay::RelayRoute;
 
     fn make_targets() -> Vec<ResolvedTarget> {
         vec![
             ResolvedTarget {
+                id: "a".into(),
                 addr: "a".into(),
+                route: RelayRoute::ProxyServer { addr: "a".into() },
                 weight: 1,
                 healthy: true,
             },
             ResolvedTarget {
+                id: "b".into(),
                 addr: "b".into(),
+                route: RelayRoute::ProxyServer { addr: "b".into() },
                 weight: 2,
                 healthy: true,
             },
             ResolvedTarget {
+                id: "c".into(),
                 addr: "c".into(),
+                route: RelayRoute::ProxyServer { addr: "c".into() },
                 weight: 1,
                 healthy: true,
             },
@@ -368,7 +375,7 @@ mod tests {
 
         let mut results = Vec::new();
         for _ in 0..6 {
-            results.push(lb.select().unwrap());
+            results.push(lb.select().unwrap().addr);
         }
         // Should cycle through a, b, c
         assert_eq!(results[0], results[3]);
@@ -384,7 +391,7 @@ mod tests {
         // Total weight = 4, so in 4 selections: a=1, b=2, c=1
         let mut counts = std::collections::HashMap::new();
         for _ in 0..400 {
-            let addr = lb.select().unwrap();
+            let addr = lb.select().unwrap().addr;
             *counts.entry(addr).or_insert(0) += 1;
         }
         // b should have ~2x the count of a or c
@@ -398,11 +405,11 @@ mod tests {
 
         // All have 0 connections, should pick first
         let first = lb.select().unwrap();
-        lb.on_connect(&first);
+        lb.on_connect(&first.id);
 
         // Now first has 1 connection, should pick another
         let second = lb.select().unwrap();
-        assert_ne!(first, second);
+        assert_ne!(first.id, second.id);
     }
 
     #[test]
@@ -415,7 +422,7 @@ mod tests {
         // Should only return a and c
         let mut results = std::collections::HashSet::new();
         for _ in 0..10 {
-            results.insert(lb.select().unwrap());
+            results.insert(lb.select().unwrap().addr);
         }
         assert!(!results.contains("b"));
         assert!(results.contains("a"));

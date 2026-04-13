@@ -5,7 +5,7 @@ use std::io::stdout;
 use crossterm::event::KeyCode;
 use crossterm::execute;
 use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
-use proxy_core::relay::{RelayConfig, UpstreamTarget};
+use proxy_core::relay::{ExternalProxyTarget, RelayConfig, UpstreamTarget};
 use tokio::sync::mpsc;
 
 use super::types::{AppState, DataCommand, InputDialogMode};
@@ -177,38 +177,39 @@ pub async fn handle_input_dialog_input(
 /// - `node <host:port> [weight]`
 /// - `node_ref <node_id> [weight]`
 /// - `group_ref <group_id>`
+/// - `proxy <proxy_url> [weight]`
+/// - `<proxy_url> [weight]` where scheme is socks5, socks5h, or http
 fn parse_relay_target(input: &str) -> Result<UpstreamTarget, String> {
     let mut parts = input.split_whitespace();
     let kind = parts
         .next()
         .ok_or_else(|| "Target type required".to_string())?;
+
+    if looks_like_proxy_url(kind) {
+        let weight = parse_weight(
+            parts.next(),
+            "Format: <proxy_url> [weight] (scheme: socks5, socks5h, http)",
+        )?;
+        ensure_no_extra_parts(parts)?;
+        validate_proxy_url(kind)?;
+        return Ok(UpstreamTarget::external_proxy(kind, weight));
+    }
+
     match kind {
         "node" => {
             let addr = parts
                 .next()
                 .ok_or_else(|| "Format: node <host:port> [weight]".to_string())?;
-            let weight = parts
-                .next()
-                .map(|v| {
-                    v.parse::<u32>()
-                        .map_err(|_| "Weight must be a positive integer".to_string())
-                })
-                .transpose()?
-                .unwrap_or(1);
+            let weight = parse_weight(parts.next(), "Format: node <host:port> [weight]")?;
+            ensure_no_extra_parts(parts)?;
             Ok(UpstreamTarget::node_weighted(addr, weight))
         }
         "node_ref" => {
             let node_id = parts
                 .next()
                 .ok_or_else(|| "Format: node_ref <node_id> [weight]".to_string())?;
-            let weight = parts
-                .next()
-                .map(|v| {
-                    v.parse::<u32>()
-                        .map_err(|_| "Weight must be a positive integer".to_string())
-                })
-                .transpose()?
-                .unwrap_or(1);
+            let weight = parse_weight(parts.next(), "Format: node_ref <node_id> [weight]")?;
+            ensure_no_extra_parts(parts)?;
             Ok(UpstreamTarget::NodeRef {
                 node_id: node_id.to_string(),
                 weight,
@@ -218,8 +219,103 @@ fn parse_relay_target(input: &str) -> Result<UpstreamTarget, String> {
             let group_id = parts
                 .next()
                 .ok_or_else(|| "Format: group_ref <group_id>".to_string())?;
+            ensure_no_extra_parts(parts)?;
             Ok(UpstreamTarget::group_ref(group_id))
         }
-        _ => Err("Unknown target type. Use: node | node_ref | group_ref".to_string()),
+        "proxy" => {
+            let proxy_url = parts.next().ok_or_else(|| {
+                "Format: proxy <proxy_url> [weight] (scheme: socks5, socks5h, http)".to_string()
+            })?;
+            let weight = parse_weight(
+                parts.next(),
+                "Format: proxy <proxy_url> [weight] (scheme: socks5, socks5h, http)",
+            )?;
+            ensure_no_extra_parts(parts)?;
+            validate_proxy_url(proxy_url)?;
+            Ok(UpstreamTarget::external_proxy(proxy_url, weight))
+        }
+        _ => Err(
+            "Unknown target type. Use: node | node_ref | group_ref | proxy | <proxy_url>"
+                .to_string(),
+        ),
+    }
+}
+
+fn looks_like_proxy_url(input: &str) -> bool {
+    input.starts_with("socks5://")
+        || input.starts_with("socks5h://")
+        || input.starts_with("http://")
+}
+
+fn parse_weight(weight: Option<&str>, usage: &str) -> Result<u32, String> {
+    match weight {
+        Some(value) => {
+            let weight = value
+                .parse::<u32>()
+                .map_err(|_| format!("Weight must be a positive integer. {usage}"))?;
+            if weight == 0 {
+                return Err(format!("Weight must be a positive integer. {usage}"));
+            }
+            Ok(weight)
+        }
+        None => Ok(1),
+    }
+}
+
+fn ensure_no_extra_parts<'a>(mut parts: impl Iterator<Item = &'a str>) -> Result<(), String> {
+    if parts.next().is_some() {
+        Err("Too many arguments for relay target".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_proxy_url(proxy_url: &str) -> Result<(), String> {
+    ExternalProxyTarget::parse(proxy_url).map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use proxy_core::relay::UpstreamTarget;
+
+    use super::parse_relay_target;
+
+    #[test]
+    fn test_parse_relay_target_proxy_keyword() {
+        let target = parse_relay_target("proxy socks5://user:secret@127.0.0.1:1080 2").unwrap();
+        assert_eq!(
+            target,
+            UpstreamTarget::external_proxy("socks5://user:secret@127.0.0.1:1080", 2)
+        );
+    }
+
+    #[test]
+    fn test_parse_relay_target_bare_proxy_url() {
+        let target = parse_relay_target("http://user:secret@127.0.0.1:8080").unwrap();
+        assert_eq!(
+            target,
+            UpstreamTarget::external_proxy("http://user:secret@127.0.0.1:8080", 1)
+        );
+    }
+
+    #[test]
+    fn test_parse_relay_target_bare_proxy_url_with_weight() {
+        let target = parse_relay_target("socks5h://user:secret@127.0.0.1:1080 4").unwrap();
+        assert_eq!(
+            target,
+            UpstreamTarget::external_proxy("socks5h://user:secret@127.0.0.1:1080", 4)
+        );
+    }
+
+    #[test]
+    fn test_parse_relay_target_rejects_invalid_proxy_url() {
+        let err = parse_relay_target("proxy socks4://127.0.0.1:1080").unwrap_err();
+        assert!(err.contains("Unsupported proxy scheme"));
+    }
+
+    #[test]
+    fn test_parse_relay_target_rejects_zero_weight() {
+        let err = parse_relay_target("proxy socks5://127.0.0.1:1080 0").unwrap_err();
+        assert!(err.contains("Weight must be a positive integer"));
     }
 }

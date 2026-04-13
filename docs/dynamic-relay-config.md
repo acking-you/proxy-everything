@@ -141,8 +141,19 @@ cargo build --release -p proxy-tui
     - `node <host:port> [weight]`
     - `node_ref <node_id> [weight]`
     - `group_ref <group_id>`
+    - `proxy <proxy_url> [weight]`
+    - 也可直接粘贴完整代理 URL：`socks5://...`、`socks5h://...`、`http://...`
   - `d` 删除选中 Relay 目标
   - `c` 直接设置完整 Relay 配置（JSON）
+
+外部代理说明：
+
+- `socks5://user:pass@host:port`：通过 SOCKS5 中转，目标域名先在本机解析。
+- `socks5h://user:pass@host:port`：通过 SOCKS5 中转，并让代理端执行远端 DNS 解析。
+- `http://user:pass@host:port`：通过 HTTP CONNECT 中转。
+- SOCKS5 和 HTTP CONNECT 都支持用户名/密码认证。
+- TUI 与 `GetRelayStatus` 会隐藏密码，不会把 `pass` 回显到界面里。
+- `Relay` 页面仍然不接受裸 `host:port` 作为外部代理输入；如果不是 `node ...`，就必须带协议头。
 
 JSON 示例：
 
@@ -151,7 +162,12 @@ JSON 示例：
   "enabled": true,
   "targets": [
     { "type": "group_ref", "group_id": "asia" },
-    { "type": "node", "addr": "backup.server:1081", "weight": 2 }
+    { "type": "node", "addr": "backup.server:1081", "weight": 2 },
+    {
+      "type": "external_proxy",
+      "proxy_url": "socks5://relay-user:secret@127.0.0.1:1080",
+      "weight": 1
+    }
   ],
   "algo": "weighted",
   "health_check_interval_secs": 30

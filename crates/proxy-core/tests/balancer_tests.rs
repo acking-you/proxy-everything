@@ -10,7 +10,11 @@ use proxy_core::relay::{
 fn make_targets(count: usize) -> Vec<ResolvedTarget> {
     (0..count)
         .map(|i| ResolvedTarget {
+            id: format!("10.0.0.{}:1081", i + 1),
             addr: format!("10.0.0.{}:1081", i + 1),
+            route: proxy_core::relay::RelayRoute::ProxyServer {
+                addr: format!("10.0.0.{}:1081", i + 1),
+            },
             weight: 1,
             healthy: true,
         })
@@ -20,17 +24,23 @@ fn make_targets(count: usize) -> Vec<ResolvedTarget> {
 fn make_weighted_targets() -> Vec<ResolvedTarget> {
     vec![
         ResolvedTarget {
+            id: "a:1".into(),
             addr: "a:1".into(),
+            route: proxy_core::relay::RelayRoute::ProxyServer { addr: "a:1".into() },
             weight: 1,
             healthy: true,
         },
         ResolvedTarget {
+            id: "b:1".into(),
             addr: "b:1".into(),
+            route: proxy_core::relay::RelayRoute::ProxyServer { addr: "b:1".into() },
             weight: 2,
             healthy: true,
         },
         ResolvedTarget {
+            id: "c:1".into(),
             addr: "c:1".into(),
+            route: proxy_core::relay::RelayRoute::ProxyServer { addr: "c:1".into() },
             weight: 1,
             healthy: true,
         },
@@ -44,7 +54,7 @@ fn test_round_robin_distribution() {
 
     let mut counts: HashMap<String, usize> = HashMap::new();
     for _ in 0..300 {
-        let addr = lb.select().unwrap();
+        let addr = lb.select().unwrap().addr;
         *counts.entry(addr).or_insert(0) += 1;
     }
 
@@ -64,7 +74,7 @@ fn test_round_robin_skips_unhealthy() {
 
     let mut counts: HashMap<String, usize> = HashMap::new();
     for _ in 0..100 {
-        let addr = lb.select().unwrap();
+        let addr = lb.select().unwrap().addr;
         *counts.entry(addr).or_insert(0) += 1;
     }
 
@@ -82,7 +92,7 @@ fn test_round_robin_recovers_healthy() {
 
     let mut counts: HashMap<String, usize> = HashMap::new();
     for _ in 0..300 {
-        let addr = lb.select().unwrap();
+        let addr = lb.select().unwrap().addr;
         *counts.entry(addr).or_insert(0) += 1;
     }
 
@@ -96,7 +106,7 @@ fn test_weighted_distribution() {
 
     let mut counts: HashMap<String, usize> = HashMap::new();
     for _ in 0..400 {
-        let addr = lb.select().unwrap();
+        let addr = lb.select().unwrap().addr;
         *counts.entry(addr).or_insert(0) += 1;
     }
 
@@ -114,7 +124,7 @@ fn test_random_distribution() {
 
     let mut counts: HashMap<String, usize> = HashMap::new();
     for _ in 0..300 {
-        let addr = lb.select().unwrap();
+        let addr = lb.select().unwrap().addr;
         *counts.entry(addr).or_insert(0) += 1;
     }
 
@@ -132,17 +142,17 @@ fn test_least_conn_prefers_idle() {
 
     // First selection - all have 0 connections
     let first = lb.select().unwrap();
-    lb.on_connect(&first);
+    lb.on_connect(&first.id);
 
     // Second selection - should pick different one
     let second = lb.select().unwrap();
-    assert_ne!(first, second);
-    lb.on_connect(&second);
+    assert_ne!(first.id, second.id);
+    lb.on_connect(&second.id);
 
     // Third selection - should pick the remaining one
     let third = lb.select().unwrap();
-    assert_ne!(third, first);
-    assert_ne!(third, second);
+    assert_ne!(third.id, first.id);
+    assert_ne!(third.id, second.id);
 }
 
 #[test]
@@ -152,20 +162,20 @@ fn test_least_conn_rebalances_on_disconnect() {
 
     // Connect to first
     let first = lb.select().unwrap();
-    lb.on_connect(&first);
-    lb.on_connect(&first);
+    lb.on_connect(&first.id);
+    lb.on_connect(&first.id);
 
     // Second should be preferred now
     let second = lb.select().unwrap();
-    assert_ne!(first, second);
+    assert_ne!(first.id, second.id);
 
     // Disconnect from first
-    lb.on_disconnect(&first);
-    lb.on_disconnect(&first);
+    lb.on_disconnect(&first.id);
+    lb.on_disconnect(&first.id);
 
     // Now first should be preferred again
     let next = lb.select().unwrap();
-    assert_eq!(next, first);
+    assert_eq!(next.id, first.id);
 }
 
 #[test]
@@ -216,7 +226,7 @@ fn test_update_targets_preserves_connections() {
 
     // Connection count should be preserved - second target should be preferred
     let selected = lb.select().unwrap();
-    assert_eq!(selected, "10.0.0.2:1081");
+    assert_eq!(selected.addr, "10.0.0.2:1081");
 }
 
 #[test]

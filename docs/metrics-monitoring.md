@@ -126,10 +126,18 @@ cargo build --release -p proxy-tui
   - `node <host:port> [weight]`
   - `node_ref <node_id> [weight]`
   - `group_ref <group_id>`
+  - `proxy <proxy_url> [weight]`
+  - Or paste a full proxy URL directly: `socks5://...`, `socks5h://...`, `http://...`
 - `d` - remove selected relay target
 - `c` - set relay config (JSON)
   - Example:
-    `{"enabled":true,"targets":[{"type":"group_ref","group_id":"asia"}],"algo":"round_robin","health_check_interval_secs":30}`
+    `{"enabled":true,"targets":[{"type":"group_ref","group_id":"asia"},{"type":"external_proxy","proxy_url":"socks5://relay-user:secret@127.0.0.1:1080","weight":1}],"algo":"round_robin","health_check_interval_secs":30}`
+
+Relay display notes:
+
+- Plain `host:port` is only valid in the `Nodes` tab or as `node <host:port>` in the `Relay` tab.
+- Full proxy URLs work directly in the `Relay` tab because the scheme identifies the target type.
+- Displayed relay targets redact proxy passwords in status and UI output.
 
 ---
 

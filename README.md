@@ -77,6 +77,10 @@ Relay target formats:
 - `node <host:port> [weight]`
 - `node_ref <node_id> [weight]`
 - `group_ref <group_id>`
+- `proxy <proxy_url> [weight]`
+- `socks5://user:pass@host:port [weight]`
+- `socks5h://user:pass@host:port [weight]`
+- `http://user:pass@host:port [weight]`
 
 Typical relay flow:
 
@@ -86,12 +90,23 @@ Typical relay flow:
    - `node 44.218.33.171:1081`
    - `node_ref 44.218.33.171:1081`
    - `group_ref asia`
+   - `proxy socks5://relay-user:secret@44.218.33.171:1080`
+   - `http://relay-user:secret@44.218.33.171:8080`
 4. Press `e` to enable relay if it is still disabled.
+
+Proxy relay notes:
+
+- `socks5://` uses local DNS resolution before dialing the proxy target.
+- `socks5h://` sends the original hostname to the SOCKS5 proxy for remote DNS resolution.
+- Username/password auth is supported for both SOCKS5 and HTTP CONNECT proxies.
+- Relay status and the TUI redact proxy passwords from displayed target addresses.
 
 Common pitfall:
 
 - In the `Relay` tab, entering only `44.218.33.171:1081` will fail with `Unknown target type`.
   That input works in `Nodes`, but `Relay` requires the target type prefix such as `node`.
+- In the `Relay` tab, a bare proxy URL is valid because the scheme already identifies the target type.
+  For example, `socks5://user:pass@44.218.33.171:1080` works, but `44.218.33.171:1080` does not.
 - In the current implementation, a node ID is usually the same as the `host:port`
   you added earlier, so `node_ref 44.218.33.171:1081` can be valid after the node
   has already been registered.

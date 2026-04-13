@@ -40,11 +40,13 @@ futures = { workspace = true }
 # Network
 reqwest = { workspace = true }
 ureq = { workspace = true }
+tokio-socks = { workspace = true }
 uni-stream = { workspace = true }
 
 # Geo
 maxminddb = { workspace = true }
 flate2 = { workspace = true }
+base64 = { workspace = true }
 
 # System
 dirs = { workspace = true }

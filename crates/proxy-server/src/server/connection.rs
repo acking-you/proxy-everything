@@ -9,6 +9,8 @@ use proxy_core::codec::{
 };
 use proxy_core::control::{ControlCodec, is_control_target};
 use proxy_core::metrics::{ConnectionRecord, current_time_ms};
+use proxy_core::relay::RelayRoute;
+use proxy_core::transport::get_tcp_external_proxy_stream;
 use proxy_core::util::{display_report, error_report};
 use proxy_core::{
     Aes256GcmCryption, Aes256GcmDecryptor, Aes256GcmEncryptor, DataSize, MyAsyncCodecReader,
@@ -23,7 +25,7 @@ use tracing::{Instrument, field};
 use super::control::handle_control_session;
 use super::{
     ControlSnafu, IoSnafu, MAX_HEADER_SIZE, ProxySnafu, ReadHeaderSnafu, Result, ServerContext,
-    ServerError,
+    ServerError, TransportSnafu,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -267,38 +269,92 @@ async fn handle_connect_inner(
         }
     }
 
-    if let Some((relay_server, header_buf)) = relay_context {
+    if let Some((relay_target, header_buf)) = relay_context {
         tracing::Span::current().record("mode", "relay");
-        tracing::Span::current().record("dest", field::display(&relay_server));
-        let relay_stream = TcpStream::connect(&relay_server).await.context(IoSnafu {
-            detail: format!("Connect to relay_server:{}", relay_server),
-        })?;
-        ctx.relay.on_connect(&relay_server);
-        let (r, w) = relay_stream.into_split();
-        let (server_reader, mut server_writer) = (AsyncReader::new(r), AsyncWriter::new(w));
-        set_data_size(&mut server_writer, msg_len)
-            .await
-            .context(ProxySnafu)?;
-        server_writer
-            .write_all(&header_buf)
-            .await
-            .context(IoSnafu {
-                detail: "Write To Relay Server Header(addr,tag)",
-            })?;
-        let result =
-            proxy_with_metrics_normal(client_reader, server_reader, client_writer, server_writer)
+        tracing::Span::current().record("dest", field::display(&relay_target.addr));
+
+        match &relay_target.route {
+            RelayRoute::ProxyServer { addr } => {
+                let relay_stream = TcpStream::connect(addr).await.context(IoSnafu {
+                    detail: format!("Connect to relay_server:{addr}"),
+                })?;
+                ctx.relay.on_connect(&relay_target.id);
+                let (r, w) = relay_stream.into_split();
+                let (server_reader, mut server_writer) = (AsyncReader::new(r), AsyncWriter::new(w));
+                set_data_size(&mut server_writer, msg_len)
+                    .await
+                    .context(ProxySnafu)?;
+                server_writer
+                    .write_all(&header_buf)
+                    .await
+                    .context(IoSnafu {
+                        detail: "Write To Relay Server Header(addr,tag)",
+                    })?;
+                let result = proxy_with_metrics_normal(
+                    client_reader,
+                    server_reader,
+                    client_writer,
+                    server_writer,
+                )
                 .await;
-        ctx.relay.on_disconnect(&relay_server);
-        record_connection(
-            &ctx,
-            &peer_ip,
-            &format!("relay:{}", relay_server),
-            0,
-            started_at_ms,
-            trace_id,
-            &result,
-        );
-        return result.map(|_| ());
+                ctx.relay.on_disconnect(&relay_target.id);
+                record_connection(
+                    &ctx,
+                    &peer_ip,
+                    &format!("relay:{}", relay_target.addr),
+                    0,
+                    started_at_ms,
+                    trace_id,
+                    &result,
+                );
+                return result.map(|_| ());
+            }
+            RelayRoute::ExternalProxy(proxy) => {
+                let header = header.ok_or_else(|| ServerError::Decryption {
+                    detail: "decrypt header failed".to_string(),
+                })?;
+                let server_stream = get_tcp_external_proxy_stream(
+                    proxy,
+                    header.host.as_str(),
+                    header.port,
+                    "connect to external relay proxy",
+                )
+                .await
+                .context(TransportSnafu)?;
+                ctx.relay.on_connect(&relay_target.id);
+                let (r, w) = server_stream.into_split();
+                let (server_reader, server_writer) = (AsyncReader::new(r), AsyncWriter::new(w));
+                let result = if let Some(key) = header.key.as_ref() {
+                    proxy_with_metrics_cryptor(
+                        key.as_ref(),
+                        client_reader,
+                        server_reader,
+                        client_writer,
+                        server_writer,
+                    )
+                    .await
+                } else {
+                    proxy_with_metrics_normal(
+                        client_reader,
+                        server_reader,
+                        client_writer,
+                        server_writer,
+                    )
+                    .await
+                };
+                ctx.relay.on_disconnect(&relay_target.id);
+                record_connection(
+                    &ctx,
+                    &peer_ip,
+                    &format!("relay:{}", relay_target.addr),
+                    0,
+                    started_at_ms,
+                    trace_id,
+                    &result,
+                );
+                return result.map(|_| ());
+            }
+        }
     }
 
     // Non-relay mode requires a valid header.

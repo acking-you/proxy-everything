@@ -114,6 +114,10 @@ pub enum ServerError {
     HeaderSize { size: DataSize },
     #[snafu(display("Proxy error happen!"))]
     Proxy { source: proxy_core::ProxyError },
+    #[snafu(display("Transport error: {source}"))]
+    Transport {
+        source: proxy_core::transport::TransportError,
+    },
     #[snafu(display("Control error: {source}"))]
     Control {
         source: proxy_core::control::ControlError,

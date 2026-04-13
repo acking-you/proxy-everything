@@ -179,7 +179,12 @@ AddRelayTarget { target: GroupRef { group_id: "asia" } }
   "enabled": true,
   "targets": [
     { "type": "node", "addr": "10.0.0.1:1081", "weight": 1 },
-    { "type": "group_ref", "group_id": "asia" }
+    { "type": "group_ref", "group_id": "asia" },
+    {
+      "type": "external_proxy",
+      "proxy_url": "socks5://relay-user:secret@127.0.0.1:1080",
+      "weight": 1
+    }
   ],
   "algo": "Weighted",
   "health_check_interval_secs": 30

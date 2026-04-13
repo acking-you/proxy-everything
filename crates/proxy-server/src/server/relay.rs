@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use parking_lot::RwLock;
 use proxy_core::nodes::NodeStore;
 use proxy_core::relay::{
-    LoadBalanceAlgo, LoadBalancer, RelayConfig, RelayStatus, ResolvedTarget, UpstreamTarget,
-    create_balancer,
+    ExternalProxyTarget, LoadBalanceAlgo, LoadBalancer, RelayConfig, RelayRoute, RelayStatus,
+    ResolvedTarget, UpstreamTarget, create_balancer,
 };
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
@@ -81,7 +81,7 @@ impl RelayManager {
     }
 
     /// Select an upstream target.
-    pub fn select(&self) -> Option<String> {
+    pub fn select(&self) -> Option<ResolvedTarget> {
         if !self.is_enabled() {
             return None;
         }
@@ -190,7 +190,7 @@ impl RelayManager {
                 *last = now;
 
                 let addr = target.addr.clone();
-                let ok = ping_target(&addr).await;
+                let ok = ping_target(&target).await;
                 if ok {
                     self.mark_healthy(&addr);
                 } else {
@@ -253,8 +253,11 @@ impl RelayManager {
         for target in &config.targets {
             match target {
                 UpstreamTarget::Node { addr, weight } => {
+                    let route = RelayRoute::ProxyServer { addr: addr.clone() };
                     resolved.push(ResolvedTarget {
-                        addr: addr.clone(),
+                        id: route.stable_id(),
+                        addr: route.display_addr(),
+                        route,
                         weight: *weight,
                         healthy: true,
                     });
@@ -266,8 +269,11 @@ impl RelayManager {
                         .into_iter()
                         .find(|n| &n.node_id == node_id)
                     {
+                        let route = RelayRoute::ProxyServer { addr: node.addr };
                         resolved.push(ResolvedTarget {
-                            addr: node.addr,
+                            id: route.stable_id(),
+                            addr: route.display_addr(),
+                            route,
                             weight: *weight,
                             healthy: true,
                         });
@@ -275,12 +281,29 @@ impl RelayManager {
                 }
                 UpstreamTarget::GroupRef { group_id } => {
                     for addr in self.nodes.get_group_addrs(group_id) {
+                        let route = RelayRoute::ProxyServer { addr };
                         resolved.push(ResolvedTarget {
-                            addr,
+                            id: route.stable_id(),
+                            addr: route.display_addr(),
+                            route,
                             weight: 1,
                             healthy: true,
                         });
                     }
+                }
+                UpstreamTarget::ExternalProxy { proxy_url, weight } => {
+                    let Ok(proxy) = ExternalProxyTarget::parse(proxy_url) else {
+                        tracing::warn!("invalid external relay proxy url: {}", proxy_url);
+                        continue;
+                    };
+                    let route = RelayRoute::ExternalProxy(proxy);
+                    resolved.push(ResolvedTarget {
+                        id: route.stable_id(),
+                        addr: route.display_addr(),
+                        route,
+                        weight: *weight,
+                        healthy: true,
+                    });
                 }
             }
         }
@@ -289,8 +312,23 @@ impl RelayManager {
     }
 }
 
-async fn ping_target(addr: &str) -> bool {
-    match tokio::time::timeout(PING_TIMEOUT, TcpStream::connect(addr)).await {
+async fn ping_target(target: &proxy_core::relay::TargetStatus) -> bool {
+    let result = if target.addr.starts_with("http://")
+        || target.addr.starts_with("socks5://")
+        || target.addr.starts_with("socks5h://")
+    {
+        let Ok(proxy) = ExternalProxyTarget::parse(&target.addr) else {
+            return false;
+        };
+        tokio::time::timeout(
+            PING_TIMEOUT,
+            TcpStream::connect((proxy.host.as_str(), proxy.port)),
+        )
+        .await
+    } else {
+        tokio::time::timeout(PING_TIMEOUT, TcpStream::connect(&target.addr)).await
+    };
+    match result {
         Ok(Ok(stream)) => {
             drop(stream);
             true

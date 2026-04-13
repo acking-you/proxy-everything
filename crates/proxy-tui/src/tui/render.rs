@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use proxy_core::geo::country_to_flag;
-use proxy_core::relay::UpstreamTarget;
+use proxy_core::relay::{ExternalProxyTarget, UpstreamTarget};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -176,7 +176,8 @@ fn draw_input_dialog(f: &mut Frame, state: &AppState) {
         }
         Some(InputDialogMode::AddRelayTarget) => (
             "Add Relay Target",
-            "node <host:port> [weight] | node_ref <id> [weight] | group_ref <group_id>",
+            "node <host:port> [weight] | node_ref <id> [weight] | group_ref <group_id> | proxy \
+             <url> [weight]",
         ),
         Some(InputDialogMode::SetRelayConfig) => (
             "Set Relay Config (JSON)",
@@ -443,6 +444,12 @@ fn draw_relay_tab(f: &mut Frame, area: Rect, data: &FetchedData, selected: usize
                     format!("node_ref:{node_id} w={weight}")
                 }
                 UpstreamTarget::GroupRef { group_id } => format!("group_ref:{group_id}"),
+                UpstreamTarget::ExternalProxy { proxy_url, weight } => {
+                    let display_url = ExternalProxyTarget::parse(proxy_url)
+                        .map(|proxy| proxy.display_url())
+                        .unwrap_or_else(|_| proxy_url.clone());
+                    format!("proxy:{display_url} w={weight}")
+                }
             };
             rows.push(
                 Row::new(vec![

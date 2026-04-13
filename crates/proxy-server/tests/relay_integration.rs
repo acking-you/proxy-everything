@@ -201,6 +201,57 @@ async fn test_set_full_relay_config() {
 }
 
 #[tokio::test]
+async fn test_external_proxy_relay_status_redacts_password() {
+    let (addr, cancel, test_dir) = setup_test_server().await;
+    let (host, port) = addr.split_once(':').unwrap();
+    let port: u16 = port.parse().unwrap();
+
+    let mut client = ControlClient::connect(host, port, None).await.unwrap();
+    let config = RelayConfig {
+        enabled: true,
+        targets: vec![UpstreamTarget::external_proxy(
+            "socks5://relay-user:secret-pass@127.0.0.1:1080",
+            2,
+        )],
+        algo: LoadBalanceAlgo::RoundRobin,
+        health_check_interval_secs: 30,
+    };
+
+    send_op(
+        &mut client,
+        ControlOp::SetRelayConfig {
+            config: config.clone(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let result = send_op(&mut client, ControlOp::GetRelayConfig)
+        .await
+        .unwrap();
+    if let ControlResult::RelayConfig { config: got } = result {
+        assert_eq!(got.targets, config.targets);
+    } else {
+        panic!("Expected RelayConfig result");
+    }
+
+    let result = send_op(&mut client, ControlOp::GetRelayStatus)
+        .await
+        .unwrap();
+    if let ControlResult::RelayStatus { status } = result {
+        assert_eq!(status.targets.len(), 1);
+        assert_eq!(status.targets[0].addr, "socks5://relay-user@127.0.0.1:1080");
+        assert_eq!(status.targets[0].weight, 2);
+        assert!(!status.targets[0].addr.contains("secret-pass"));
+    } else {
+        panic!("Expected RelayStatus result");
+    }
+
+    cancel.cancel();
+    let _ = std::fs::remove_dir_all(&test_dir);
+}
+
+#[tokio::test]
 async fn test_group_management() {
     let (addr, cancel, test_dir) = setup_test_server().await;
     let (host, port) = addr.split_once(':').unwrap();
