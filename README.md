@@ -113,13 +113,33 @@ Common pitfall:
 
 [Dynamic relay guide →](docs/dynamic-relay-config.md)
 
+### Admin CLI
+
+`http-proxy-admin` is the script-friendly control-plane CLI. It prints JSON
+responses compatible with the control protocol and supports:
+
+- `ping`
+- `nodes list/add/remove`
+- `groups list/create/delete/add-node/remove-node`
+- `relay get/status/enable/disable/add-target/remove-target/set-algo`
+- `metrics realtime/connections/buckets/top-n`
+
+Build and run:
+
+```bash
+cargo build --release --bin http-proxy-admin
+./target/release/http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY ping
+```
+
+[Metrics & management guide →](docs/metrics-monitoring.md)
+
 ## Documentation
 
 - [Server Deployment (Docker)](docs/server-deployment.md) - Docker deployment guide
 - [Server Deployment (Systemd)](docs/systemd-deployment.md) - Binary + systemd deployment
 - [Client Usage](docs/client-usage.md) - Windows, Linux, macOS, Android, iOS
 - [Admin Test Script](docs/admin-test.md) - How to run `http-proxy-admin` control-plane tests
-- [Metrics Monitoring](docs/metrics-monitoring.md) - TUI + admin CLI for realtime metrics
+- [Metrics Monitoring](docs/metrics-monitoring.md) - TUI + admin CLI for management and realtime metrics
 
 ## Features
 

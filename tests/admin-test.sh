@@ -1,6 +1,6 @@
 #!/bin/bash
 # Test script for http-proxy-admin CLI
-# Validates all control plane operations
+# Validates ping, nodes, metrics, and auth flows
 
 set -euo pipefail
 
@@ -51,14 +51,14 @@ require_32_bytes() {
 # Build
 log_info "Building binaries..."
 cd "$PROJECT_DIR"
-cargo build --release --bin http-proxy-server --bin http-proxy-client --bin http-proxy-admin 2>/dev/null \
-    || cargo build --bin http-proxy-server --bin http-proxy-client --bin http-proxy-admin
+cargo build --release --bin http-proxy-server --bin http-proxy-cli --bin http-proxy-admin 2>/dev/null \
+    || cargo build --bin http-proxy-server --bin http-proxy-cli --bin http-proxy-admin
 
 SERVER_BIN="$PROJECT_DIR/target/release/http-proxy-server"
-CLIENT_BIN="$PROJECT_DIR/target/release/http-proxy-client"
+CLIENT_BIN="$PROJECT_DIR/target/release/http-proxy-cli"
 ADMIN_BIN="$PROJECT_DIR/target/release/http-proxy-admin"
 [ ! -f "$SERVER_BIN" ] && SERVER_BIN="$PROJECT_DIR/target/debug/http-proxy-server"
-[ ! -f "$CLIENT_BIN" ] && CLIENT_BIN="$PROJECT_DIR/target/debug/http-proxy-client"
+[ ! -f "$CLIENT_BIN" ] && CLIENT_BIN="$PROJECT_DIR/target/debug/http-proxy-cli"
 [ ! -f "$ADMIN_BIN" ] && ADMIN_BIN="$PROJECT_DIR/target/debug/http-proxy-admin"
 
 [ ! -f "$SERVER_BIN" ] && log_fail "Server binary not found"
@@ -110,7 +110,7 @@ start_client() {
 
     kill_port "$port"
     log_info "Starting client on port $port -> server $server_port..."
-    SERVER_HOST=127.0.0.1 SERVER_PORT="$server_port" CLIENT_PORT="$port" "$CLIENT_BIN" >/dev/null 2>&1 &
+    "$CLIENT_BIN" -s 127.0.0.1 -p "$server_port" -c "$port" -k "$DEFAULT_KEY" >/dev/null 2>&1 &
     CLIENT_PID=$!
     sleep 1
 
@@ -383,7 +383,7 @@ log_ok "Test 13 passed: Top-N IPs works"
 # Test 14: Invalid granularity
 log_info "Test 14: Invalid granularity..."
 RESPONSE=$("${ADMIN_BASE[@]}" metrics buckets --granularity week --count 1 2>&1 || true)
-if echo "$RESPONSE" | grep -qi "invalid granularity"; then
+if echo "$RESPONSE" | grep -qi "invalid value.*week"; then
     log_ok "Test 14 passed: Invalid granularity rejected"
 else
     echo "$RESPONSE"
@@ -393,7 +393,7 @@ fi
 # Test 15: Invalid category
 log_info "Test 15: Invalid category..."
 RESPONSE=$("${ADMIN_BASE[@]}" metrics top-n --category ports --limit 1 2>&1 || true)
-if echo "$RESPONSE" | grep -qi "invalid category"; then
+if echo "$RESPONSE" | grep -qi "invalid value.*ports"; then
     log_ok "Test 15 passed: Invalid category rejected"
 else
     echo "$RESPONSE"

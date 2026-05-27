@@ -14,6 +14,7 @@ Both tools use the same control API and require the same credentials.
 - [Terminal UI (proxy-tui)](#1-terminal-ui-proxy-tui)
 - [Admin CLI (http-proxy-admin)](#2-admin-cli-http-proxy-admin)
   - [Metrics Commands](#metrics-commands)
+  - [Node Commands](#node-commands)
   - [Relay Commands](#relay-commands)
   - [Node Group Commands](#node-group-commands)
 - [Troubleshooting](#troubleshooting)
@@ -203,6 +204,32 @@ http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY \
 
 ---
 
+## Node Commands
+
+Manage discovered nodes directly from the control plane.
+
+### List nodes
+
+```bash
+http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY nodes list
+```
+
+### Add node
+
+```bash
+http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY \
+  nodes add 10.0.0.1:1081
+```
+
+### Remove node
+
+```bash
+http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY \
+  nodes remove 10.0.0.1:1081
+```
+
+---
+
 ## Relay Commands
 
 Manage dynamic relay configuration at runtime.
@@ -238,7 +265,7 @@ http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY \
 
 # Add a group reference
 http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY \
-  relay add-target --group asia-servers
+  relay add-target --group-id asia-servers
 ```
 
 ### Remove relay target
@@ -255,7 +282,7 @@ http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY \
   relay set-algo --algo weighted
 ```
 
-Algorithms: `round_robin`, `random`, `weighted`, `least_conn`
+Algorithms: `round-robin`, `random`, `weighted`, `least-conn`
 
 ### Get relay status
 
@@ -313,8 +340,9 @@ http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY \
   - `CONTROL_ADMIN_TOKEN` is set on the server; pass `--token`.
 - **No response / connection rejected**
   - Session key mismatch or missing. Provide `-k` or set `CONTROL_SESSION_KEY`.
-- **`invalid granularity` / `invalid category`**
-  - Use allowed values: `minute|hour|day` and `hosts|ips`.
+- **`invalid value`**
+  - Use allowed values shown in `--help`, including `minute|hour|day|m|h|d`
+    and `hosts|host|ips|ip`.
 
 ---
 

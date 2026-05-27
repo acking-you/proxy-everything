@@ -1,11 +1,12 @@
 # Admin Test Script (http-proxy-admin)
 
-This document explains how to use the automated admin control‑plane test script:
+This document explains how to use the automated admin control-plane test script:
 `tests/admin-test.sh`.
 
 The script spins up a local server and client, generates traffic, and validates
-all `http-proxy-admin` control‑plane operations (nodes + metrics), including
-admin‑token and session‑key scenarios.
+the JSON contract for `http-proxy-admin` ping, node, metrics, and auth flows.
+Group and relay commands are covered by the Rust integration test
+`crates/proxy-server/tests/http_proxy_admin_cli.rs`.
 
 ---
 
@@ -42,12 +43,16 @@ Phase 1 (default key, no admin token):
 - `metrics connections --limit`
 - `metrics buckets --granularity {minute,hour,day}`
 - `metrics top-n --category {hosts,ips}`
-- Invalid parameters (granularity/category)
+- Invalid parameters rejected by Clap parsing
 
 Phase 2 (admin token + session key from env):
 - Unauthorized request without token
 - Unauthorized request with wrong token
 - Authorized request with correct token
+
+Additional coverage from Rust integration tests:
+- `groups list/create/delete/add-node/remove-node`
+- `relay get/status/enable/disable/add-target/remove-target/set-algo`
 
 ---
 
@@ -107,7 +112,7 @@ On errors, it prints the raw admin response for debugging.
   - Use `metrics top-n` (with a dash), not `topn`.
 - **"unauthorized"**
   - You started the server with `CONTROL_ADMIN_TOKEN` but didn’t pass `--token`.
-- **"invalid granularity" / "invalid category"**
+- **"invalid value"**
   - Allowed granularity: `minute`, `hour`, `day` (or `m`, `h`, `d`).
   - Allowed category: `ips`/`ip` or `hosts`/`host`.
 - **Port already in use**
