@@ -1,14 +1,15 @@
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use better_mimalloc_rs::{MiMalloc, MiMallocConfig};
 use clap::Parser;
 use comfy_table::{Cell, Color, Table, presets};
 use proxy_client::cli_config::{
     Config, DEFAULT_CONFIG_TEMPLATE, SystemProxyGuard, find_config, get_default_config_path,
 };
-use proxy_client::client::{ClientConfig, start_client_with_config};
-use proxy_core::config::{CLIENT_PORT, SERVER_HOST, SERVER_PORT, init_tracing};
+use proxy_client::client::{ClientConfig, ClientRuntimeConfig, start_client_with_runtime_config};
+use proxy_core::config::{CLIENT_PORT, SERVER_PORT, init_tracing};
+use proxy_core::relay::ExternalProxyTarget;
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: MiMalloc = MiMalloc;
@@ -40,6 +41,9 @@ struct Cli {
     /// [optional] Port number exposed by the local client agent (uses port 1080 by default)
     #[arg(short, long, value_name = "CLIENT_PORT")]
     client_port: Option<u16>,
+    /// [optional] Upstream SOCKS5/HTTP proxy URL, e.g. socks5://user:pass@127.0.0.1:1080
+    #[arg(long, value_name = "PROXY_URL")]
+    upstream_proxy: Option<String>,
     /// [optional] Port number exposed by the proxy server (uses port 1081 by default)
     #[arg(short = 'p', long, value_name = "SERVER_PORT")]
     server_port: Option<u16>,
@@ -79,6 +83,7 @@ impl Cli {
             server_host: self.server_host.clone(),
             server_port: self.server_port,
             client_port: self.client_port,
+            upstream_proxy: self.upstream_proxy.clone(),
             secret_key: self.secret_key.clone(),
             auto_proxy: self.auto_proxy,
             nonproxy_keywords: self
@@ -113,6 +118,7 @@ impl Cli {
         self.server_host.is_some()
             || self.server_port.is_some()
             || self.client_port.is_some()
+            || self.upstream_proxy.is_some()
             || self.secret_key.is_some()
             || self.msg_key
             || self.reverse_geo
@@ -167,14 +173,31 @@ async fn main() -> Result<()> {
         return Ok(());
     };
 
+    let upstream_proxy_url = cli
+        .upstream_proxy
+        .clone()
+        .or_else(|| config.upstream_proxy.clone());
+    let upstream_proxy = match upstream_proxy_url.as_deref() {
+        Some(url) => Some(
+            ExternalProxyTarget::parse(url).map_err(|e| anyhow!("invalid upstream_proxy: {e}"))?,
+        ),
+        None => None,
+    };
+    let upstream_mode = upstream_proxy.is_some();
+
     // Priority: CLI args > config file > env vars > defaults
-    let server_host = cli
+    let configured_server_host = cli
         .server_host
-        .or(config.server_host)
-        .or_else(|| std::env::var("SERVER_HOST").ok())
-        .context(
+        .clone()
+        .or_else(|| config.server_host.clone())
+        .or_else(|| std::env::var("SERVER_HOST").ok());
+    let server_host = if upstream_mode {
+        configured_server_host
+    } else {
+        Some(configured_server_host.context(
             "server_host is required. Use -s/--server-host, config file, or SERVER_HOST env var.",
-        )?;
+        )?)
+    };
 
     let msg_key = cli.msg_key || config.msg_key.unwrap_or(false);
     let reverse_geo = cli.reverse_geo || config.reverse_geo.unwrap_or(false);
@@ -193,26 +216,31 @@ async fn main() -> Result<()> {
     // The tokio runtime hasn't started yet, so there are no other threads
     // that could race with these set_var calls.
     unsafe {
-        std::env::set_var("SERVER_HOST", &server_host);
+        if let Some(server_host) = &server_host {
+            std::env::set_var("SERVER_HOST", server_host);
+        }
 
-        if let Some(key) = cli.secret_key.or(config.secret_key) {
+        if let Some(key) = cli.secret_key.clone().or_else(|| config.secret_key.clone()) {
             std::env::set_var("SECRET_KEY", key);
         }
         if let Some(keywords) = cli
             .nonproxy_keywords
-            .or_else(|| config.nonproxy_keywords.map(|v| v.join(",")))
+            .clone()
+            .or_else(|| config.nonproxy_keywords.clone().map(|v| v.join(",")))
         {
             std::env::set_var("NONPROXY_KEYWORDS", keywords);
         }
         if let Some(keywords) = cli
             .proxy_keywords
-            .or_else(|| config.proxy_keywords.map(|v| v.join(",")))
+            .clone()
+            .or_else(|| config.proxy_keywords.clone().map(|v| v.join(",")))
         {
             std::env::set_var("PROXY_KEYWORDS", keywords);
         }
         if let Some(ips) = cli
             .need_codec_ip
-            .or_else(|| config.need_codec_ip.map(|v| v.join(",")))
+            .clone()
+            .or_else(|| config.need_codec_ip.clone().map(|v| v.join(",")))
         {
             std::env::set_var("NEED_CODEC_IP", ips);
         }
@@ -234,14 +262,16 @@ async fn main() -> Result<()> {
     let secret_key_configured = std::env::var("SECRET_KEY").is_ok();
 
     // Check if config is valid (server_host is not template default)
-    let config_valid = server_host != "your-server.com" && !server_host.is_empty();
+    let config_valid = upstream_mode
+        || server_host
+            .as_deref()
+            .is_some_and(|server_host| server_host != "your-server.com" && !server_host.is_empty());
 
     init_tracing();
 
     // Force lazy statics to initialize (triggers WARN logs before banner)
     let client_port = *CLIENT_PORT;
     let server_port = *SERVER_PORT;
-    let remote_server = SERVER_HOST.clone();
 
     // Initialize runtime config (used by client code)
     // Parse NEED_CODEC_IP from environment variable
@@ -252,13 +282,17 @@ async fn main() -> Result<()> {
 
     let secret_key = std::env::var("SECRET_KEY").ok();
 
-    proxy_core::config::runtime::init_config(
-        server_host.clone(),
-        server_port,
-        reverse_geo,
-        need_codec_ips,
-        secret_key,
-    );
+    if !upstream_mode {
+        proxy_core::config::runtime::init_config(
+            server_host
+                .clone()
+                .expect("server_host is validated outside upstream mode"),
+            server_port,
+            reverse_geo,
+            need_codec_ips,
+            secret_key,
+        );
+    }
 
     // Print startup banner
     let title = if config_valid {
@@ -275,6 +309,7 @@ async fn main() -> Result<()> {
         }
     };
 
+    let effective_auto_proxy = enable_auto_proxy && !upstream_mode;
     let mut table = Table::new();
     table.load_preset(presets::UTF8_FULL);
     table.set_header(vec![title, Cell::new("")]);
@@ -282,22 +317,36 @@ async fn main() -> Result<()> {
         Cell::new("Local Proxy"),
         Cell::new(format!("127.0.0.1:{}", client_port)).fg(Color::Cyan),
     ]);
-    table.add_row(vec![
-        Cell::new("Remote Server"),
-        Cell::new(format!("{}:{}", remote_server, server_port)).fg(Color::Cyan),
-    ]);
-    table.add_row(vec![
-        Cell::new("Secret Key"),
-        if secret_key_configured {
-            Cell::new("configured").fg(Color::Green)
-        } else {
-            Cell::new("default (insecure)").fg(Color::Red)
-        },
-    ]);
+    if let Some(upstream_proxy) = &upstream_proxy {
+        table.add_row(vec![
+            Cell::new("Upstream Proxy"),
+            Cell::new(upstream_proxy.display_url()).fg(Color::Cyan),
+        ]);
+    } else {
+        table.add_row(vec![
+            Cell::new("Remote Server"),
+            Cell::new(format!(
+                "{}:{}",
+                server_host
+                    .as_deref()
+                    .expect("server_host is validated outside upstream mode"),
+                server_port
+            ))
+            .fg(Color::Cyan),
+        ]);
+        table.add_row(vec![
+            Cell::new("Secret Key"),
+            if secret_key_configured {
+                Cell::new("configured").fg(Color::Green)
+            } else {
+                Cell::new("default (insecure)").fg(Color::Red)
+            },
+        ]);
+    }
     table.add_row(vec![Cell::new("Reverse Geo"), status_cell(reverse_geo)]);
     table.add_row(vec![
         Cell::new("Auto Proxy"),
-        status_cell(enable_auto_proxy),
+        status_cell(effective_auto_proxy),
     ]);
     table.add_row(vec![
         Cell::new("System Proxy"),
@@ -325,16 +374,24 @@ async fn main() -> Result<()> {
         None
     };
 
-    let client_config = ClientConfig {
-        enable_auto_proxy,
-        cache_dir: None,
+    let client_config = ClientRuntimeConfig {
+        client: ClientConfig {
+            enable_auto_proxy: effective_auto_proxy,
+            cache_dir: None,
+        },
+        upstream_proxy: upstream_proxy.clone(),
     };
-    if msg_key {
-        start_client_with_config::<true>("0.0.0.0", client_port, Some(client_config))
+    let listen_host = if upstream_mode {
+        "127.0.0.1"
+    } else {
+        "0.0.0.0"
+    };
+    if msg_key && !upstream_mode {
+        start_client_with_runtime_config::<true>(listen_host, client_port, Some(client_config))
             .await
             .unwrap();
     } else {
-        start_client_with_config::<false>("0.0.0.0", client_port, Some(client_config))
+        start_client_with_runtime_config::<false>(listen_host, client_port, Some(client_config))
             .await
             .unwrap();
     }

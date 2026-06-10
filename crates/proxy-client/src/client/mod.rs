@@ -59,6 +59,7 @@ use std::path::PathBuf;
 use auto_proxy::{SenderChan, run_auto_proxy_by_country};
 use proxy_core::codec::{AsyncReader, AsyncReaderWriterRef, AsyncWriter};
 use proxy_core::config::{gen_random_key, runtime};
+use proxy_core::relay::ExternalProxyTarget;
 use proxy_core::util::{GracefulShutdownManager, GracefulShutdownManagerImpl, error_report};
 use proxy_core::{
     Aes256GcmCryption, MyAsyncWriteExt, ProxyHeader, client_proxy_with_cryptor_codec,
@@ -112,6 +113,10 @@ pub enum ClientError {
     HttpProxy { source: HttpProxyError },
     #[snafu(display("Socks proxy error"))]
     SocksProxy { source: SocksError },
+    #[snafu(display("External proxy error"))]
+    ExternalProxy {
+        source: proxy_core::transport::TransportError,
+    },
     #[snafu(display("Signals register error"))]
     RegisterSignal,
     #[snafu(display("Empty dns record"))]
@@ -149,6 +154,21 @@ pub struct ClientConfig {
     pub cache_dir: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ClientRuntimeConfig {
+    pub client: ClientConfig,
+    pub upstream_proxy: Option<ExternalProxyTarget>,
+}
+
+impl From<ClientConfig> for ClientRuntimeConfig {
+    fn from(client: ClientConfig) -> Self {
+        Self {
+            client,
+            upstream_proxy: None,
+        }
+    }
+}
+
 pub trait Forwarder {
     fn forward(self) -> impl std::future::Future<Output = Result<()>> + Send;
 }
@@ -166,6 +186,8 @@ pub struct ProxyContext<'a> {
     sender: Option<&'a SenderChan>,
     /// Force all connections to go through proxy, bypassing auto-proxy rules.
     force_proxy: bool,
+    /// Optional external upstream proxy used instead of the encrypted proxy server.
+    upstream_proxy: Option<&'a ExternalProxyTarget>,
     /// TODO: let this stream abstract
     stream: TcpStream,
 }
@@ -284,8 +306,31 @@ pub async fn resolve_server_connection(
     port: u16,
     sender: Option<&SenderChan>,
     msg_key: Option<Cow<'static, str>>,
+    upstream_proxy: Option<&ExternalProxyTarget>,
 ) -> Result<ServerConnection> {
     use proxy_core::config::runtime;
+
+    if let Some(upstream_proxy) = upstream_proxy {
+        tracing::info!(
+            host,
+            port,
+            upstream_proxy = %upstream_proxy.display_url(),
+            "connecting target through upstream proxy"
+        );
+        let stream = proxy_core::transport::get_tcp_external_proxy_stream(
+            upstream_proxy,
+            host,
+            port,
+            "[UPSTREAM-PROXY] connect through external proxy",
+        )
+        .await
+        .context(ExternalProxySnafu)?;
+        return Ok(ServerConnection {
+            stream,
+            need_proxy: true,
+            msg_key: None,
+        });
+    }
 
     // If sender is None (auto-proxy disabled), always use proxy
     if let Some(sender) = sender {
@@ -574,6 +619,7 @@ pub struct ClientProxyContext {
     #[cfg(feature = "auto-proxy")]
     sender: Option<SenderChan>,
     force_proxy: bool,
+    upstream_proxy: Option<ExternalProxyTarget>,
 }
 
 #[inline]
@@ -621,6 +667,7 @@ pub async fn handle_client(mut context: ClientProxyContext) -> Result<()> {
         #[cfg(feature = "auto-proxy")]
         sender: context.sender.as_ref(),
         force_proxy: context.force_proxy,
+        upstream_proxy: context.upstream_proxy.as_ref(),
         stream: context.stream,
     };
 
@@ -680,9 +727,37 @@ pub async fn run_client_with_listener<const NEED_CODEC: bool>(
     tracker: Option<TaskTracker>,
     config: Option<ClientConfig>,
 ) {
-    let enable_auto_proxy = config.as_ref().map(|c| c.enable_auto_proxy).unwrap_or(true);
+    run_client_with_listener_runtime_config::<NEED_CODEC>(
+        listener,
+        cancel_token,
+        tracker,
+        config.map(Into::into),
+    )
+    .await
+}
+
+pub async fn run_client_with_listener_runtime_config<const NEED_CODEC: bool>(
+    listener: TcpListener,
+    cancel_token: CancellationToken,
+    tracker: Option<TaskTracker>,
+    config: Option<ClientRuntimeConfig>,
+) {
+    let enable_auto_proxy = config
+        .as_ref()
+        .map(|c| c.client.enable_auto_proxy)
+        .unwrap_or(true);
+    let upstream_proxy = config.as_ref().and_then(|c| c.upstream_proxy.clone());
+    let enable_auto_proxy = enable_auto_proxy && upstream_proxy.is_none();
     let force_proxy = !enable_auto_proxy;
-    let cache_dir = config.as_ref().and_then(|c| c.cache_dir.clone());
+    let cache_dir = config.as_ref().and_then(|c| c.client.cache_dir.clone());
+    let upstream_proxy_display = upstream_proxy.as_ref().map(|proxy| proxy.display_url());
+    tracing::info!(
+        local_addr = ?listener.local_addr().ok(),
+        enable_auto_proxy,
+        force_proxy,
+        upstream_proxy = ?upstream_proxy_display,
+        "client listener configured"
+    );
 
     #[cfg(feature = "auto-proxy")]
     let sender: Option<SenderChan> = if enable_auto_proxy {
@@ -720,6 +795,7 @@ pub async fn run_client_with_listener<const NEED_CODEC: bool>(
                     #[cfg(feature = "auto-proxy")]
                     sender,
                     force_proxy,
+                    upstream_proxy: upstream_proxy.clone(),
                 });
                 let wrapped_task = async move {
                     tokio::select! {
@@ -750,6 +826,15 @@ pub async fn start_client_with_config<const NEED_CODEC: bool>(
     port: u16,
     config: Option<ClientConfig>,
 ) -> Result<()> {
+    start_client_with_runtime_config::<NEED_CODEC>(host, port, config.map(Into::into)).await
+}
+
+#[tracing::instrument]
+pub async fn start_client_with_runtime_config<const NEED_CODEC: bool>(
+    host: impl AsRef<str> + Debug,
+    port: u16,
+    config: Option<ClientRuntimeConfig>,
+) -> Result<()> {
     let listener = TcpListener::bind((host.as_ref(), port))
         .await
         .context(IoSnafu {
@@ -763,7 +848,13 @@ pub async fn start_client_with_config<const NEED_CODEC: bool>(
     let cancel_token = manager.cancellation_token();
     let tracker = manager.tracker().clone();
 
-    run_client_with_listener::<NEED_CODEC>(listener, cancel_token, Some(tracker), config).await;
+    run_client_with_listener_runtime_config::<NEED_CODEC>(
+        listener,
+        cancel_token,
+        Some(tracker),
+        config,
+    )
+    .await;
 
     tracing::info!("graceful shutdown, waiting for tasks to complete...");
     manager.wait().await;
@@ -776,4 +867,284 @@ pub async fn start_client<const NEED_CODEC: bool>(
     port: u16,
 ) -> Result<()> {
     start_client_with_config::<NEED_CODEC>(host, port, None).await
+}
+
+#[cfg(test)]
+mod tests {
+    use proxy_core::relay::ExternalProxyTarget;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::oneshot;
+    use tokio_util::sync::CancellationToken;
+
+    use super::*;
+
+    async fn start_client_for_test(
+        upstream_proxy: ExternalProxyTarget,
+    ) -> (String, CancellationToken) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let token = CancellationToken::new();
+        tokio::spawn(run_client_with_listener_runtime_config::<false>(
+            listener,
+            token.clone(),
+            None,
+            Some(ClientRuntimeConfig {
+                client: ClientConfig {
+                    enable_auto_proxy: false,
+                    cache_dir: None,
+                },
+                upstream_proxy: Some(upstream_proxy),
+            }),
+        ));
+        (addr, token)
+    }
+
+    async fn start_echo_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            loop {
+                let n = stream.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                stream.write_all(&buf[..n]).await.unwrap();
+            }
+        });
+        addr
+    }
+
+    async fn start_auth_http_connect_proxy(expected_auth: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            let (mut inbound, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                let n = inbound.read(&mut buf).await.unwrap();
+                assert_ne!(n, 0);
+                request.extend_from_slice(&buf[..n]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&request);
+            assert!(request.contains(&format!("Proxy-Authorization: Basic {expected_auth}\r\n")));
+            let connect_target = request
+                .lines()
+                .next()
+                .and_then(|line| line.strip_prefix("CONNECT "))
+                .and_then(|line| line.split_whitespace().next())
+                .unwrap();
+            let (host, port) = connect_target.rsplit_once(':').unwrap();
+            let mut outbound = TcpStream::connect((host, port.parse::<u16>().unwrap()))
+                .await
+                .unwrap();
+            inbound
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .unwrap();
+            let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+        });
+        addr
+    }
+
+    async fn start_plain_http_proxy(expected_auth: String) -> (String, oneshot::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let (mut inbound, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                let n = inbound.read(&mut buf).await.unwrap();
+                assert_ne!(n, 0);
+                request.extend_from_slice(&buf[..n]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&request).into_owned();
+            assert!(request.contains(&format!("Proxy-Authorization: Basic {expected_auth}\r\n")));
+            let _ = tx.send(request);
+            inbound
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+                .await
+                .unwrap();
+        });
+        (addr, rx)
+    }
+
+    async fn start_auth_socks5_proxy(username: &'static str, password: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            let (mut inbound, _) = listener.accept().await.unwrap();
+            assert_eq!(inbound.read_u8().await.unwrap(), 0x05);
+            let methods_len = inbound.read_u8().await.unwrap() as usize;
+            let mut methods = vec![0u8; methods_len];
+            inbound.read_exact(&mut methods).await.unwrap();
+            assert!(methods.contains(&0x02));
+            inbound.write_all(&[0x05, 0x02]).await.unwrap();
+
+            assert_eq!(inbound.read_u8().await.unwrap(), 0x01);
+            let username_len = inbound.read_u8().await.unwrap() as usize;
+            let mut username_buf = vec![0u8; username_len];
+            inbound.read_exact(&mut username_buf).await.unwrap();
+            let password_len = inbound.read_u8().await.unwrap() as usize;
+            let mut password_buf = vec![0u8; password_len];
+            inbound.read_exact(&mut password_buf).await.unwrap();
+            assert_eq!(String::from_utf8(username_buf).unwrap(), username);
+            assert_eq!(String::from_utf8(password_buf).unwrap(), password);
+            inbound.write_all(&[0x01, 0x00]).await.unwrap();
+
+            assert_eq!(inbound.read_u8().await.unwrap(), 0x05);
+            assert_eq!(inbound.read_u8().await.unwrap(), 0x01);
+            assert_eq!(inbound.read_u8().await.unwrap(), 0x00);
+            let atyp = inbound.read_u8().await.unwrap();
+            let host = match atyp {
+                0x01 => {
+                    let mut buf = [0u8; 4];
+                    inbound.read_exact(&mut buf).await.unwrap();
+                    std::net::Ipv4Addr::from(buf).to_string()
+                }
+                0x03 => {
+                    let len = inbound.read_u8().await.unwrap() as usize;
+                    let mut buf = vec![0u8; len];
+                    inbound.read_exact(&mut buf).await.unwrap();
+                    String::from_utf8(buf).unwrap()
+                }
+                other => panic!("unexpected ATYP: {other:#x}"),
+            };
+            let port = inbound.read_u16().await.unwrap();
+            let mut outbound = TcpStream::connect((host.as_str(), port)).await.unwrap();
+            inbound
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0])
+                .await
+                .unwrap();
+            let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+        });
+        addr
+    }
+
+    async fn read_until_headers_end(stream: &mut TcpStream) -> (String, Vec<u8>) {
+        let mut response = Vec::new();
+        let mut buf = [0u8; 256];
+        loop {
+            let n = stream.read(&mut buf).await.unwrap();
+            assert_ne!(n, 0);
+            response.extend_from_slice(&buf[..n]);
+            if let Some(headers_end) = response.windows(4).position(|window| window == b"\r\n\r\n")
+            {
+                let body_start = headers_end + 4;
+                return (
+                    String::from_utf8_lossy(&response[..body_start]).into_owned(),
+                    response[body_start..].to_vec(),
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn local_socks5_forwards_through_authenticated_socks5_upstream() {
+        let target_addr = start_echo_server().await;
+        let (_, target_port) = target_addr.rsplit_once(':').unwrap();
+        let target_port = target_port.parse::<u16>().unwrap();
+        let upstream_addr = start_auth_socks5_proxy("user", "secret").await;
+        let upstream_proxy =
+            ExternalProxyTarget::parse(&format!("socks5://user:secret@{upstream_addr}")).unwrap();
+        let (client_addr, token) = start_client_for_test(upstream_proxy).await;
+
+        let mut stream = TcpStream::connect(client_addr).await.unwrap();
+        stream.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+        let mut handshake = [0u8; 2];
+        stream.read_exact(&mut handshake).await.unwrap();
+        assert_eq!(handshake, [0x05, 0x00]);
+        stream
+            .write_all(&[
+                0x05,
+                0x01,
+                0x00,
+                0x01,
+                127,
+                0,
+                0,
+                1,
+                (target_port >> 8) as u8,
+                target_port as u8,
+            ])
+            .await
+            .unwrap();
+        let mut response = [0u8; 10];
+        stream.read_exact(&mut response).await.unwrap();
+        assert_eq!(response[0..2], [0x05, 0x00]);
+
+        stream.write_all(b"ping").await.unwrap();
+        let mut buf = [0u8; 4];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"ping");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn local_http_connect_forwards_through_authenticated_http_upstream() {
+        let target_addr = start_echo_server().await;
+        let expected_auth = "dXNlcjpzZWNyZXQ=".to_string();
+        let upstream_addr = start_auth_http_connect_proxy(expected_auth).await;
+        let upstream_proxy =
+            ExternalProxyTarget::parse(&format!("http://user:secret@{upstream_addr}")).unwrap();
+        let (client_addr, token) = start_client_for_test(upstream_proxy).await;
+
+        let mut stream = TcpStream::connect(client_addr).await.unwrap();
+        stream
+            .write_all(
+                format!("CONNECT {target_addr} HTTP/1.1\r\nHost: {target_addr}\r\n\r\n").as_bytes(),
+            )
+            .await
+            .unwrap();
+        let (response, _) = read_until_headers_end(&mut stream).await;
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+
+        stream.write_all(b"pong").await.unwrap();
+        let mut buf = [0u8; 4];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"pong");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn local_plain_http_replaces_proxy_authorization_for_http_upstream() {
+        let expected_auth = "dXNlcjpzZWNyZXQ=".to_string();
+        let (upstream_addr, request_rx) = start_plain_http_proxy(expected_auth.clone()).await;
+        let upstream_proxy =
+            ExternalProxyTarget::parse(&format!("http://user:secret@{upstream_addr}")).unwrap();
+        let (client_addr, token) = start_client_for_test(upstream_proxy).await;
+
+        let mut stream = TcpStream::connect(client_addr).await.unwrap();
+        stream
+            .write_all(
+                b"GET http://example.test/path HTTP/1.1\r\nHost: example.test\r\nProxy-Authorization: Basic d3Jvbmc=\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let (response, mut body) = read_until_headers_end(&mut stream).await;
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        while body.len() < 2 {
+            let mut buf = [0u8; 2];
+            let n = stream.read(&mut buf).await.unwrap();
+            assert_ne!(n, 0);
+            body.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(&body[..2], b"OK");
+
+        let request = request_rx.await.unwrap();
+        assert!(request.contains(&format!("Proxy-Authorization: Basic {expected_auth}\r\n")));
+        assert!(!request.contains("Proxy-Authorization: Basic d3Jvbmc="));
+        token.cancel();
+    }
 }

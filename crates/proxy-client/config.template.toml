@@ -9,6 +9,11 @@ server_port = 1081
 # Local client port (default: 7890)
 client_port = 7890
 
+# [Optional] Convert an authenticated upstream SOCKS5/HTTP proxy into a local
+# unauthenticated proxy bound to 127.0.0.1.
+# Supported schemes: socks5://, socks5h://, http://
+# upstream_proxy = "socks5://user:password@proxy.example.com:1080"
+
 # [Optional] Encryption key (must be exactly 32 bytes)
 # secret_key = ""
 

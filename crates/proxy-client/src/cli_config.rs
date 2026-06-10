@@ -20,6 +20,7 @@ pub struct Config {
     pub server_host: Option<String>,
     pub server_port: Option<u16>,
     pub client_port: Option<u16>,
+    pub upstream_proxy: Option<String>,
     pub secret_key: Option<String>,
     /// Enable auto-proxy (true/false). When disabled, all traffic goes through proxy.
     pub auto_proxy: Option<bool>,

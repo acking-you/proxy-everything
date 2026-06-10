@@ -1946,6 +1946,7 @@ version = "0.4.23"
 dependencies = [
  "anyhow",
  "async-broadcast",
+ "base64",
  "better_mimalloc_rs",
  "clap",
  "comfy-table",

@@ -1,6 +1,8 @@
 use std::borrow::Cow;
 
+use base64::Engine;
 use proxy_core::config::runtime;
+use proxy_core::relay::{ExternalProxyKind, ExternalProxyTarget};
 use snafu::{OptionExt, ResultExt, Snafu};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -41,6 +43,48 @@ const HTTP_PORT: u16 = 80;
 const HTTPS_PORT: u16 = 443;
 const HTTP_SCHEMA: &str = "http://";
 const HTTPS_SCHEMA: &str = "https://";
+
+fn is_proxy_authorization_header(line: &str) -> bool {
+    line.split_once(':')
+        .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("proxy-authorization"))
+}
+
+fn proxy_authorization_header(proxy: &ExternalProxyTarget) -> Option<String> {
+    let (Some(username), Some(password)) = (&proxy.username, &proxy.password) else {
+        return None;
+    };
+    let auth = base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
+    Some(format!("Proxy-Authorization: Basic {auth}\r\n"))
+}
+
+fn rewrite_proxy_authorization(buffer: &[u8], proxy: &ExternalProxyTarget) -> Vec<u8> {
+    let Some(headers_end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return buffer.to_vec();
+    };
+
+    let header_text = String::from_utf8_lossy(&buffer[..headers_end]);
+    let mut lines = header_text.split("\r\n");
+    let mut rewritten = Vec::with_capacity(buffer.len() + 128);
+
+    if let Some(request_line) = lines.next() {
+        rewritten.extend_from_slice(request_line.as_bytes());
+        rewritten.extend_from_slice(b"\r\n");
+    }
+
+    if let Some(header) = proxy_authorization_header(proxy) {
+        rewritten.extend_from_slice(header.as_bytes());
+    }
+
+    for line in lines {
+        if !is_proxy_authorization_header(line) {
+            rewritten.extend_from_slice(line.as_bytes());
+            rewritten.extend_from_slice(b"\r\n");
+        }
+    }
+    rewritten.extend_from_slice(b"\r\n");
+    rewritten.extend_from_slice(&buffer[headers_end + 4..]);
+    rewritten
+}
 
 fn extract_host_uri(uri: &str, default_port: u16) -> Result<(&str, u16)> {
     let mut parts = uri.split(':');
@@ -170,6 +214,50 @@ impl HttpProxierProvider {
     ) -> super::Result<(TcpStream, bool, Option<Cow<'static, str>>)> {
         // if we don't have ssl,only use proxy when host is part of `PROXY_KEYWORDS`
         if !self.has_ssl {
+            if let Some(upstream_proxy) = context.upstream_proxy {
+                tracing::info!(
+                    host = %self.host,
+                    port = self.port,
+                    upstream_proxy = %upstream_proxy.display_url(),
+                    "forwarding plain HTTP through upstream proxy"
+                );
+                let mut server_stream = match upstream_proxy.kind {
+                    ExternalProxyKind::Http => {
+                        get_tcp_stream(
+                            upstream_proxy.host.as_str(),
+                            upstream_proxy.port,
+                            "[UPSTREAM-PROXY] connect to http proxy",
+                        )
+                        .await?
+                    }
+                    ExternalProxyKind::Socks5 => {
+                        proxy_core::transport::get_tcp_external_proxy_stream(
+                            upstream_proxy,
+                            self.host.as_str(),
+                            self.port,
+                            "[UPSTREAM-PROXY] connect http target through socks5 proxy",
+                        )
+                        .await
+                        .context(super::ExternalProxySnafu)?
+                    }
+                };
+                let request = if upstream_proxy.kind == ExternalProxyKind::Http {
+                    rewrite_proxy_authorization(context.buffer, upstream_proxy)
+                } else {
+                    context.buffer.to_vec()
+                };
+                server_stream
+                    .write_all(&request)
+                    .await
+                    .with_context(|_| IoSnafu {
+                        uri: Some(self.get_uri()),
+                        detail: "write http request to upstream proxy",
+                    })
+                    .context(HttpProxySnafu)?;
+
+                return Ok((server_stream, true, None));
+            }
+
             let server_host = runtime::server_host();
             let (mut server_stream, need_proxy, msg_key) = if context.force_proxy {
                 let msg_key = change_msg_key(server_host.as_str(), self.msg_key.clone());
@@ -253,6 +341,7 @@ impl HttpProxierProvider {
                 self.port,
                 context.sender,
                 self.msg_key.clone(),
+                context.upstream_proxy,
             )
             .await?;
 

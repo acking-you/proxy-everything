@@ -23,6 +23,7 @@ snafu = { workspace = true }
 futures = { workspace = true }
 dirs = { workspace = true }
 uni-stream = { workspace = true }
+base64 = { workspace = true }
 
 # auto-proxy dependencies
 hashbrown = { workspace = true, optional = true }

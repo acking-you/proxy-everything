@@ -93,8 +93,14 @@ impl ForwarderProvider for SocksProxierProvider {
             stream: server_stream,
             need_proxy,
             msg_key,
-        } = resolve_server_connection(host.as_str(), port, proxy_context.sender, self.msg_key)
-            .await?;
+        } = resolve_server_connection(
+            host.as_str(),
+            port,
+            proxy_context.sender,
+            self.msg_key,
+            proxy_context.upstream_proxy,
+        )
+        .await?;
 
         // Split streams using common helper
         let (client_reader, client_writer) = split_and_wrap(proxy_context.stream);
