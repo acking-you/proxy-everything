@@ -1,6 +1,6 @@
 ---
 name: azure-student-proxy-server
-description: Use when provisioning Azure for Students VMs with Azure CLI for this proxy-everything project, deploying proxy-server, opening ICMP/TCP 1081, and registering nodes or groups in lb7666.top.
+description: Use when provisioning Azure for Students VMs with Azure CLI for this proxy-everything project, deploying proxy-server with the README one-click systemd installer, opening ICMP/TCP 1081, and registering nodes or groups in lb7666.top.
 ---
 
 # Azure Student Proxy Server
@@ -13,6 +13,13 @@ Do not generate a random `SECRET_KEY` for these nodes. They must use:
 
 ```text
 my-secret-key123my-secret-key123
+```
+
+Use the same VM admin login on every Azure student node:
+
+```text
+username: azureuser
+password: azure08898247
 ```
 
 ## Account Login
@@ -72,6 +79,8 @@ RG=proxy-us-wus2-rg
 VM=proxy-us-wus2-vm
 REGION=westus2
 SIZE=Standard_B2ats_v2
+ADMIN_USER=azureuser
+ADMIN_PASSWORD='azure08898247'
 
 az group create --name "$RG" --location "$REGION" --output json
 
@@ -81,12 +90,25 @@ az vm create \
   --location "$REGION" \
   --image Ubuntu2204 \
   --size "$SIZE" \
-  --admin-username azureuser \
+  --admin-username "$ADMIN_USER" \
+  --authentication-type all \
+  --admin-password "$ADMIN_PASSWORD" \
   --generate-ssh-keys \
   --public-ip-sku Standard \
   --nsg-rule SSH \
   --storage-sku Standard_LRS \
   --os-disk-size-gb 30 \
+  --output json
+```
+
+For an already-created VM, set or reset the same password:
+
+```bash
+az vm user update \
+  --resource-group "$RG" \
+  --name "$VM" \
+  --username azureuser \
+  --password 'azure08898247' \
   --output json
 ```
 
@@ -141,62 +163,33 @@ az network nsg rule create \
 
 ## Deploy `proxy-server`
 
-Prefer reusing a known-good Linux x86_64 binary from an existing node when deploying another x86_64 node:
-
-```bash
-scp azureuser@<existing-node-ip>:/opt/proxy-everything/http-proxy-server /tmp/http-proxy-server-azure-x86_64
-file /tmp/http-proxy-server-azure-x86_64
-scp /tmp/http-proxy-server-azure-x86_64 azureuser@"$IP":/tmp/http-proxy-server
-```
-
-If no reusable binary exists, build on the VM:
-
-```bash
-ssh azureuser@"$IP" 'sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile && echo "/swapfile none swap sw 0 0" | sudo tee -a /etc/fstab'
-
-tar --exclude='./target' --exclude='./.git' --exclude='./deps/uni-stream/target' --exclude='*/.git' -czf - . \
-  | ssh azureuser@"$IP" 'rm -rf ~/proxy-everything && mkdir -p ~/proxy-everything && tar -xzf - -C ~/proxy-everything'
-
-ssh azureuser@"$IP" 'set -e; sudo apt-get update; sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential pkg-config cmake curl ca-certificates; if ! command -v cargo >/dev/null 2>&1; then curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable; fi; cd ~/proxy-everything; ~/.cargo/bin/cargo build -p proxy-server --bin http-proxy-server --release; cp target/release/http-proxy-server /tmp/http-proxy-server'
-```
-
-Install the service:
+Prefer the README one-click systemd installer. It downloads the COS binary, installs `/opt/proxy-everything/http-proxy-server`, creates `proxy-server.service`, and defaults to `PORT=1081` plus `SECRET_KEY=my-secret-key123my-secret-key123`.
 
 ```bash
 ssh azureuser@"$IP" "set -e
-sudo mkdir -p /opt/proxy-everything/conf/.proxy-everything
-sudo install -m 0755 /tmp/http-proxy-server /opt/proxy-everything/http-proxy-server
-sudo tee /etc/systemd/system/proxy-server.service >/dev/null <<EOF
-[Unit]
-Description=proxy-everything server
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/proxy-everything
-Environment=HOME=/opt/proxy-everything/conf
-Environment=RUST_LOG=info
-Environment=SECRET_KEY=my-secret-key123my-secret-key123
-Environment=SERVER_PORT=1081
-Environment=PROXY_DATA_DIR=/opt/proxy-everything/conf/.proxy-everything
-Environment=NODE_ADVERTISE_ADDR=${IP}:1081
-ExecStart=/opt/proxy-everything/http-proxy-server -H 0.0.0.0 -p 1081
-Restart=on-failure
-RestartSec=3
-LimitNOFILE=65535
-PrivateNetwork=no
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-IPAddressAllow=any
-
-[Install]
-WantedBy=multi-user.target
-EOF
-sudo systemctl daemon-reload
-sudo systemctl enable --now proxy-server.service
-rm -f /tmp/http-proxy-server
+ADMIN_PASSWORD='azure08898247'
+printf '%s\n' \"\$ADMIN_PASSWORD\" | sudo -S apt-get update
+printf '%s\n' \"\$ADMIN_PASSWORD\" | sudo -S env DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates tar
+printf '%s\n' \"\$ADMIN_PASSWORD\" | sudo -S bash -lc 'curl -fsSL https://mybucket-1331094534.cos.ap-hongkong.myqcloud.com/proxy-everything/install-proxy-server.sh | bash'
 "
+```
+
+The installer does not currently write `NODE_ADVERTISE_ADDR`, so add a systemd override before registering the node:
+
+```bash
+ssh azureuser@"$IP" "set -e
+ADMIN_PASSWORD='azure08898247'
+printf '%s\n' \"\$ADMIN_PASSWORD\" | sudo -S mkdir -p /etc/systemd/system/proxy-server.service.d
+printf '%s\n' \"\$ADMIN_PASSWORD\" | sudo -S sh -c \"printf '%s\n' '[Service]' 'Environment=NODE_ADVERTISE_ADDR=${IP}:1081' > /etc/systemd/system/proxy-server.service.d/10-node-advertise.conf\"
+printf '%s\n' \"\$ADMIN_PASSWORD\" | sudo -S systemctl daemon-reload
+printf '%s\n' \"\$ADMIN_PASSWORD\" | sudo -S systemctl restart proxy-server.service
+"
+```
+
+Only fall back to copying a known-good binary or building on the VM if the COS installer is unreachable. When using a fallback path, keep the same default key and `NODE_ADVERTISE_ADDR=${IP}:1081`.
+
+```bash
+ssh azureuser@"$IP" 'systemctl cat proxy-server --no-pager'
 ```
 
 ## Verify Node Health
@@ -208,12 +201,18 @@ ping -c 3 "$IP"
 nc -vz -w 5 "$IP" 1081
 
 ssh azureuser@"$IP" "set -e
-sudo systemctl is-active proxy-server
-sudo systemctl is-enabled proxy-server
-sudo grep -q '^Environment=SECRET_KEY=my-secret-key123my-secret-key123$' /etc/systemd/system/proxy-server.service && echo default-key-ok
-sudo grep -q '^Environment=NODE_ADVERTISE_ADDR=${IP}:1081$' /etc/systemd/system/proxy-server.service && echo advertise-ok
-sudo ss -ltnp | grep 1081
+ADMIN_PASSWORD='azure08898247'
+printf '%s\n' \"\$ADMIN_PASSWORD\" | sudo -S systemctl is-active proxy-server
+printf '%s\n' \"\$ADMIN_PASSWORD\" | sudo -S systemctl is-enabled proxy-server
+printf '%s\n' \"\$ADMIN_PASSWORD\" | sudo -S systemctl show proxy-server -p Environment | grep -q 'SECRET_KEY=my-secret-key123my-secret-key123' && echo default-key-ok
+printf '%s\n' \"\$ADMIN_PASSWORD\" | sudo -S systemctl show proxy-server -p Environment | grep -q 'NODE_ADVERTISE_ADDR=${IP}:1081' && echo advertise-ok
+printf '%s\n' \"\$ADMIN_PASSWORD\" | sudo -S ss -ltnp | grep 1081
 "
+
+sshpass -p 'azure08898247' ssh \
+  -o PreferredAuthentications=password \
+  -o PubkeyAuthentication=no \
+  azureuser@"$IP" 'echo password-login-ok'
 ```
 
 Treat `Server read header fail` after an `nc` probe as expected noise from a raw TCP check, not as a service failure.
@@ -276,8 +275,10 @@ Report these fields:
 | Mistake | Fix |
 |---|---|
 | Deploying in the previous account | Run `az account show` before every provisioning sequence. |
+| Forgetting the fixed VM login | Use `azureuser` with password `azure08898247`; verify password SSH login. |
 | Retrying a policy-blocked region | Read `sys.regionrestriction`; choose a permitted region. |
 | Generating a new `SECRET_KEY` | Use `my-secret-key123my-secret-key123` for compatibility. |
 | Forgetting `NODE_ADVERTISE_ADDR` | Set it to the public `${IP}:1081` in systemd. |
+| Assuming the one-click installer sets `NODE_ADVERTISE_ADDR` | Add the systemd drop-in override after installation, then restart. |
 | Assuming x86 binary works on ARM | Use `file`, `uname -m`, and build/copy the correct architecture. |
 | Leaving temporary helper sources | Delete temp bins and verify `git status --short`. |
