@@ -52,6 +52,8 @@ pub mod http;
 pub mod socks;
 pub mod tun;
 mod udp;
+#[cfg(target_os = "windows")]
+mod windows_icon;
 
 use std::borrow::Cow;
 use std::fmt::{Debug, Display};

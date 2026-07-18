@@ -28,7 +28,15 @@ base64 = { workspace = true }
 tun2proxy = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+png = "0.18"
 sysinfo = { workspace = true }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 # auto-proxy dependencies
 hashbrown = { workspace = true, optional = true }

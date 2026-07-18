@@ -177,37 +177,83 @@ pub struct RunningProcessInfo {
     pub pids: Vec<u32>,
     /// Distinct executable paths visible to the current security token.
     pub executable_paths: Vec<String>,
+    /// Per-PID parent relationship used to render Task Manager-style trees.
+    pub instances: Vec<RunningProcessInstance>,
+    /// Base64-encoded 32x32 PNG extracted from the executable by Windows Shell.
+    pub icon_png_base64: Option<String>,
+}
+
+/// One live process instance within an executable-name group.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct RunningProcessInstance {
+    pub pid: u32,
+    pub parent_pid: Option<u32>,
+    pub executable_path: Option<String>,
 }
 
 /// List running executables with the context needed by the Windows picker.
 #[cfg(target_os = "windows")]
 pub fn running_processes() -> Vec<RunningProcessInfo> {
+    use base64::Engine;
+
     let system = sysinfo::System::new_all();
-    let mut grouped = BTreeMap::<String, (BTreeSet<u32>, BTreeSet<String>)>::new();
+    let mut grouped =
+        BTreeMap::<String, (BTreeSet<u32>, BTreeSet<String>, Vec<RunningProcessInstance>)>::new();
     for process in system.processes().values() {
         let name = tun2proxy::normalize_process_name(&process.name().to_string_lossy());
         if name.is_empty() {
             continue;
         }
-        let (pids, paths) = grouped.entry(name).or_default();
-        pids.insert(process.pid().as_u32());
-        if let Some(path) = process.exe() {
-            paths.insert(path.to_string_lossy().into_owned());
+        let pid = process.pid().as_u32();
+        let executable_path = process
+            .exe()
+            .map(|path| path.to_string_lossy().into_owned());
+        let (pids, paths, instances) = grouped.entry(name).or_default();
+        pids.insert(pid);
+        if let Some(path) = &executable_path {
+            paths.insert(path.clone());
         }
+        instances.push(RunningProcessInstance {
+            pid,
+            parent_pid: process.parent().map(|pid| pid.as_u32()),
+            executable_path,
+        });
     }
     if let Ok(current) = current_process_name() {
-        let (pids, paths) = grouped.entry(current).or_default();
-        pids.insert(std::process::id());
-        if let Ok(path) = std::env::current_exe() {
-            paths.insert(path.to_string_lossy().into_owned());
+        let pid = std::process::id();
+        let (pids, paths, instances) = grouped.entry(current).or_default();
+        if pids.insert(pid) {
+            let executable_path = std::env::current_exe()
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned());
+            if let Some(path) = &executable_path {
+                paths.insert(path.clone());
+            }
+            instances.push(RunningProcessInstance {
+                pid,
+                parent_pid: None,
+                executable_path,
+            });
         }
     }
     grouped
         .into_iter()
-        .map(|(name, (pids, executable_paths))| RunningProcessInfo {
-            name,
-            pids: pids.into_iter().collect(),
-            executable_paths: executable_paths.into_iter().collect(),
+        .map(|(name, (pids, executable_paths, mut instances))| {
+            instances.sort_by_key(|instance| instance.pid);
+            let executable_paths = executable_paths.into_iter().collect::<Vec<_>>();
+            let icon_png_base64 = executable_paths
+                .first()
+                .and_then(|path| {
+                    super::windows_icon::executable_icon_png(std::path::Path::new(path))
+                })
+                .map(|icon| base64::engine::general_purpose::STANDARD.encode(icon));
+            RunningProcessInfo {
+                name,
+                pids: pids.into_iter().collect(),
+                executable_paths,
+                instances,
+                icon_png_base64,
+            }
         })
         .collect()
 }

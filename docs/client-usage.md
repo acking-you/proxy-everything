@@ -117,6 +117,11 @@ tun_bypass_processes = ["browser.exe", "downloader"]
 ```
 
 Executable matching is case-insensitive and a trailing `.exe` is optional.
+On Windows, selecting a launcher or Task Manager-style application root also
+bypasses its live child-process tree. The matcher uses the ToolHelp process
+snapshot, which remains available when a protected game process rejects direct
+process-handle access. If the application already cached a virtual-DNS address,
+the direct route restores the real destination through the physical interface.
 User-selected bypasses apply to new TCP or UDP sessions. When a live policy
 change affects an established session, tun2proxy closes that relay so the
 application reconnects through the new route. The TUN adapter and system routes
@@ -130,10 +135,12 @@ listening, remains busy until Wintun and route setup report ready, and stays off
 when native setup fails. Setup errors include the failing stage, the underlying
 Windows detail, and any tunnel/VPN adapters that were already active. **TUN
 Bypass** opens a Task Manager-style Windows picker with executable names, live
-PIDs, instance counts, and paths. It is available before startup and while the
-proxy is connected. Applying a selection updates native routing immediately,
-reconnects affected established sessions, and does not recreate the TUN
-adapter.
+PIDs, instance counts, executable icons, paths, and expandable launcher/child
+process trees. Selecting a parent application implicitly selects its descendants
+because native routing matches the socket owner against its live ancestor chain.
+The picker is available before startup and while the proxy is connected.
+Applying a selection updates native routing immediately, reconnects affected
+established sessions, and does not recreate the TUN adapter.
 
 The current UI executable appears as a required, disabled selection. This is
 not only a presentation rule: Rust always appends the current executable after
