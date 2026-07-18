@@ -1957,6 +1957,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "kanal",
  "proxy-core",
+ "proxy-server",
  "serde",
  "serde_json",
  "snafu",

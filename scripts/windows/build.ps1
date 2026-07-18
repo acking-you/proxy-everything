@@ -1,0 +1,61 @@
+[CmdletBinding()]
+param(
+    [ValidateSet("Debug", "Release")]
+    [string]$Configuration = "Debug"
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$uiRoot = Join-Path $repoRoot "ui\flutter"
+$flutterMode = $Configuration.ToLowerInvariant()
+$architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+$flutterArchitecture = switch ($architecture) {
+    "X64" { "x64" }
+    "Arm64" { "arm64" }
+    default { throw "Unsupported Windows architecture: $architecture" }
+}
+
+foreach ($command in @("cargo", "fvm")) {
+    if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
+        throw "$command was not found on PATH."
+    }
+}
+
+Push-Location $repoRoot
+try {
+    $cargoArgs = @("build", "--workspace")
+    if ($Configuration -eq "Release") {
+        $cargoArgs += "--release"
+    }
+    & cargo @cargoArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "Building the Rust workspace failed with exit code $LASTEXITCODE."
+    }
+
+    & (Join-Path $PSScriptRoot "stage-ui-native.ps1") `
+        -Configuration $Configuration -SkipBuild
+
+    Push-Location $uiRoot
+    try {
+        & fvm flutter pub get
+        if ($LASTEXITCODE -ne 0) {
+            throw "Resolving Flutter dependencies failed with exit code $LASTEXITCODE."
+        }
+        & fvm flutter build windows "--$flutterMode"
+        if ($LASTEXITCODE -ne 0) {
+            throw "Building the Flutter Windows app failed with exit code $LASTEXITCODE."
+        }
+    } finally {
+        Pop-Location
+    }
+
+    $cargoProfile = if ($Configuration -eq "Release") { "release" } else { "debug" }
+    $flutterExe = Join-Path $uiRoot `
+        "build\windows\$flutterArchitecture\runner\$Configuration\proxy_ui.exe"
+    Write-Host "Rust binaries: $repoRoot\target\$cargoProfile"
+    Write-Host "Flutter app: $flutterExe"
+} finally {
+    Pop-Location
+}

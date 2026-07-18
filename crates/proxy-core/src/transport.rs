@@ -25,7 +25,7 @@ use crate::codec::AsyncReaderWriterRef;
 use crate::config::runtime;
 use crate::protocol::set_data_size;
 use crate::relay::{ExternalProxyKind, ExternalProxyTarget};
-use crate::{Aes256GcmCryption, MyAsyncWriteExt, ProxyHeader};
+use crate::{Aes256GcmCryption, MyAsyncWriteExt, ProxyHeader, ProxyTransport};
 
 #[derive(Debug, Snafu)]
 pub enum TransportError {
@@ -139,22 +139,71 @@ pub async fn get_tcp_proxy_stream(
     msg_key: Option<Cow<'static, str>>,
     detail: &'static str,
 ) -> Result<TcpStream> {
-    // 1. get proxy server stream
-    let mut proxy_server_stream = get_tcp_stream(proxy_server, proxy_server_port, detail).await?;
-
-    // 2. prepare proxy header
     let proxy_header = ProxyHeader {
         host: host.into(),
         port,
         key: msg_key,
+        transport: ProxyTransport::Tcp,
     };
+    get_proxy_stream(
+        proxy_header,
+        proxy_server,
+        proxy_server_port,
+        detail,
+        &get_uri(host, port),
+    )
+    .await
+}
+
+/// Establishes a framed UDP-association tunnel through the proxy server.
+pub async fn get_udp_proxy_stream(
+    proxy_server: &str,
+    proxy_server_port: u16,
+    msg_key: Option<Cow<'static, str>>,
+    detail: &'static str,
+) -> Result<TcpStream> {
+    let proxy_header = ProxyHeader {
+        host: String::new(),
+        port: 0,
+        key: msg_key,
+        transport: ProxyTransport::UdpAssociate,
+    };
+    get_proxy_stream(
+        proxy_header,
+        proxy_server,
+        proxy_server_port,
+        detail,
+        "udp-associate",
+    )
+    .await
+}
+
+async fn get_proxy_stream(
+    proxy_header: ProxyHeader,
+    proxy_server: &str,
+    proxy_server_port: u16,
+    detail: &'static str,
+    uri: &str,
+) -> Result<TcpStream> {
+    // Do not log the session key or the encrypted header. The transport and
+    // boolean encryption flag are enough to diagnose protocol negotiation
+    // without leaking credentials into debug output.
+    tracing::debug!(
+        proxy_server,
+        proxy_server_port,
+        target = uri,
+        transport = ?proxy_header.transport,
+        session_encrypted = proxy_header.key.is_some(),
+        "opening proxy transport connection"
+    );
+    let mut proxy_server_stream = get_tcp_stream(proxy_server, proxy_server_port, detail).await?;
     let mut header_json =
         serde_json::to_string(&proxy_header).with_context(|_| SerdeJsonSnafu {
-            uri: get_uri(host, port),
+            uri: uri.to_string(),
         })?;
     let mut cryption =
         Aes256GcmCryption::try_new_with_default_key().map_err(|e| TransportError::Encryption {
-            uri: get_uri(host, port),
+            uri: uri.to_string(),
             detail: e.to_string(),
         })?;
 
@@ -167,7 +216,7 @@ pub async fn get_tcp_proxy_stream(
         let tag = cryption
             .encrypt(addr)
             .map_err(|e| TransportError::Encryption {
-                uri: get_uri(host, port),
+                uri: uri.to_string(),
                 detail: e.to_string(),
             })?;
         let len = addr.len() + tag.as_ref().len();
@@ -180,22 +229,30 @@ pub async fn get_tcp_proxy_stream(
     set_data_size(&mut proxy_server_stream_ref, len)
         .await
         .with_context(|_| SendHeaderSnafu {
-            uri: get_uri(host, port),
+            uri: uri.to_string(),
         })?;
     proxy_server_stream_ref
         .write_all(addr)
         .await
         .with_context(|_| IoSnafu {
-            uri: Some(get_uri(host, port)),
+            uri: Some(uri.to_string()),
             detail: "Send Header(host,ip)",
         })?;
     proxy_server_stream_ref
         .write_all(tag.as_ref())
         .await
         .with_context(|_| IoSnafu {
-            uri: Some(get_uri(host, port)),
+            uri: Some(uri.to_string()),
             detail: "Send Header(tag)",
         })?;
+    tracing::debug!(
+        proxy_server,
+        proxy_server_port,
+        target = uri,
+        transport = ?proxy_header.transport,
+        encrypted_header_bytes = len,
+        "sent encrypted proxy connection header"
+    );
     Ok(proxy_server_stream)
 }
 

@@ -17,6 +17,7 @@ pub mod codec;
 pub mod config;
 pub mod control;
 pub mod crypto;
+pub mod datagram;
 pub mod error;
 pub mod geo;
 pub mod metrics;
@@ -34,7 +35,9 @@ pub use crypto::{
     Aes256GcmCryption, Aes256GcmDecryptor, Aes256GcmEncryptor, Decryptor, Encryptor, RingResult,
 };
 pub use error::{ProxyError, Result};
-pub use protocol::{DataSize, MAX_DATA_SIZE, ProxyHeader, get_data_size, set_data_size};
+pub use protocol::{
+    DataSize, MAX_DATA_SIZE, ProxyHeader, ProxyTransport, get_data_size, set_data_size,
+};
 
 // ============================================================================
 // Async I/O Traits

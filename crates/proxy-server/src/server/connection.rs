@@ -14,7 +14,7 @@ use proxy_core::transport::get_tcp_external_proxy_stream;
 use proxy_core::util::{display_report, error_report};
 use proxy_core::{
     Aes256GcmCryption, Aes256GcmDecryptor, Aes256GcmEncryptor, DataSize, MyAsyncCodecReader,
-    MyAsyncReadExt, MyAsyncWriteExt, ProxyHeader, get_data_size, set_data_size,
+    MyAsyncReadExt, MyAsyncWriteExt, ProxyHeader, ProxyTransport, get_data_size, set_data_size,
 };
 use smallvec::{SmallVec, smallvec};
 use snafu::ResultExt;
@@ -23,16 +23,17 @@ use tokio::sync::oneshot;
 use tracing::{Instrument, field};
 
 use super::control::handle_control_session;
+use super::udp::proxy_udp_association;
 use super::{
     ControlSnafu, IoSnafu, MAX_HEADER_SIZE, ProxySnafu, ReadHeaderSnafu, Result, ServerContext,
     ServerError, TransportSnafu,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
-struct TransferStats {
-    bytes_up: u64,
-    bytes_down: u64,
-    latency_ms: Option<u64>,
+pub(super) struct TransferStats {
+    pub(super) bytes_up: u64,
+    pub(super) bytes_down: u64,
+    pub(super) latency_ms: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -244,6 +245,15 @@ async fn handle_connect_inner(
     };
 
     if let Some(header) = header.as_ref() {
+        // `transport` is safe to log, but the optional session key is not. A
+        // boolean still makes encrypted/plain session mismatches visible.
+        tracing::debug!(
+            destination_host = %header.host,
+            destination_port = header.port,
+            transport = ?header.transport,
+            session_encrypted = header.key.is_some(),
+            "decoded proxy connection header"
+        );
         dest_host = header.host.clone();
         dest_port = header.port;
         if is_control_target(&header.host, header.port) {
@@ -266,6 +276,59 @@ async fn handle_connect_inner(
             let codec = ControlCodec::new(client_reader, client_writer, session_key)
                 .context(ControlSnafu)?;
             return handle_control_session(codec, ctx).await;
+        }
+    }
+
+    if let Some(header) = header.as_ref()
+        && header.transport == ProxyTransport::UdpAssociate
+    {
+        tracing::info!(
+            peer = %peer_addr,
+            datagram_encryption = header.key.is_some(),
+            relay_enabled = relay_context.is_some(),
+            "received proxy UDP association request"
+        );
+        let external_relay = relay_context
+            .as_ref()
+            .and_then(|(target, _)| match &target.route {
+                RelayRoute::ExternalProxy(proxy) => Some((target, proxy)),
+                RelayRoute::ProxyServer { .. } => None,
+            });
+
+        if relay_context.is_none() || external_relay.is_some() {
+            let (mode, destination, upstream_proxy) = match external_relay {
+                Some((target, proxy)) => {
+                    ctx.relay.on_connect(&target.id);
+                    (
+                        "udp-relay",
+                        format!("udp:relay:{}", target.addr),
+                        Some(proxy),
+                    )
+                }
+                None => ("udp", "udp-associate".to_string(), None),
+            };
+            tracing::Span::current().record("mode", mode);
+            tracing::Span::current().record("dest", field::display(&destination));
+            let result = proxy_udp_association(
+                client_reader,
+                client_writer,
+                header.key.as_deref(),
+                upstream_proxy,
+            )
+            .await;
+            if let Some((target, _)) = external_relay {
+                ctx.relay.on_disconnect(&target.id);
+            }
+            record_connection(
+                &ctx,
+                &peer_ip,
+                &destination,
+                0,
+                started_at_ms,
+                trace_id,
+                &result,
+            );
+            return result.map(|_| ());
         }
     }
 

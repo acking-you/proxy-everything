@@ -1,13 +1,15 @@
 use std::borrow::Cow;
-use std::net::Ipv6Addr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
+use proxy_core::datagram::DatagramAddress;
 use snafu::{ResultExt, Snafu};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use super::udp::UdpAssociation;
 use super::{
-    ForwardContext, ForwarderProvider, ServerConnection, SocksProxySnafu, TcpForwardImpl,
-    resolve_server_connection, split_and_wrap,
+    ForwardContext, Forwarder, ForwarderProvider, ServerConnection, SocksProxySnafu,
+    TcpForwardImpl, resolve_server_connection, split_and_wrap,
 };
 
 #[derive(Debug, Snafu)]
@@ -34,16 +36,36 @@ type Result<T, E = SocksError> = std::result::Result<T, E>;
 const SOCK5_VER: u8 = 0x05;
 const NO_AUTH: u8 = 0x00;
 const TCP_CONN: u8 = 0x01;
+const UDP_ASSOCIATE: u8 = 0x03;
 const IPV4_ADDR: u8 = 0x01;
 const IPV6_ADDR: u8 = 0x04;
 const NAMING_SERVER: u8 = 0x03;
+
+pub enum SocksForwarder {
+    Tcp(TcpForwardImpl),
+    Udp(Box<UdpAssociation>),
+}
+
+impl Forwarder for SocksForwarder {
+    async fn forward(self) -> super::Result<()> {
+        match self {
+            Self::Tcp(forwarder) => forwarder.forward().await,
+            Self::Udp(forwarder) => (*forwarder).forward().await,
+        }
+    }
+}
+
+enum SocksRequest {
+    Connect { host: String, port: u16 },
+    UdpAssociate { client_addr: DatagramAddress },
+}
 
 pub struct SocksProxierProvider {
     msg_key: Option<Cow<'static, str>>,
 }
 
 impl ForwarderProvider for SocksProxierProvider {
-    type Item = TcpForwardImpl;
+    type Item = SocksForwarder;
 
     fn try_new(header_context: super::HeaderContext<'_>) -> super::Result<Self>
     where
@@ -72,6 +94,13 @@ impl ForwarderProvider for SocksProxierProvider {
             .fail()
             .context(SocksProxySnafu)?;
         }
+        if !header_context.header[2..2 + n as usize].contains(&NO_AUTH) {
+            NotSupportedSnafu {
+                detail: "only SOCKS5 no-authentication is supported for local clients",
+            }
+            .fail()
+            .context(SocksProxySnafu)?;
+        }
         Ok(Self {
             msg_key: header_context.msg_key.map(|s| Cow::Owned(s.to_owned())),
         })
@@ -81,47 +110,58 @@ impl ForwarderProvider for SocksProxierProvider {
         self,
         mut proxy_context: super::ProxyContext<'_>,
     ) -> super::Result<Self::Item> {
-        let (host, port) = auth(&mut proxy_context.stream)
+        match read_request(&mut proxy_context.stream)
             .await
-            .context(SocksProxySnafu)?;
-        response(&mut proxy_context.stream)
-            .await
-            .context(SocksProxySnafu)?;
+            .context(SocksProxySnafu)?
+        {
+            SocksRequest::Connect { host, port } => {
+                let ServerConnection {
+                    stream: server_stream,
+                    need_proxy,
+                    msg_key,
+                } = resolve_server_connection(
+                    host.as_str(),
+                    port,
+                    proxy_context.sender,
+                    self.msg_key,
+                    proxy_context.upstream_proxy,
+                )
+                .await?;
+                response(&mut proxy_context.stream)
+                    .await
+                    .context(SocksProxySnafu)?;
 
-        // Use unified server connection resolution
-        let ServerConnection {
-            stream: server_stream,
-            need_proxy,
-            msg_key,
-        } = resolve_server_connection(
-            host.as_str(),
-            port,
-            proxy_context.sender,
-            self.msg_key,
-            proxy_context.upstream_proxy,
-        )
-        .await?;
-
-        // Split streams using common helper
-        let (client_reader, client_writer) = split_and_wrap(proxy_context.stream);
-        let (server_reader, server_writer) = split_and_wrap(server_stream);
-
-        Ok(Self::Item {
-            context: ForwardContext {
-                host,
-                port,
-                need_proxy,
-                msg_key,
-            },
-            client_reader,
-            client_writer,
-            server_reader,
-            server_writer,
-        })
+                let (client_reader, client_writer) = split_and_wrap(proxy_context.stream);
+                let (server_reader, server_writer) = split_and_wrap(server_stream);
+                Ok(SocksForwarder::Tcp(TcpForwardImpl {
+                    context: ForwardContext {
+                        host,
+                        port,
+                        need_proxy,
+                        msg_key,
+                    },
+                    client_reader,
+                    client_writer,
+                    server_reader,
+                    server_writer,
+                }))
+            }
+            SocksRequest::UdpAssociate { client_addr } => {
+                let (mut association, relay_addr) = UdpAssociation::bind(
+                    proxy_context.stream,
+                    client_addr,
+                    self.msg_key,
+                    proxy_context.upstream_proxy,
+                )
+                .await?;
+                association.reply_success(relay_addr).await?;
+                Ok(SocksForwarder::Udp(Box::new(association)))
+            }
+        }
     }
 }
 
-async fn auth(stream: &mut TcpStream) -> Result<(String, u16)> {
+async fn read_request(stream: &mut TcpStream) -> Result<SocksRequest> {
     stream.write_u8(SOCK5_VER).await.context(IoSnafu {
         detail: "write version",
     })?;
@@ -140,18 +180,38 @@ async fn auth(stream: &mut TcpStream) -> Result<(String, u16)> {
     let cmd = stream.read_u8().await.context(IoSnafu {
         detail: "read cmd in auth",
     })?;
-    if cmd != TCP_CONN {
-        NotSupportedTransportSnafu {
-            cmd,
-            detail: "only support tcp",
-        }
-        .fail()?
-    }
-    stream.read_u8().await.context(IoSnafu {
+    let reserved = stream.read_u8().await.context(IoSnafu {
         detail: "read reserve in auth",
     })?;
+    if reserved != 0 {
+        FirstRequestSnafu {
+            detail: "SOCKS5 reserved request byte must be zero",
+        }
+        .fail()?;
+    }
+    let address = read_address(stream).await?;
+    match cmd {
+        TCP_CONN => {
+            let (host, port) = match address {
+                DatagramAddress::Ip(address) => (address.ip().to_string(), address.port()),
+                DatagramAddress::Domain(host, port) => (host, port),
+            };
+            Ok(SocksRequest::Connect { host, port })
+        }
+        UDP_ASSOCIATE => Ok(SocksRequest::UdpAssociate {
+            client_addr: address,
+        }),
+        _ => NotSupportedTransportSnafu {
+            cmd,
+            detail: "only TCP CONNECT and UDP ASSOCIATE are supported",
+        }
+        .fail(),
+    }
+}
+
+async fn read_address(stream: &mut TcpStream) -> Result<DatagramAddress> {
     let atyp = stream.read_u8().await.context(IoSnafu {
-        detail: "read inet type in auth",
+        detail: "read inet type in request",
     })?;
     match atyp {
         IPV4_ADDR => {
@@ -162,7 +222,10 @@ async fn auth(stream: &mut TcpStream) -> Result<(String, u16)> {
             let port = stream.read_u16().await.context(IoSnafu {
                 detail: "read port in ipv4 addr",
             })?;
-            Ok((format!("{}.{}.{}.{}", buf[0], buf[1], buf[2], buf[3]), port))
+            Ok(DatagramAddress::Ip(SocketAddr::new(
+                Ipv4Addr::from(buf).into(),
+                port,
+            )))
         }
         IPV6_ADDR => {
             let mut buf: [u8; 16] = [0; 16];
@@ -172,21 +235,26 @@ async fn auth(stream: &mut TcpStream) -> Result<(String, u16)> {
             let port = stream.read_u16().await.context(IoSnafu {
                 detail: "read port in ipv6 addr",
             })?;
-            Ok((Ipv6Addr::from(buf).to_string(), port))
+            Ok(DatagramAddress::Ip(SocketAddr::new(
+                Ipv6Addr::from(buf).into(),
+                port,
+            )))
         }
         NAMING_SERVER => {
             let host_len = stream.read_u8().await.context(IoSnafu {
                 detail: "read host len in auth",
             })?;
-            let mut buf: [u8; 255] = [0; 255];
-            let buf = &mut buf[0..host_len as usize];
-            stream.read_exact(buf).await.context(IoSnafu {
+            let mut buf = vec![0u8; host_len as usize];
+            stream.read_exact(&mut buf).await.context(IoSnafu {
                 detail: "read naming server in auth",
             })?;
             let port = stream.read_u16().await.context(IoSnafu {
                 detail: "read port in naming server",
             })?;
-            Ok((String::from_utf8_lossy(buf).into_owned(), port))
+            let host = String::from_utf8(buf).map_err(|_| SocksError::FirstRequest {
+                detail: "SOCKS5 domain is not valid UTF-8",
+            })?;
+            Ok(DatagramAddress::Domain(host, port))
         }
         atyp => NotSupportedHostSnafu {
             atyp,

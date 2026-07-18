@@ -93,10 +93,13 @@ pub async fn get_country_code(host: impl AsRef<str>) -> Result<ProxyStrategy> {
         .await
         .context(GeoQuerySnafu)?;
     tracing::info!("Host({}) country code: {}", host.as_ref(), country_code);
-    match country_code.as_str() {
-        "CN" => Ok(ProxyStrategy::Direct),
-        "SG" | "US" | "TW" | "HK" | "MO" | "JP" | "IN" => Ok(ProxyStrategy::Proxy),
-        _ => Ok(ProxyStrategy::Proxy),
+    Ok(strategy_for_country_code(country_code.as_str()))
+}
+
+fn strategy_for_country_code(country_code: &str) -> ProxyStrategy {
+    match country_code {
+        "CN" => ProxyStrategy::Direct,
+        _ => ProxyStrategy::Proxy,
     }
 }
 
@@ -416,12 +419,11 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
-    async fn test_get_country_code() {
-        unsafe {
-            env::set_var("USE_LOCAL_GEOIP", "yes");
-        }
-        println!("{:?}", get_country_code("google.com").await.unwrap());
+    #[test]
+    fn country_code_maps_to_expected_proxy_strategy() {
+        assert_eq!(strategy_for_country_code("CN"), ProxyStrategy::Direct);
+        assert_eq!(strategy_for_country_code("US"), ProxyStrategy::Proxy);
+        assert_eq!(strategy_for_country_code("XX"), ProxyStrategy::Proxy);
     }
 
     #[tokio::test]

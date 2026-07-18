@@ -70,6 +70,7 @@ mod connection;
 mod control;
 mod discovery;
 mod relay;
+mod udp;
 
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -118,6 +119,8 @@ pub enum ServerError {
     Transport {
         source: proxy_core::transport::TransportError,
     },
+    #[snafu(display("UDP proxy error: {source}"))]
+    Datagram { source: proxy_core::ProxyError },
     #[snafu(display("Control error: {source}"))]
     Control {
         source: proxy_core::control::ControlError,
@@ -429,10 +432,11 @@ pub async fn start_server(host: impl AsRef<str> + Debug, port: u16) {
         self_addrs.extend(parse_addr_list(raw));
     }
     if let Some(addr) = auto_advertise_addr(host.as_ref(), port) {
+        // An explicit listen address is already the most accurate advertisement
+        // and avoids blocking startup on public-IP HTTP services.
         self_addrs.push(addr);
-    }
-    // Detect public IP, fallback to local IP if network fails
-    if let Some(ip) = detect_public_ip() {
+    } else if let Some(ip) = detect_public_ip() {
+        // Wildcard listeners still need a concrete address for node discovery.
         tracing::info!("Detected public IP: {}", ip);
         self_addrs.push(format_ip_addr(ip, port));
     } else if let Some(ip) = detect_local_ip() {

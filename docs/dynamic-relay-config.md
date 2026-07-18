@@ -154,6 +154,9 @@ cargo build --release -p proxy-tui
 - SOCKS5 和 HTTP CONNECT 都支持用户名/密码认证。
 - TUI 与 `GetRelayStatus` 会隐藏密码，不会把 `pass` 回显到界面里。
 - `Relay` 页面仍然不接受裸 `host:port` 作为外部代理输入；如果不是 `node ...`，就必须带协议头。
+- 当上游代理实现 RFC 1928 UDP ASSOCIATE 时，UDP 关联可通过 `socks5://` 和
+  `socks5h://` 目标继续中转。`http://` Relay 目标仍然仅支持 TCP，并会明确拒绝
+  UDP 关联。
 
 JSON 示例：
 

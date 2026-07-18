@@ -22,6 +22,45 @@ Without `--set-system-proxy`, manually configure system proxy to `127.0.0.1:<loc
 
 ---
 
+## SOCKS5 UDP ASSOCIATE
+
+`http-proxy-cli` accepts RFC 1928 UDP associations on the same local port used
+for HTTP and SOCKS5 TCP. The SOCKS5 control connection stays on TCP while the
+client is given a temporary UDP relay address.
+
+There is no additional UDP command-line option. Configure the application to
+use `127.0.0.1:<client-port>` as a SOCKS5 proxy and enable UDP in that
+application. A minimal flow is:
+
+```text
+Application -- SOCKS5 UDP --> http-proxy-cli
+            -- framed tunnel --> http-proxy-server -- UDP --> destination
+```
+
+Operational details:
+
+- Client and server must both contain UDP-association support. Older servers
+  cannot interpret the new `udp_associate` transport header.
+- UDP always uses the configured remote proxy server. TCP keyword/GeoIP split
+  routing is not applied per UDP datagram.
+- `--msg-key` enables AES-256-GCM authentication and encryption per UDP frame.
+- `socks5://` and `socks5h://` upstream proxies support UDP ASSOCIATE when the
+  upstream server implements it. `socks5://` resolves domain targets locally;
+  `socks5h://` sends domain names to the upstream proxy.
+- HTTP CONNECT upstream proxies do not support UDP.
+- RFC 1928 fragmentation is not reassembled. Packets with `FRAG != 0` are
+  dropped to keep association memory bounded.
+- The UDP client address is pinned to the TCP control peer and the first valid
+  UDP endpoint, preventing the local relay from becoming an open UDP proxy.
+- Associations close with their TCP control connection and also expire after
+  300 seconds without traffic. Set `UDP_ASSOCIATION_IDLE_TIMEOUT_SECS` on both
+  sides to change the timeout.
+- System HTTP proxy settings, including `--set-system-proxy`, do not capture UDP
+  automatically. Use an application with SOCKS5 UDP support or a TUN adapter
+  that emits SOCKS5 UDP ASSOCIATE.
+
+---
+
 ## Windows
 
 1. Download `http-proxy-cli-*-x86_64-pc-windows-msvc.zip` from [releases](https://github.com/acking-you/proxy-everything/releases)

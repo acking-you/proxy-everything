@@ -53,6 +53,26 @@ The `--set-system-proxy` flag auto-configures your OS proxy settings. Without it
 
 [Full client usage guide →](docs/client-usage.md)
 
+#### SOCKS5 UDP
+
+The same local port also supports RFC 1928 `UDP ASSOCIATE`. No separate UDP
+listen port is required: a SOCKS5 client opens the TCP control connection on
+the configured client port and receives an ephemeral UDP relay address.
+
+- UDP datagrams preserve message boundaries while being framed over the
+  client/server TCP tunnel.
+- `--msg-key` encrypts each UDP tunnel frame as an independent authenticated
+  message.
+- A configured SOCKS5/SOCKS5H upstream can relay UDP. HTTP CONNECT upstreams
+  cannot carry UDP and the association is rejected explicitly.
+- SOCKS5 fragmentation (`FRAG != 0`) is not supported and fragmented packets
+  are dropped, as permitted by RFC 1928.
+- Idle associations expire after 300 seconds. Override this on both client and
+  server with `UDP_ASSOCIATION_IDLE_TIMEOUT_SECS`.
+
+System HTTP proxy settings do not redirect application UDP automatically. The
+application, TUN adapter, or other ingress must explicitly use SOCKS5 UDP.
+
 ### Proxy TUI
 
 `proxy-tui` is a control-plane monitor and runtime config tool. It is not a
@@ -141,10 +161,42 @@ cargo build --release --bin http-proxy-admin
 - [Admin Test Script](docs/admin-test.md) - How to run `http-proxy-admin` control-plane tests
 - [Metrics Monitoring](docs/metrics-monitoring.md) - TUI + admin CLI for management and realtime metrics
 
+## Windows Development
+
+Prerequisites:
+
+- Rust MSVC toolchain selected by `rust-toolchain.toml`
+- Visual Studio 2022 Build Tools with Desktop development with C++
+- CMake
+- FVM 4.x; the Flutter submodule pins Flutter 3.38.6 in `.fvmrc`
+
+Build the Rust command-line programs, FFI DLL, and Flutter Windows app together:
+
+```powershell
+.\scripts\windows\build.ps1 -Configuration Debug
+```
+
+Run a command-line component and pass its arguments after `--`:
+
+```powershell
+.\scripts\windows\run-cli.ps1 server -- -H 127.0.0.1 -p 1081
+.\scripts\windows\run-cli.ps1 client -- -s 127.0.0.1 -p 1081 -c 1080
+```
+
+Start the Flutter desktop app with hot reload. The script builds and stages
+`http_proxy.dll` before invoking the project-pinned Flutter SDK:
+
+```powershell
+.\scripts\windows\run-ui.ps1
+```
+
+Run Flutter commands from `ui/flutter` through FVM only, for example
+`fvm flutter test` and `fvm dart format lib test`.
+
 ## Features
 
 - AES-256-GCM encryption
-- HTTP/HTTPS/SOCKS5 proxy support
+- HTTP/HTTPS/SOCKS5 proxy support, including SOCKS5 UDP ASSOCIATE
 - Auto-routing based on geo-location
 - Reverse geo mode (`--reverse-geo`): proxy CN sites, direct for others
 - Auto system proxy setup (`--set-system-proxy`): Linux/macOS/Windows

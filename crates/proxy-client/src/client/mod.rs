@@ -36,7 +36,7 @@
 //!
 //! - **HTTP**: Plain HTTP requests are forwarded directly or through proxy
 //! - **HTTPS**: CONNECT method establishes encrypted tunnel
-//! - **SOCKS5**: Full SOCKS5 protocol with IPv4/IPv6/domain support
+//! - **SOCKS5**: TCP CONNECT and UDP ASSOCIATE with IPv4/IPv6/domain support
 //!
 //! # Auto-Proxy Feature
 //!
@@ -50,6 +50,7 @@
 pub mod auto_proxy;
 pub mod http;
 pub mod socks;
+mod udp;
 
 use std::borrow::Cow;
 use std::fmt::{Debug, Display};
@@ -57,14 +58,11 @@ use std::path::PathBuf;
 
 #[cfg(feature = "auto-proxy")]
 use auto_proxy::{SenderChan, run_auto_proxy_by_country};
-use proxy_core::codec::{AsyncReader, AsyncReaderWriterRef, AsyncWriter};
+use proxy_core::codec::{AsyncReader, AsyncWriter};
 use proxy_core::config::{gen_random_key, runtime};
 use proxy_core::relay::ExternalProxyTarget;
 use proxy_core::util::{GracefulShutdownManager, GracefulShutdownManagerImpl, error_report};
-use proxy_core::{
-    Aes256GcmCryption, MyAsyncWriteExt, ProxyHeader, client_proxy_with_cryptor_codec,
-    proxy_with_norlmal_codec, set_data_size,
-};
+use proxy_core::{client_proxy_with_cryptor_codec, proxy_with_norlmal_codec};
 use snafu::{Report, ResultExt, Snafu};
 use tokio::io::AsyncReadExt;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -117,6 +115,8 @@ pub enum ClientError {
     ExternalProxy {
         source: proxy_core::transport::TransportError,
     },
+    #[snafu(display("UDP proxy error"))]
+    Datagram { source: proxy_core::ProxyError },
     #[snafu(display("Signals register error"))]
     RegisterSignal,
     #[snafu(display("Empty dns record"))]
@@ -499,64 +499,16 @@ pub async fn get_tcp_proxy_stream(
     msg_key: Option<Cow<'static, str>>,
     detail: &'static str,
 ) -> Result<TcpStream> {
-    // 1. get proxy server stream
-    let mut proxy_server_stream = get_tcp_stream(proxy_server, proxy_server_port, detail).await?;
-
-    // 2. prepare proxy header
-    let proxy_header = ProxyHeader {
-        host: host.into(),
+    proxy_core::transport::get_tcp_proxy_stream(
+        host,
         port,
-        key: msg_key,
-    };
-    let mut header_json =
-        serde_json::to_string(&proxy_header).with_context(|_| SerdeJsonSnafu {
-            uri: get_uri(host, port),
-        })?;
-    let mut cryption =
-        Aes256GcmCryption::try_new_with_default_key().map_err(|e| ClientError::Encryption {
-            uri: get_uri(host, port),
-            detail: e.to_string(),
-        })?;
-
-    // SAFETY: We use `as_bytes_mut()` to encrypt the JSON string in-place.
-    // After encryption, the bytes are no longer valid UTF-8, but we only use
-    // `addr` as a byte slice for network transmission (write_all), never as
-    // a String again. The String is dropped after this scope.
-    let (addr, tag, len) = unsafe {
-        let addr = header_json.as_bytes_mut();
-        let tag = cryption
-            .encrypt(addr)
-            .map_err(|e| ClientError::Encryption {
-                uri: get_uri(host, port),
-                detail: e.to_string(),
-            })?;
-        let len = addr.len() + tag.as_ref().len();
-        (addr, tag, len as u32)
-    };
-
-    let mut proxy_server_stream_ref = AsyncReaderWriterRef::new(&mut proxy_server_stream);
-
-    // 3. send proxy header
-    set_data_size(&mut proxy_server_stream_ref, len)
-        .await
-        .with_context(|_| SendHeaderSnafu {
-            uri: get_uri(host, port),
-        })?;
-    proxy_server_stream_ref
-        .write_all(addr)
-        .await
-        .with_context(|_| IoSnafu {
-            uri: Some(get_uri(host, port)),
-            detail: "Send Header(host,ip)",
-        })?;
-    proxy_server_stream_ref
-        .write_all(tag.as_ref())
-        .await
-        .with_context(|_| IoSnafu {
-            uri: Some(get_uri(host, port)),
-            detail: "Send Header(tag)",
-        })?;
-    Ok(proxy_server_stream)
+        proxy_server,
+        proxy_server_port,
+        msg_key,
+        detail,
+    )
+    .await
+    .context(ExternalProxySnafu)
 }
 
 impl Forwarder for TcpForwardImpl {

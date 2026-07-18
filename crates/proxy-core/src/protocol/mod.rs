@@ -39,6 +39,28 @@ use snafu::ResultExt;
 use crate::config::runtime;
 use crate::error::{CheckSumSnafu, MaxSizeSnafu, ProtocolIoSnafu, ProxyError};
 
+/// Transport carried by a proxy connection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyTransport {
+    /// A byte-stream TCP connection.
+    #[default]
+    Tcp,
+    /// A SOCKS5 UDP association whose datagrams are framed over the TCP tunnel.
+    UdpAssociate,
+}
+
+impl ProxyTransport {
+    /// Returns whether this is the original TCP transport.
+    ///
+    /// TCP is omitted from serialized headers so a current client emits the
+    /// same JSON shape as clients released before transport negotiation was
+    /// introduced. UDP associations must always carry an explicit value.
+    fn is_tcp(&self) -> bool {
+        *self == Self::Tcp
+    }
+}
+
 /// Type alias for data size fields in the wire protocol.
 pub type DataSize = u32;
 
@@ -64,6 +86,9 @@ pub const MAX_DATA_SIZE: DataSize = 30 * 1024 * 1024;
 ///   "key": "optional-session-key"
 /// }
 /// ```
+///
+/// TCP deliberately keeps the legacy three-field shape. UDP associations add
+/// `"transport":"udp_associate"`; readers default a missing value to TCP.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProxyHeader {
     /// Destination hostname or IP address.
@@ -77,6 +102,17 @@ pub struct ProxyHeader {
     /// When present, enables additional encryption layer for the
     /// data stream (beyond the header encryption).
     pub key: Option<Cow<'static, str>>,
+
+    /// Transport mode.
+    ///
+    /// The two serde attributes form the compatibility contract for the
+    /// transport extension:
+    ///
+    /// - A current server treats a header from a legacy client as TCP when the field is absent.
+    /// - A current client omits the default TCP value, preserving the exact legacy header shape
+    ///   for older servers.
+    #[serde(default, skip_serializing_if = "ProxyTransport::is_tcp")]
+    pub transport: ProxyTransport,
 }
 
 impl Display for ProxyHeader {
@@ -165,4 +201,62 @@ pub async fn set_data_size<T: crate::MyAsyncWriteExt + Unpin>(
         detail: "write length",
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde::Deserialize;
+
+    use super::*;
+
+    /// Mirrors the header understood by releases that predate UDP support.
+    #[derive(Debug, Deserialize)]
+    struct LegacyProxyHeader {
+        host: String,
+        port: u16,
+        key: Option<String>,
+    }
+
+    #[test]
+    fn legacy_proxy_header_defaults_to_tcp() {
+        let header: ProxyHeader =
+            serde_json::from_str(r#"{"host":"example.com","port":443,"key":null}"#).unwrap();
+        assert_eq!(header.transport, ProxyTransport::Tcp);
+    }
+
+    #[test]
+    fn current_tcp_header_keeps_legacy_wire_shape() {
+        let header = ProxyHeader {
+            host: "example.com".to_string(),
+            port: 443,
+            key: Some(Cow::Borrowed("session-key")),
+            transport: ProxyTransport::Tcp,
+        };
+
+        let json = serde_json::to_string(&header).unwrap();
+        assert_eq!(
+            json,
+            r#"{"host":"example.com","port":443,"key":"session-key"}"#
+        );
+
+        // This deserialize uses the legacy struct rather than ProxyHeader, so
+        // the assertion catches accidental additions to the TCP wire shape.
+        let legacy: LegacyProxyHeader = serde_json::from_str(&json).unwrap();
+        assert_eq!(legacy.host, "example.com");
+        assert_eq!(legacy.port, 443);
+        assert_eq!(legacy.key.as_deref(), Some("session-key"));
+    }
+
+    #[test]
+    fn udp_header_serializes_explicit_transport() {
+        let header = ProxyHeader {
+            host: String::new(),
+            port: 0,
+            key: None,
+            transport: ProxyTransport::UdpAssociate,
+        };
+
+        let json = serde_json::to_value(header).unwrap();
+        assert_eq!(json["transport"], "udp_associate");
+    }
 }

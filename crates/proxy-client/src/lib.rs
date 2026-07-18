@@ -1,7 +1,7 @@
 //! Proxy-Client: Client-side proxy implementation.
 //!
 //! This crate provides the client-side proxy functionality, supporting both
-//! HTTP/HTTPS and SOCKS5 protocols.
+//! HTTP/HTTPS and SOCKS5 TCP/UDP protocols.
 
 pub mod cli_config;
 pub mod client;
