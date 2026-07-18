@@ -24,6 +24,8 @@ pub struct Config {
     pub secret_key: Option<String>,
     /// Enable auto-proxy (true/false). When disabled, all traffic goes through proxy.
     pub auto_proxy: Option<bool>,
+    /// Accept SOCKS5 UDP ASSOCIATE requests. Missing values default to enabled.
+    pub udp: Option<bool>,
     pub nonproxy_keywords: Option<Vec<String>>,
     pub proxy_keywords: Option<Vec<String>>,
     pub need_codec_ip: Option<Vec<String>>,

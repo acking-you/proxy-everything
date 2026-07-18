@@ -19,6 +19,7 @@ Without `--set-system-proxy`, manually configure system proxy to `127.0.0.1:<loc
 | `--set-system-proxy` | Auto-set OS proxy (Linux/macOS/Windows) |
 | `--reverse-geo` | Reverse geo logic: proxy CN, direct others |
 | `-m, --msg-key` | Enable random message key |
+| `--udp <true\|false>` | Enable SOCKS5 UDP ASSOCIATE (default: `true`) |
 
 ---
 
@@ -28,9 +29,10 @@ Without `--set-system-proxy`, manually configure system proxy to `127.0.0.1:<loc
 for HTTP and SOCKS5 TCP. The SOCKS5 control connection stays on TCP while the
 client is given a temporary UDP relay address.
 
-There is no additional UDP command-line option. Configure the application to
-use `127.0.0.1:<client-port>` as a SOCKS5 proxy and enable UDP in that
-application. A minimal flow is:
+UDP is enabled by default. Configure the application to use
+`127.0.0.1:<client-port>` as a SOCKS5 proxy and enable UDP in that application.
+Use `--udp false` (or `udp = false` in TOML) only when a TCP-only listener is
+required. A minimal flow is:
 
 ```text
 Application -- SOCKS5 UDP --> http-proxy-cli

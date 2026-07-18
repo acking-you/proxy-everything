@@ -37,6 +37,7 @@ const SOCK5_VER: u8 = 0x05;
 const NO_AUTH: u8 = 0x00;
 const TCP_CONN: u8 = 0x01;
 const UDP_ASSOCIATE: u8 = 0x03;
+const COMMAND_NOT_SUPPORTED: u8 = 0x07;
 const IPV4_ADDR: u8 = 0x01;
 const IPV6_ADDR: u8 = 0x04;
 const NAMING_SERVER: u8 = 0x03;
@@ -147,6 +148,23 @@ impl ForwarderProvider for SocksProxierProvider {
                 }))
             }
             SocksRequest::UdpAssociate { client_addr } => {
+                if !proxy_context.enable_udp {
+                    tracing::warn!(
+                        transport = "udp",
+                        client_address = ?client_addr,
+                        reason = "disabled_by_configuration",
+                        "SOCKS5 UDP association rejected"
+                    );
+                    response_with_code(&mut proxy_context.stream, COMMAND_NOT_SUPPORTED)
+                        .await
+                        .context(SocksProxySnafu)?;
+                    return NotSupportedTransportSnafu {
+                        cmd: UDP_ASSOCIATE,
+                        detail: "SOCKS5 UDP ASSOCIATE is disabled by configuration",
+                    }
+                    .fail()
+                    .context(SocksProxySnafu);
+                }
                 let (mut association, relay_addr) = UdpAssociation::bind(
                     proxy_context.stream,
                     client_addr,
@@ -276,11 +294,19 @@ async fn read_address(stream: &mut TcpStream) -> Result<DatagramAddress> {
 /// BND.ADDR 服务绑定的地址
 /// BND.PORT 服务绑定的端口DST.PORT
 async fn response(stream: &mut TcpStream) -> Result<()> {
+    response_with_code(stream, 0x00).await
+}
+
+/// Send a complete SOCKS5 reply with an unspecified IPv4 bind address.
+///
+/// Rejected commands still require an RFC 1928 reply so clients can
+/// distinguish a configured policy from a network timeout.
+async fn response_with_code(stream: &mut TcpStream, reply_code: u8) -> Result<()> {
     stream
-        .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+        .write_all(&[0x05, reply_code, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
         .await
         .context(IoSnafu {
-            detail: "send response ok",
+            detail: "send SOCKS5 response",
         })
 }
 

@@ -68,6 +68,9 @@ struct Cli {
     /// [optional] Auto-proxy switch (true/false). false forces all traffic through proxy
     #[arg(long, value_name = "AUTO_PROXY")]
     auto_proxy: Option<bool>,
+    /// [optional] Accept SOCKS5 UDP ASSOCIATE on the local proxy port (true/false)
+    #[arg(long, value_name = "UDP")]
+    udp: Option<bool>,
     /// [optional] Use local GeoIP database instead of ip-api.com API
     #[arg(long, env = "USE_LOCAL_GEOIP")]
     use_local_geoip: bool,
@@ -86,6 +89,7 @@ impl Cli {
             upstream_proxy: self.upstream_proxy.clone(),
             secret_key: self.secret_key.clone(),
             auto_proxy: self.auto_proxy,
+            udp: self.udp,
             nonproxy_keywords: self
                 .nonproxy_keywords
                 .as_ref()
@@ -123,6 +127,7 @@ impl Cli {
             || self.msg_key
             || self.reverse_geo
             || self.auto_proxy.is_some()
+            || self.udp.is_some()
             || self.set_system_proxy
     }
 }
@@ -207,6 +212,15 @@ async fn main() -> Result<()> {
         .or(config.auto_proxy)
         .or_else(|| {
             std::env::var("AUTO_PROXY")
+                .ok()
+                .and_then(|v| parse_bool_env(&v))
+        })
+        .unwrap_or(true);
+    let enable_udp = cli
+        .udp
+        .or(config.udp)
+        .or_else(|| {
+            std::env::var("UDP_ENABLED")
                 .ok()
                 .and_then(|v| parse_bool_env(&v))
         })
@@ -348,6 +362,7 @@ async fn main() -> Result<()> {
         Cell::new("Auto Proxy"),
         status_cell(effective_auto_proxy),
     ]);
+    table.add_row(vec![Cell::new("SOCKS5 UDP"), status_cell(enable_udp)]);
     table.add_row(vec![
         Cell::new("System Proxy"),
         status_cell(do_set_system_proxy),
@@ -377,6 +392,7 @@ async fn main() -> Result<()> {
     let client_config = ClientRuntimeConfig {
         client: ClientConfig {
             enable_auto_proxy: effective_auto_proxy,
+            enable_udp,
             cache_dir: None,
         },
         upstream_proxy: upstream_proxy.clone(),
@@ -397,4 +413,18 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn udp_cli_option_is_written_to_config() {
+        let cli = Cli::try_parse_from(["http-proxy-cli", "--udp", "false"]).unwrap();
+
+        assert_eq!(cli.udp, Some(false));
+        assert_eq!(cli.to_config().udp, Some(false));
+        assert!(cli.has_args());
+    }
 }

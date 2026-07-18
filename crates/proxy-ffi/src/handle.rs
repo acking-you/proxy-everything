@@ -15,7 +15,7 @@ use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
 
 use crate::logging::send_log;
-use crate::types::{ProxyConfig, ProxyResult};
+use crate::types::{ProxyConfig, ProxyConfigV2, ProxyResult};
 
 /// Opaque handle to the proxy client.
 pub struct ProxyHandle {
@@ -68,8 +68,53 @@ pub unsafe extern "C" fn proxy_start(
         return ProxyResult::InvalidParam;
     }
 
-    let handle = unsafe { &mut *handle };
     let config = unsafe { &*config };
+    proxy_start_inner(handle, config, true)
+}
+
+/// Start the proxy with the version 2 configuration.
+///
+/// The versioned entry point adds explicit SOCKS5 UDP control without changing
+/// the layout consumed by legacy `proxy_start` callers.
+///
+/// # Safety
+/// - `handle` must be a valid pointer from `proxy_create`
+/// - `config` fields must be valid C strings
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_start_v2(
+    handle: *mut ProxyHandle,
+    config: *const ProxyConfigV2,
+) -> ProxyResult {
+    if handle.is_null() || config.is_null() {
+        return ProxyResult::InvalidParam;
+    }
+
+    let config = unsafe { &*config };
+    let legacy_config = ProxyConfig {
+        server_host: config.server_host,
+        server_port: config.server_port,
+        local_port: config.local_port,
+        session_key: config.session_key,
+        auto_proxy: config.auto_proxy,
+        reverse_geo: config.reverse_geo,
+        cache_dir: config.cache_dir,
+        need_codec_ips: config.need_codec_ips,
+        force_codec: config.force_codec,
+        set_system_proxy: config.set_system_proxy,
+    };
+    proxy_start_inner(handle, &legacy_config, config.enable_udp != 0)
+}
+
+fn proxy_start_inner(
+    handle: *mut ProxyHandle,
+    config: &ProxyConfig,
+    enable_udp: bool,
+) -> ProxyResult {
+    if config.server_host.is_null() {
+        return ProxyResult::InvalidParam;
+    }
+
+    let handle = unsafe { &mut *handle };
 
     if handle.running.load(Ordering::SeqCst) {
         return ProxyResult::AlreadyRunning;
@@ -134,6 +179,7 @@ pub unsafe extern "C" fn proxy_start(
     // Build ClientConfig for runtime options
     let client_config = ClientConfig {
         enable_auto_proxy,
+        enable_udp,
         cache_dir,
     };
 
@@ -181,13 +227,14 @@ pub unsafe extern "C" fn proxy_start(
     // Spawn proxy task using existing client logic
     handle.runtime.spawn(async move {
         tracing::info!(
-            "Starting proxy: local:{} -> {}:{} (reverse_geo={}, auto_proxy={}, force_codec={})",
             local_port,
-            server_host,
-            server_port,
+            remote_host = %server_host,
+            remote_port = server_port,
             reverse_geo,
             enable_auto_proxy,
-            force_codec
+            enable_udp,
+            force_codec,
+            "proxy started"
         );
 
         // Use force_codec to determine NEED_CODEC constant

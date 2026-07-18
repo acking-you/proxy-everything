@@ -58,6 +58,9 @@ The `--set-system-proxy` flag auto-configures your OS proxy settings. Without it
 The same local port also supports RFC 1928 `UDP ASSOCIATE`. No separate UDP
 listen port is required: a SOCKS5 client opens the TCP control connection on
 the configured client port and receives an ephemeral UDP relay address.
+UDP is enabled by default in both the CLI and Flutter client. Use
+`--udp false`, `udp = false` in the client TOML, or the Flutter configuration
+switch when a TCP-only local listener is required.
 
 - UDP datagrams preserve message boundaries while being framed over the
   client/server TCP tunnel.

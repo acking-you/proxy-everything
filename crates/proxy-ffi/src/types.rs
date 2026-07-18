@@ -33,6 +33,25 @@ pub struct ProxyConfig {
     pub set_system_proxy: c_int,    // desktop only: 0 = disabled, 1 = set system proxy
 }
 
+/// Versioned proxy configuration with SOCKS5 UDP control.
+///
+/// `ProxyConfig` and `proxy_start` remain unchanged so applications built
+/// against the original C ABI continue to start with UDP enabled.
+#[repr(C)]
+pub struct ProxyConfigV2 {
+    pub server_host: *const c_char,
+    pub server_port: u16,
+    pub local_port: u16,
+    pub session_key: *const c_char,
+    pub auto_proxy: c_int,
+    pub reverse_geo: c_int,
+    pub cache_dir: *const c_char,
+    pub need_codec_ips: *const c_char,
+    pub force_codec: c_int,
+    pub set_system_proxy: c_int,
+    pub enable_udp: c_int, // 0 = reject UDP ASSOCIATE, non-zero = accept
+}
+
 /// Result of latency test.
 #[repr(C)]
 pub struct LatencyResult {

@@ -72,6 +72,7 @@ async fn socks5_udp_associate_supports_plain_encrypted_and_chained_relays() {
         Some(ClientRuntimeConfig {
             client: ClientConfig {
                 enable_auto_proxy: false,
+                enable_udp: true,
                 cache_dir: None,
             },
             upstream_proxy: None,
@@ -95,6 +96,7 @@ async fn socks5_udp_associate_supports_plain_encrypted_and_chained_relays() {
         Some(ClientRuntimeConfig {
             client: ClientConfig {
                 enable_auto_proxy: false,
+                enable_udp: true,
                 cache_dir: None,
             },
             upstream_proxy: None,
@@ -119,6 +121,7 @@ async fn socks5_udp_associate_supports_plain_encrypted_and_chained_relays() {
         Some(ClientRuntimeConfig {
             client: ClientConfig {
                 enable_auto_proxy: false,
+                enable_udp: true,
                 cache_dir: None,
             },
             upstream_proxy: Some(
@@ -146,6 +149,43 @@ async fn socks5_udp_associate_supports_plain_encrypted_and_chained_relays() {
     server_task.await.unwrap();
     echo_task.abort();
     let _ = std::fs::remove_dir_all(state_dir);
+}
+
+#[tokio::test]
+async fn socks5_udp_associate_returns_command_not_supported_when_disabled() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client_addr = listener.local_addr().unwrap();
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn(run_client_with_listener_runtime_config::<false>(
+        listener,
+        cancel.clone(),
+        None,
+        Some(ClientRuntimeConfig {
+            client: ClientConfig {
+                enable_auto_proxy: false,
+                enable_udp: false,
+                cache_dir: None,
+            },
+            upstream_proxy: None,
+        }),
+    ));
+
+    let mut control = TcpStream::connect(client_addr).await.unwrap();
+    control.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+    let mut method = [0u8; 2];
+    control.read_exact(&mut method).await.unwrap();
+    assert_eq!(method, [0x05, 0x00]);
+
+    control
+        .write_all(&[0x05, 0x03, 0x00, 0x01, 127, 0, 0, 1, 0, 0])
+        .await
+        .unwrap();
+    let mut response = [0u8; 10];
+    control.read_exact(&mut response).await.unwrap();
+    assert_eq!(response, [0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+
+    cancel.cancel();
+    task.await.unwrap();
 }
 
 async fn assert_udp_round_trip(

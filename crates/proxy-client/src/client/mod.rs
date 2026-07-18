@@ -148,10 +148,24 @@ pub fn change_msg_key(
 pub type Result<T> = std::result::Result<T, ClientError>;
 
 /// Runtime configuration for client
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ClientConfig {
     pub enable_auto_proxy: bool,
+    /// Accept RFC 1928 UDP ASSOCIATE requests on the local SOCKS5 listener.
+    pub enable_udp: bool,
     pub cache_dir: Option<PathBuf>,
+}
+
+impl Default for ClientConfig {
+    fn default() -> Self {
+        Self {
+            // Preserve the previous explicit-config default while keeping UDP
+            // enabled for callers that have not learned about this option yet.
+            enable_auto_proxy: false,
+            enable_udp: true,
+            cache_dir: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -188,6 +202,8 @@ pub struct ProxyContext<'a> {
     force_proxy: bool,
     /// Optional external upstream proxy used instead of the encrypted proxy server.
     upstream_proxy: Option<&'a ExternalProxyTarget>,
+    /// Whether the local listener accepts SOCKS5 UDP ASSOCIATE requests.
+    enable_udp: bool,
     /// TODO: let this stream abstract
     stream: TcpStream,
 }
@@ -572,6 +588,7 @@ pub struct ClientProxyContext {
     sender: Option<SenderChan>,
     force_proxy: bool,
     upstream_proxy: Option<ExternalProxyTarget>,
+    enable_udp: bool,
 }
 
 #[inline]
@@ -620,6 +637,7 @@ pub async fn handle_client(mut context: ClientProxyContext) -> Result<()> {
         sender: context.sender.as_ref(),
         force_proxy: context.force_proxy,
         upstream_proxy: context.upstream_proxy.as_ref(),
+        enable_udp: context.enable_udp,
         stream: context.stream,
     };
 
@@ -699,6 +717,7 @@ pub async fn run_client_with_listener_runtime_config<const NEED_CODEC: bool>(
         .map(|c| c.client.enable_auto_proxy)
         .unwrap_or(true);
     let upstream_proxy = config.as_ref().and_then(|c| c.upstream_proxy.clone());
+    let enable_udp = config.as_ref().map(|c| c.client.enable_udp).unwrap_or(true);
     let enable_auto_proxy = enable_auto_proxy && upstream_proxy.is_none();
     let force_proxy = !enable_auto_proxy;
     let cache_dir = config.as_ref().and_then(|c| c.client.cache_dir.clone());
@@ -706,6 +725,7 @@ pub async fn run_client_with_listener_runtime_config<const NEED_CODEC: bool>(
     tracing::info!(
         local_addr = ?listener.local_addr().ok(),
         enable_auto_proxy,
+        enable_udp,
         force_proxy,
         upstream_proxy = ?upstream_proxy_display,
         "client listener configured"
@@ -748,6 +768,7 @@ pub async fn run_client_with_listener_runtime_config<const NEED_CODEC: bool>(
                     sender,
                     force_proxy,
                     upstream_proxy: upstream_proxy.clone(),
+                    enable_udp,
                 });
                 let wrapped_task = async move {
                     tokio::select! {
@@ -844,6 +865,7 @@ mod tests {
             Some(ClientRuntimeConfig {
                 client: ClientConfig {
                     enable_auto_proxy: false,
+                    enable_udp: true,
                     cache_dir: None,
                 },
                 upstream_proxy: Some(upstream_proxy),

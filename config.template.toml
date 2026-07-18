@@ -20,6 +20,10 @@ reverse_geo = false
 # - false: force all connections through proxy (skip all auto-proxy checks)
 auto_proxy = true
 
+# [Optional] Accept SOCKS5 UDP ASSOCIATE on the same local port as TCP.
+# Defaults to true when omitted. Set to false to expose TCP-only SOCKS5.
+udp = true
+
 # [Optional] Use local GeoIP database instead of ip-api.com API
 # use_local_geoip = false
 
