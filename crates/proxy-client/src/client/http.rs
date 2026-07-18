@@ -258,15 +258,17 @@ impl HttpProxierProvider {
                 return Ok((server_stream, true, None));
             }
 
-            let server_host = runtime::server_host();
+            // Hold one endpoint snapshot for the full connection setup so a
+            // concurrent node switch cannot mix address generations.
+            let server_endpoint = runtime::server_endpoint();
             let (mut server_stream, need_proxy, msg_key) = if context.force_proxy {
-                let msg_key = change_msg_key(server_host.as_str(), self.msg_key.clone());
+                let msg_key = change_msg_key(server_endpoint.host.as_str(), self.msg_key.clone());
                 (
                     get_tcp_proxy_stream(
                         self.host.as_str(),
                         self.port,
-                        &server_host,
-                        runtime::server_port(),
+                        &server_endpoint.host,
+                        server_endpoint.port,
                         msg_key.clone(),
                         "[PROXY] auto-proxy disabled; force proxy",
                     )
@@ -281,14 +283,17 @@ impl HttpProxierProvider {
                     .find(|e| self.host.contains(&e.name_server));
                 match has_proxy_status {
                     Some(proxy_status) => {
-                        let server_ip = proxy_status.proxy_server.as_ref().unwrap_or(&server_host);
+                        let server_ip = proxy_status
+                            .proxy_server
+                            .as_ref()
+                            .unwrap_or(&server_endpoint.host);
                         let msg_key = change_msg_key(server_ip.as_str(), self.msg_key.clone());
                         (
                             get_tcp_proxy_stream(
                                 self.host.as_str(),
                                 self.port,
                                 server_ip,
-                                runtime::server_port(),
+                                server_endpoint.port,
                                 msg_key.clone(),
                                 "[PROXY] we will proxy http",
                             )

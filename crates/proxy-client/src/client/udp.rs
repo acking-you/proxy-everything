@@ -105,6 +105,9 @@ impl UdpAssociation {
                 source,
             })?;
 
+        // A UDP association remains pinned to the endpoint generation active
+        // when its TCP control connection was accepted.
+        let server_endpoint = runtime::server_endpoint();
         let (upstream_reader, upstream_writer, upstream_guard) = if let Some(proxy) = upstream_proxy
         {
             let relay = create_socks5_datagram_relay(proxy)
@@ -117,10 +120,9 @@ impl UdpAssociation {
                 Some(guard),
             )
         } else {
-            let server_host = runtime::server_host();
             let mut stream = proxy_core::transport::get_udp_proxy_stream(
-                server_host.as_str(),
-                runtime::server_port(),
+                server_endpoint.host.as_str(),
+                server_endpoint.port,
                 msg_key.clone(),
                 "connect UDP association to proxy server",
             )
@@ -133,10 +135,9 @@ impl UdpAssociation {
                     return Err(super::ClientError::Datagram {
                         source: ProxyError::Protocol {
                             detail: format!(
-                                "remote proxy server {server_host}:{} timed out before confirming \
-                                 UDP support; verify that the server is current and allows UDP \
-                                 egress",
-                                runtime::server_port()
+                                "remote proxy server {}:{} timed out before confirming UDP \
+                                 support; verify that the server is current and allows UDP egress",
+                                server_endpoint.host, server_endpoint.port
                             ),
                         },
                     });
@@ -145,11 +146,11 @@ impl UdpAssociation {
                     return Err(super::ClientError::Datagram {
                         source: ProxyError::Protocol {
                             detail: format!(
-                                "remote proxy server {server_host}:{} closed the UDP association \
-                                 before readiness; its binary likely predates UDP support or UDP \
-                                 relay initialization failed. Upgrade and restart \
-                                 http-proxy-server with the same release as this client",
-                                runtime::server_port()
+                                "remote proxy server {}:{} closed the UDP association before \
+                                 readiness; its binary likely predates UDP support or UDP relay \
+                                 initialization failed. Upgrade and restart http-proxy-server \
+                                 with the same release as this client",
+                                server_endpoint.host, server_endpoint.port
                             ),
                         },
                     });
@@ -180,7 +181,7 @@ impl UdpAssociation {
                 });
             }
             tracing::debug!(
-                server = %format!("{}:{}", server_host, runtime::server_port()),
+                server = %format!("{}:{}", server_endpoint.host, server_endpoint.port),
                 datagram_encryption = msg_key.is_some(),
                 "remote proxy server confirmed UDP association readiness"
             );
@@ -204,7 +205,7 @@ impl UdpAssociation {
             local_udp_relay = %relay_addr,
             upstream = %upstream_proxy
                 .map(ExternalProxyTarget::display_url)
-                .unwrap_or_else(|| format!("proxy-server://{}:{}", runtime::server_host(), runtime::server_port())),
+                .unwrap_or_else(|| format!("proxy-server://{}:{}", server_endpoint.host, server_endpoint.port)),
             datagram_encryption = msg_key.is_some(),
             "SOCKS5 UDP association initialized"
         );

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use arc_swap::ArcSwap;
 use once_cell::sync::Lazy;
@@ -50,15 +50,26 @@ fn parse_bool_env(var: &str, default: bool) -> bool {
 pub mod runtime {
     use super::*;
 
-    // Atomic values for simple types
-    static SERVER_PORT_RT: AtomicU16 = AtomicU16::new(1081);
+    /// One immutable upstream snapshot. Keeping the host and port in the same
+    /// `ArcSwap` prevents a connection accepted during a node switch from
+    /// combining the old host with the new port (or vice versa).
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct ServerEndpoint {
+        pub host: String,
+        pub port: u16,
+    }
+
     #[cfg(feature = "auto-proxy")]
     static REVERSE_GEO_RT: AtomicBool = AtomicBool::new(false);
 
     // ArcSwap for complex types (lock-free reads)
     type SecretKey = Option<(Vec<u8>, u32)>;
-    static SERVER_HOST_RT: Lazy<ArcSwap<String>> =
-        Lazy::new(|| ArcSwap::from_pointee(String::new()));
+    static SERVER_ENDPOINT_RT: Lazy<ArcSwap<ServerEndpoint>> = Lazy::new(|| {
+        ArcSwap::from_pointee(ServerEndpoint {
+            host: String::new(),
+            port: 1081,
+        })
+    });
     static NEED_CODEC_IP_RT: Lazy<ArcSwap<Vec<String>>> =
         Lazy::new(|| ArcSwap::from_pointee(Vec::new()));
     static SECRET_KEY_RT: Lazy<ArcSwap<SecretKey>> = Lazy::new(|| ArcSwap::from_pointee(None));
@@ -72,11 +83,20 @@ pub mod runtime {
     // ===== Setters (for FFI direct use) =====
 
     pub fn set_server_host(host: String) {
-        SERVER_HOST_RT.store(Arc::new(host));
+        let current = SERVER_ENDPOINT_RT.load();
+        set_server_endpoint(host, current.port);
     }
 
     pub fn set_server_port(port: u16) {
-        SERVER_PORT_RT.store(port, Ordering::SeqCst);
+        let current = SERVER_ENDPOINT_RT.load();
+        set_server_endpoint(current.host.clone(), port);
+    }
+
+    /// Atomically replace the upstream address used by newly accepted relay
+    /// sessions. Established sessions keep their existing socket until their
+    /// owner explicitly drains them.
+    pub fn set_server_endpoint(host: String, port: u16) {
+        SERVER_ENDPOINT_RT.store(Arc::new(ServerEndpoint { host, port }));
     }
 
     #[cfg(feature = "auto-proxy")]
@@ -129,15 +149,28 @@ pub mod runtime {
     // ===== Getters (lock-free) =====
 
     pub fn server_port() -> u16 {
-        SERVER_PORT_RT.load(Ordering::SeqCst)
+        SERVER_ENDPOINT_RT.load().port
     }
 
     pub fn server_host() -> Arc<String> {
-        let host = SERVER_HOST_RT.load_full();
-        if host.is_empty() {
+        let endpoint = SERVER_ENDPOINT_RT.load();
+        if endpoint.host.is_empty() {
             Arc::new("127.0.0.1".to_string())
         } else {
-            host
+            Arc::new(endpoint.host.clone())
+        }
+    }
+
+    /// Load a consistent upstream host/port pair for one connection attempt.
+    pub fn server_endpoint() -> Arc<ServerEndpoint> {
+        let endpoint = SERVER_ENDPOINT_RT.load_full();
+        if endpoint.host.is_empty() {
+            Arc::new(ServerEndpoint {
+                host: "127.0.0.1".to_string(),
+                port: endpoint.port,
+            })
+        } else {
+            endpoint
         }
     }
 
@@ -182,8 +215,7 @@ pub mod runtime {
         codec_ips: Vec<String>,
         secret: Option<String>,
     ) {
-        set_server_host(host);
-        set_server_port(port);
+        set_server_endpoint(host, port);
         set_secret_key(secret);
         set_need_codec_ips(codec_ips);
 
@@ -587,7 +619,7 @@ mod tests {
     use tokio::time::Instant;
     use uni_stream::addr::get_ip_addrs;
 
-    use crate::config::{default_state_dir, proxy_data_dir};
+    use crate::config::{default_state_dir, proxy_data_dir, runtime};
 
     static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -621,6 +653,22 @@ mod tests {
     fn test_ipaddr_parse() {
         let ipaddr = "127.0.0.1".parse::<IpAddr>().unwrap();
         assert_eq!(ipaddr, IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+    }
+
+    #[test]
+    fn runtime_upstream_switch_keeps_endpoint_generations_consistent() {
+        let original = runtime::server_endpoint();
+        runtime::set_server_endpoint("old.example".to_string(), 1081);
+        let old = runtime::server_endpoint();
+
+        runtime::set_server_endpoint("new.example".to_string(), 2081);
+        let new = runtime::server_endpoint();
+
+        assert_eq!(old.host, "old.example");
+        assert_eq!(old.port, 1081);
+        assert_eq!(new.host, "new.example");
+        assert_eq!(new.port, 2081);
+        runtime::set_server_endpoint(original.host.clone(), original.port);
     }
 
     #[test]

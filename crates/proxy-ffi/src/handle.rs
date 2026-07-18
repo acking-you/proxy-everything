@@ -426,6 +426,74 @@ fn proxy_start_inner(
     ProxyResult::Ok
 }
 
+/// Atomically replace the remote proxy endpoint without rebinding the local
+/// HTTP/SOCKS5 listener.
+///
+/// TUN must be stopped first because its operating-system route bypass was
+/// resolved from the previous endpoint. Callers can immediately start TUN
+/// again after this function returns; existing TUN relays are already drained
+/// by `proxy_stop_tun`, while the local listener remains available throughout.
+///
+/// # Safety
+/// - `handle` must be a valid pointer from `proxy_create`
+/// - `server_host` must be a valid, non-empty UTF-8 C string
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_switch_upstream(
+    handle: *mut ProxyHandle,
+    server_host: *const c_char,
+    server_port: u16,
+) -> ProxyResult {
+    if handle.is_null() || server_host.is_null() || server_port == 0 {
+        return ProxyResult::InvalidParam;
+    }
+    let handle = unsafe { &*handle };
+    clear_last_error(handle);
+    if !handle.running.load(Ordering::Acquire) {
+        record_error(
+            handle,
+            "Start the local proxy listener before switching its upstream endpoint",
+        );
+        return ProxyResult::NotRunning;
+    }
+    if handle.tun_running.load(Ordering::Acquire) {
+        record_error(
+            handle,
+            "Stop TUN capture before switching upstream so its route bypass can be refreshed",
+        );
+        return ProxyResult::RuntimeError;
+    }
+
+    let server_host = match unsafe { CStr::from_ptr(server_host) }.to_str() {
+        Ok(host) if !host.trim().is_empty() => host.trim().to_string(),
+        _ => return ProxyResult::InvalidParam,
+    };
+    let mut endpoint = match handle.remote_endpoint.lock() {
+        Ok(endpoint) => endpoint,
+        Err(_) => {
+            record_error(handle, "Failed to lock the active upstream endpoint");
+            return ProxyResult::RuntimeError;
+        }
+    };
+    let previous = endpoint.clone();
+
+    // Client connection paths load this host/port pair from one ArcSwap
+    // snapshot, so accepts racing this call see either complete generation.
+    proxy_core::config::runtime::set_server_endpoint(server_host.clone(), server_port);
+    *endpoint = Some((server_host.clone(), server_port));
+    if let Ok(mut http_client) = handle.http_client.lock() {
+        *http_client = None;
+    }
+
+    tracing::info!(
+        previous_host = previous.as_ref().map(|(host, _)| host.as_str()),
+        previous_port = previous.as_ref().map(|(_, port)| *port),
+        remote_host = %server_host,
+        remote_port = server_port,
+        "proxy upstream switched without rebinding the local listener"
+    );
+    ProxyResult::Ok
+}
+
 /// Start TUN capture after the local HTTP/SOCKS5 listener is confirmed active.
 ///
 /// Captured packets are always forwarded to `socks5://127.0.0.1:<local_port>`.
@@ -995,6 +1063,47 @@ mod tests {
         );
         unsafe { crate::logging::proxy_free_string(error) };
         assert_eq!(unsafe { proxy_stop_tun(handle) }, ProxyResult::NotRunning);
+        unsafe { proxy_destroy(handle) };
+    }
+
+    #[test]
+    fn upstream_switch_requires_running_listener_and_stopped_tun() {
+        let handle = proxy_create();
+        assert!(!handle.is_null());
+        let host = CString::new("new.example").unwrap();
+        let original_runtime_endpoint = proxy_core::config::runtime::server_endpoint();
+
+        assert_eq!(
+            unsafe { proxy_switch_upstream(handle, host.as_ptr(), 2081) },
+            ProxyResult::NotRunning
+        );
+
+        let state = unsafe { &*handle };
+        state.running.store(true, Ordering::Release);
+        state.tun_running.store(true, Ordering::Release);
+        assert_eq!(
+            unsafe { proxy_switch_upstream(handle, host.as_ptr(), 2081) },
+            ProxyResult::RuntimeError
+        );
+
+        state.tun_running.store(false, Ordering::Release);
+        assert_eq!(
+            unsafe { proxy_switch_upstream(handle, host.as_ptr(), 2081) },
+            ProxyResult::Ok
+        );
+        assert_eq!(
+            state.remote_endpoint.lock().unwrap().as_ref(),
+            Some(&("new.example".to_string(), 2081))
+        );
+        let runtime_endpoint = proxy_core::config::runtime::server_endpoint();
+        assert_eq!(runtime_endpoint.host, "new.example");
+        assert_eq!(runtime_endpoint.port, 2081);
+
+        proxy_core::config::runtime::set_server_endpoint(
+            original_runtime_endpoint.host.clone(),
+            original_runtime_endpoint.port,
+        );
+        state.running.store(false, Ordering::Release);
         unsafe { proxy_destroy(handle) };
     }
 }
