@@ -16,7 +16,6 @@ sysproxy = { workspace = true }
 toml = { workspace = true }
 crossterm = { workspace = true }
 comfy-table = { workspace = true }
-better_mimalloc_rs = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

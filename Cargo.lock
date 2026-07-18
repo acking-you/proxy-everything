@@ -2803,7 +2803,6 @@ dependencies = [
  "anyhow",
  "async-broadcast",
  "base64",
- "better_mimalloc_rs",
  "clap",
  "comfy-table",
  "crossterm",
@@ -2837,6 +2836,7 @@ dependencies = [
  "arc-swap",
  "async-broadcast",
  "base64",
+ "better_mimalloc_rs",
  "dashmap",
  "dirs",
  "flate2",
@@ -2868,7 +2868,6 @@ dependencies = [
 name = "proxy-ffi"
 version = "0.4.23"
 dependencies = [
- "better_mimalloc_rs",
  "proxy-client",
  "proxy-core",
  "reqwest",
@@ -2885,7 +2884,6 @@ name = "proxy-server"
 version = "0.4.23"
 dependencies = [
  "anyhow",
- "better_mimalloc_rs",
  "clap",
  "parking_lot",
  "proxy-core",

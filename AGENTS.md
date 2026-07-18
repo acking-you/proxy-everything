@@ -171,6 +171,14 @@ cargo fmt -p proxy-core -p proxy-client -p proxy-server -p proxy-tui -p proxy-ff
   credentials as sensitive. Documentation and tests must use placeholders.
 - Preserve RAII cleanup for system proxy changes and cancellation-aware shutdown.
 
+## Allocator Ownership
+
+- `proxy-core::allocator` owns the process-wide mimalloc selection and RSS
+  tuning for every proxy binary and FFI artifact.
+- Do not declare another `#[global_allocator]` or duplicate allocator tuning in
+  leaf crates. Embedded components such as `tun2proxy` inherit the allocator
+  selected by the final proxy artifact.
+
 ## Git and Submodules
 
 - The worktree may already contain user changes. Never reset or overwrite them.

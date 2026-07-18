@@ -242,11 +242,14 @@ It exists to:
 - Pin the C allocator to a specific fork (`https://github.com/acking-you/mimalloc`)
 - Expose RSS-related tuning knobs at build time and runtime
 
-The allocator is provided by the vendored `deps/better_mimalloc_rs` submodule,
-which gives us predictable tuning behavior for long-running proxy servers. See
+The allocator is provided by the vendored `deps/better_mimalloc_rs` submodule.
+`proxy-core` owns the single process-wide allocator policy, so the client,
+server, TUI, administration tools, Flutter FFI library, and embedded TUN stack
+all use the same pinned mimalloc build and tuning. See
 `deps/better_mimalloc_rs/README.md` for configuration details.
 
 ### RSS tuning
 
-The binaries always use an aggressive RSS-reclaim configuration in code to
-prioritize faster memory return under load.
+Every proxy artifact uses the original aggressive RSS-reclaim configuration in
+code to prioritize faster memory return under load. The policy is applied once
+before the first Rust allocation rather than being duplicated by each binary.

@@ -13,6 +13,7 @@
 // Public modules
 // ============================================================================
 
+pub mod allocator;
 pub mod codec;
 pub mod config;
 pub mod control;

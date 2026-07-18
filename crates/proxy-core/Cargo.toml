@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Process-wide allocator
+better_mimalloc_rs = { workspace = true }
+
 # Async runtime
 tokio = { workspace = true, optional = true }
 tokio-util = { workspace = true, optional = true }

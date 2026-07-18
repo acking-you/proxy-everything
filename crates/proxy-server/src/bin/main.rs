@@ -1,4 +1,3 @@
-use better_mimalloc_rs::{MiMalloc, MiMallocConfig};
 use clap::Parser;
 use proxy_core::config::{SERVER_PORT, init_tracing};
 use proxy_server::server::start_server;
@@ -35,27 +34,8 @@ struct Cli {
     turely_proxy_server: Option<String>,
 }
 
-#[global_allocator]
-static GLOBAL_ALLOCATOR: MiMalloc = MiMalloc;
-
-fn init_allocator() {
-    // Aggressive RSS reclamation: prioritize faster decommit over raw throughput.
-    let config = MiMallocConfig {
-        eager_commit: Some(false),
-        eager_commit_delay: Some(0),
-        arena_eager_commit: Some(0),
-        purge_decommits: Some(true),
-        purge_delay: Some(0),
-        arena_purge_mult: Some(1),
-        purge_extend_delay: Some(0),
-        generic_collect: Some(200),
-    };
-    MiMalloc::init_with(&config);
-}
-
 #[tokio::main]
 async fn main() {
-    init_allocator();
     let cli = Cli::parse();
     init_tracing();
     unsafe {
