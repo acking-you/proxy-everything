@@ -157,13 +157,23 @@ launches an elevated replacement of the same GUI with `ShellExecute runas`; no
 terminal is created. The original process releases the local port and the new
 process retries the listener handoff before it creates Wintun.
 
-Normal cancellation restores the routes through the TUN setup guard. A hard
-process termination or machine crash can prevent graceful cleanup; restarting
-the application and stopping TUN normally, or resetting the affected routes,
-restores the expected state.
+On Windows, setup preserves the existing physical, WSL, and VPN default routes.
+It captures IPv4 with two more-specific `/1` routes created through the IP
+Helper API, records only rows owned by the current TUN session, and restores
+those exact rows together with the previous TUN DNS setting. Startup failures
+roll back the same transaction instead of deleting every `0.0.0.0/0` route and
+guessing which default gateway should be recreated.
+
+Normal cancellation first cancels and drains the TUN TCP, UDP, UdpGW, and
+socket-transfer tasks, then restores routes and DNS through the setup guard.
+This prevents old relays from surviving a node hot switch while network state
+is already being replaced. A hard process termination or machine crash can
+still prevent user-space cleanup; after such an event, inspect and remove only
+the two `/1` rows owned by the proxy-everything Wintun adapter rather than using
+an unqualified default-route deletion.
 
 Only one application should own the fixed proxy-everything Wintun adapter and
-its catch-all route. If another VPN/TUN application or another proxy-everything
+its capture routes. If another VPN/TUN application or another proxy-everything
 instance is already active, startup stops before changing routes and names the
 detected adapter. Stop it before retrying TUN mode. The GUI error is the
 authoritative setup result; a generic numeric `RuntimeError` is retained only
@@ -172,7 +182,7 @@ for native ABI compatibility.
 ### Loop-prevention invariant
 
 Loop prevention does not depend on one best-effort process lookup. Before the
-catch-all route is installed, the client resolves its remote proxy endpoint and
+capture routes are installed, the client resolves its remote proxy endpoint and
 adds each address as a physical route bypass. While TUN is active, it also
 suppresses auto-proxy direct connections so every client-owned outbound session
 uses that protected endpoint. Finally, the current executable is always kept in

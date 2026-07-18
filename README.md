@@ -95,6 +95,11 @@ client executable in the process-bypass policy. Additional processes can bypass
 TUN with repeatable `--tun-bypass-process` options. Use `--tun-list-processes`
 to list currently running Windows executable names.
 
+Windows setup leaves every existing default route untouched and captures IPv4
+with two owned `/1` routes. Shutdown and hot switching cancel all managed TUN
+sessions before restoring only those exact routes and the previous DNS state;
+the cleanup path never performs a broad deletion of `0.0.0.0/0`.
+
 TUN mode requires administrator privileges. The Windows CLI requests UAC
 elevation in the existing terminal. The Flutter application normally runs
 unelevated and requests UAC only when its top-level TUN switch is enabled after
