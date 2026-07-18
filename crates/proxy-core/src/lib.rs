@@ -288,7 +288,7 @@ pub async fn client_proxy_with_cryptor_codec<
     client_writer: W,
     server_writer: W,
 ) -> Result<()> {
-    tracing::info!("Client proxy starting with session key:{}", key.as_ref());
+    tracing::info!(host = %host.as_ref(), "client encrypted proxy starting");
     start_proxy(
         host,
         get_encryptor_codec(key, client_reader)?,
@@ -322,7 +322,7 @@ pub async fn server_proxy_with_cryptor_codec<
     client_writer: W,
     server_writer: W,
 ) -> Result<()> {
-    tracing::info!("Server proxy starting with session key:{}", key.as_ref());
+    tracing::info!(host = %host.as_ref(), "server encrypted proxy starting");
     start_proxy(
         host,
         get_decryptor_codec(key, client_reader)?,

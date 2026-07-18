@@ -374,13 +374,13 @@ pub static DEFAULT_KEY: Lazy<(Vec<u8>, u32)> = Lazy::new(|| {
         Ok(k) => {
             let key = k.as_bytes();
             if key.len() != 32 {
-                tracing::warn!("`SECRET_KEY` must have 256 bit(32 byte)!. current input key:{k}");
+                tracing::warn!(current_length = key.len(), "`SECRET_KEY` must be 32 bytes");
                 std::process::exit(1);
             }
             key.to_vec()
         }
         Err(_) => {
-            tracing::warn!("No ENV:`SECRET_KEY` provided,we use default key:{default_key}");
+            tracing::warn!("No `SECRET_KEY` provided; using the built-in default");
             default_key.as_bytes().to_vec()
         }
     };
