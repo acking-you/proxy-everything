@@ -56,6 +56,8 @@ mod udp;
 use std::borrow::Cow;
 use std::fmt::{Debug, Display};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(feature = "auto-proxy")]
 use auto_proxy::{SenderChan, run_auto_proxy_by_country};
@@ -175,6 +177,11 @@ pub struct ClientRuntimeConfig {
     pub upstream_proxy: Option<ExternalProxyTarget>,
     /// Optional device-wide TUN capture routed through the local SOCKS5 listener.
     pub tun: Option<tun::TunConfig>,
+    /// Runtime override used when an independently managed TUN session is
+    /// enabled after the local listener has started. While set, every accepted
+    /// connection uses the remote proxy so client-owned direct sockets cannot
+    /// be captured and fed back into the listener.
+    pub force_proxy: Option<Arc<AtomicBool>>,
 }
 
 impl From<ClientConfig> for ClientRuntimeConfig {
@@ -183,6 +190,7 @@ impl From<ClientConfig> for ClientRuntimeConfig {
             client,
             upstream_proxy: None,
             tun: None,
+            force_proxy: None,
         }
     }
 }
@@ -722,8 +730,12 @@ pub async fn run_client_with_listener_runtime_config<const NEED_CODEC: bool>(
         .unwrap_or(true);
     let upstream_proxy = config.as_ref().and_then(|c| c.upstream_proxy.clone());
     let tun_config = config.as_ref().and_then(|c| c.tun.clone());
+    let force_proxy_controller = config.as_ref().and_then(|c| c.force_proxy.clone());
     let enable_udp = config.as_ref().map(|c| c.client.enable_udp).unwrap_or(true);
-    let enable_auto_proxy = enable_auto_proxy && upstream_proxy.is_none();
+    // An integrated TUN must never create direct sockets from this process.
+    // Independent FFI-managed TUN mode applies the same invariant dynamically
+    // through `force_proxy_controller` below.
+    let enable_auto_proxy = enable_auto_proxy && upstream_proxy.is_none() && tun_config.is_none();
     let force_proxy = !enable_auto_proxy;
     let cache_dir = config.as_ref().and_then(|c| c.client.cache_dir.clone());
     let upstream_proxy_display = upstream_proxy.as_ref().map(|proxy| proxy.display_url());
@@ -732,6 +744,7 @@ pub async fn run_client_with_listener_runtime_config<const NEED_CODEC: bool>(
         enable_auto_proxy,
         enable_udp,
         force_proxy,
+        dynamic_force_proxy = force_proxy_controller.is_some(),
         tun_enabled = tun_config.is_some(),
         upstream_proxy = ?upstream_proxy_display,
         "client listener configured"
@@ -798,7 +811,18 @@ pub async fn run_client_with_listener_runtime_config<const NEED_CODEC: bool>(
                 };
                 let token = cancel_token.clone();
                 #[cfg(feature = "auto-proxy")]
-                let sender = sender.clone();
+                let sender = if force_proxy_controller
+                    .as_ref()
+                    .is_some_and(|controller| controller.load(Ordering::Acquire))
+                {
+                    None
+                } else {
+                    sender.clone()
+                };
+                let force_proxy = force_proxy
+                    || force_proxy_controller
+                        .as_ref()
+                        .is_some_and(|controller| controller.load(Ordering::Acquire));
                 let task = client_proxy_background_task::<NEED_CODEC>(ClientProxyContext {
                     stream,
                     msg_key: if NEED_CODEC { Some(gen_random_key()) } else { None },
@@ -908,6 +932,7 @@ mod tests {
                 },
                 upstream_proxy: Some(upstream_proxy),
                 tun: None,
+                force_proxy: None,
             }),
         ));
         (addr, token)

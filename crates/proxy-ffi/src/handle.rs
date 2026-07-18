@@ -3,13 +3,13 @@
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::path::PathBuf;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 use proxy_client::cli_config::SystemProxyGuard;
 use proxy_client::client::tun::{
-    TunBypassController, TunConfig, current_process_name, running_process_names,
+    TunBypassController, TunConfig, current_process_name, run_with_ready, running_process_names,
 };
 use proxy_client::client::{
     ClientConfig, ClientRuntimeConfig, run_client_with_listener_runtime_config,
@@ -30,8 +30,19 @@ pub struct ProxyHandle {
     pub(crate) local_port: u16,
     pub(crate) http_client: Mutex<Option<reqwest::Client>>,
     tun_bypass: Arc<Mutex<Option<TunBypassController>>>,
+    tun_lifecycle: Mutex<TunLifecycle>,
+    tun_running: Arc<AtomicBool>,
+    tun_generation: Arc<AtomicU64>,
+    force_proxy: Arc<AtomicBool>,
+    remote_endpoint: Mutex<Option<(String, u16)>>,
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     system_proxy_guard: Arc<Mutex<Option<SystemProxyGuard>>>,
+}
+
+#[derive(Default)]
+struct TunLifecycle {
+    cancel_token: Option<CancellationToken>,
+    stopped: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 /// Create a new proxy handle.
@@ -56,6 +67,11 @@ pub extern "C" fn proxy_create() -> *mut ProxyHandle {
         local_port: 0,
         http_client: Mutex::new(None),
         tun_bypass: Arc::new(Mutex::new(None)),
+        tun_lifecycle: Mutex::new(TunLifecycle::default()),
+        tun_running: Arc::new(AtomicBool::new(false)),
+        tun_generation: Arc::new(AtomicU64::new(0)),
+        force_proxy: Arc::new(AtomicBool::new(false)),
+        remote_endpoint: Mutex::new(None),
         #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
         system_proxy_guard: Arc::new(Mutex::new(None)),
     }))
@@ -262,7 +278,7 @@ fn proxy_start_inner(
 
     let tun_config = if enable_tun {
         match TunConfig::new(tun_bypass_processes) {
-            Ok(config) => Some(config),
+            Ok(config) => Some(config.with_remote_endpoint(server_host.clone(), server_port)),
             Err(error) => {
                 send_log(
                     4,
@@ -284,6 +300,7 @@ fn proxy_start_inner(
         },
         upstream_proxy: None,
         tun: tun_config.clone(),
+        force_proxy: Some(Arc::clone(&handle.force_proxy)),
     };
 
     // Bind listener synchronously before reporting start success.
@@ -323,11 +340,24 @@ fn proxy_start_inner(
     let _ = set_system_proxy;
 
     let cancel_token = CancellationToken::new();
+    if let Ok(mut lifecycle) = handle.tun_lifecycle.lock() {
+        if let Some(token) = lifecycle.cancel_token.take() {
+            token.cancel();
+        }
+        lifecycle.stopped = None;
+    }
     handle.cancel_token = Some(cancel_token.clone());
     handle.running.store(true, Ordering::SeqCst);
     handle.local_port = local_port;
+    if let Ok(mut endpoint) = handle.remote_endpoint.lock() {
+        *endpoint = Some((server_host.clone(), server_port));
+    }
+    handle.force_proxy.store(enable_tun, Ordering::Release);
+    handle.tun_running.store(enable_tun, Ordering::Release);
     let running_flag = Arc::clone(&handle.running);
     let tun_bypass_cleanup = Arc::clone(&handle.tun_bypass);
+    let tun_running_cleanup = Arc::clone(&handle.tun_running);
+    let force_proxy_cleanup = Arc::clone(&handle.force_proxy);
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     let system_proxy_cleanup = Arc::clone(&handle.system_proxy_guard);
     if let Ok(mut http_client) = handle.http_client.lock() {
@@ -373,6 +403,8 @@ fn proxy_start_inner(
         if let Ok(mut tun_bypass) = tun_bypass_cleanup.lock() {
             *tun_bypass = None;
         }
+        tun_running_cleanup.store(false, Ordering::Release);
+        force_proxy_cleanup.store(false, Ordering::Release);
         #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
         if let Ok(mut guard) = system_proxy_cleanup.lock() {
             *guard = None;
@@ -382,6 +414,293 @@ fn proxy_start_inner(
     });
 
     ProxyResult::Ok
+}
+
+/// Start TUN capture after the local HTTP/SOCKS5 listener is confirmed active.
+///
+/// Captured packets are always forwarded to `socks5://127.0.0.1:<local_port>`.
+/// The remote proxy endpoint is installed as an explicit route bypass, the
+/// current executable remains in the process bypass list, and auto-proxy direct
+/// connections are suppressed while TUN is active. Together these invariants
+/// prevent client-owned outbound connections from returning to the local
+/// listener.
+///
+/// # Safety
+/// - `handle` must be a valid pointer from `proxy_create`
+/// - `processes` must be null or a valid UTF-8 JSON string array
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_start_tun(
+    handle: *mut ProxyHandle,
+    processes: *const c_char,
+) -> ProxyResult {
+    if handle.is_null() {
+        return ProxyResult::InvalidParam;
+    }
+    let processes = match parse_process_names(processes) {
+        Ok(names) => names,
+        Err(result) => return result,
+    };
+    let handle = unsafe { &*handle };
+    if !handle.running.load(Ordering::Acquire) || handle.local_port == 0 {
+        send_log(4, "Start the local proxy listener before enabling TUN mode");
+        return ProxyResult::NotRunning;
+    }
+    if handle.tun_running.load(Ordering::Acquire) {
+        return ProxyResult::AlreadyRunning;
+    }
+
+    #[cfg(target_os = "windows")]
+    match proxy_client::client::tun::is_elevated() {
+        Ok(true) => {}
+        Ok(false) => {
+            send_log(
+                4,
+                "TUN mode requires administrator privileges; request UAC elevation first",
+            );
+            return ProxyResult::RuntimeError;
+        }
+        Err(error) => {
+            send_log(
+                4,
+                &format!("Failed to inspect Windows elevation state: {error}"),
+            );
+            return ProxyResult::RuntimeError;
+        }
+    }
+
+    let endpoint = match handle.remote_endpoint.lock() {
+        Ok(endpoint) => endpoint.clone(),
+        Err(_) => return ProxyResult::RuntimeError,
+    };
+    let Some((remote_host, remote_port)) = endpoint else {
+        send_log(
+            4,
+            "Remote proxy endpoint is unavailable for mandatory TUN route bypass",
+        );
+        return ProxyResult::RuntimeError;
+    };
+    let config = match TunConfig::new(processes) {
+        Ok(config) => config.with_remote_endpoint(remote_host.clone(), remote_port),
+        Err(error) => {
+            send_log(
+                4,
+                &format!("Failed to initialize TUN process bypass: {error}"),
+            );
+            return ProxyResult::RuntimeError;
+        }
+    };
+
+    let (previous, stopped) = match handle.tun_lifecycle.lock() {
+        Ok(mut lifecycle) => (lifecycle.cancel_token.take(), lifecycle.stopped.take()),
+        Err(_) => return ProxyResult::RuntimeError,
+    };
+    if let Some(previous) = previous {
+        previous.cancel();
+    }
+    if let Some(stopped) = stopped {
+        let _ = handle.runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), stopped).await
+        });
+    }
+    let Some(proxy_token) = handle.cancel_token.as_ref() else {
+        handle.force_proxy.store(false, Ordering::Release);
+        return ProxyResult::NotRunning;
+    };
+    // TUN may be stopped independently, but it must never outlive the local
+    // listener it forwards into. Cancelling the proxy parent token therefore
+    // always cancels this child as well.
+    let shutdown_token = proxy_token.child_token();
+    if let Ok(mut lifecycle) = handle.tun_lifecycle.lock() {
+        lifecycle.cancel_token = Some(shutdown_token.clone());
+    } else {
+        return ProxyResult::RuntimeError;
+    }
+    handle.force_proxy.store(true, Ordering::Release);
+    if let Ok(mut bypass) = handle.tun_bypass.lock() {
+        *bypass = Some(config.bypass.clone());
+    } else {
+        handle.force_proxy.store(false, Ordering::Release);
+        if let Ok(mut lifecycle) = handle.tun_lifecycle.lock() {
+            lifecycle.cancel_token = None;
+        }
+        return ProxyResult::RuntimeError;
+    }
+
+    let local_port = handle.local_port;
+    let generation = handle.tun_generation.fetch_add(1, Ordering::AcqRel) + 1;
+    let generation_state = Arc::clone(&handle.tun_generation);
+    let running = Arc::clone(&handle.tun_running);
+    let force_proxy = Arc::clone(&handle.force_proxy);
+    let bypass_cleanup = Arc::clone(&handle.tun_bypass);
+    let (setup_sender, setup_receiver) = tokio::sync::oneshot::channel();
+    let (caller_sender, caller_receiver) = tokio::sync::oneshot::channel();
+    let (stopped_sender, stopped_receiver) = tokio::sync::oneshot::channel();
+    if let Ok(mut lifecycle) = handle.tun_lifecycle.lock() {
+        lifecycle.stopped = Some(stopped_receiver);
+    } else {
+        shutdown_token.cancel();
+        handle.force_proxy.store(false, Ordering::Release);
+        if let Ok(mut bypass) = handle.tun_bypass.lock() {
+            *bypass = None;
+        }
+        return ProxyResult::RuntimeError;
+    }
+    handle.runtime.spawn(async move {
+        let ready_running = Arc::clone(&running);
+        let ready_generation = Arc::clone(&generation_state);
+        let readiness_task = tokio::spawn(async move {
+            let readiness = setup_receiver.await.unwrap_or_else(|_| {
+                Err("TUN setup task ended without reporting readiness".to_string())
+            });
+            if readiness.is_ok() && ready_generation.load(Ordering::Acquire) == generation {
+                ready_running.store(true, Ordering::Release);
+            }
+            let _ = caller_sender.send(readiness);
+        });
+
+        let result = run_with_ready(local_port, config, shutdown_token, Some(setup_sender)).await;
+        let _ = readiness_task.await;
+        // A stop followed immediately by a new start can leave the old async
+        // task finishing after the replacement has begun. Only the current
+        // generation may clear shared state for loop prevention.
+        if generation_state.load(Ordering::Acquire) == generation {
+            running.store(false, Ordering::Release);
+            force_proxy.store(false, Ordering::Release);
+            if let Ok(mut bypass) = bypass_cleanup.lock() {
+                *bypass = None;
+            }
+        }
+        match result {
+            Ok(sessions) => {
+                tracing::info!(remaining_sessions = sessions, "TUN traffic capture stopped")
+            }
+            Err(error) => tracing::error!(%error, "TUN traffic capture failed"),
+        }
+        let _ = stopped_sender.send(());
+    });
+
+    let readiness = handle.runtime.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(20), caller_receiver).await
+    });
+    match readiness {
+        Ok(Ok(Ok(()))) => {
+            send_log(
+                2,
+                &format!(
+                    "TUN ready: device traffic -> socks5://127.0.0.1:{local_port}; remote \
+                     endpoint {remote_host}:{remote_port} bypasses TUN"
+                ),
+            );
+            ProxyResult::Ok
+        }
+        Ok(Ok(Err(error))) => fail_tun_start(handle, &error),
+        Ok(Err(_)) => fail_tun_start(handle, "TUN readiness channel closed unexpectedly"),
+        Err(_) => fail_tun_start(handle, "Timed out waiting for TUN adapter and route setup"),
+    }
+}
+
+fn fail_tun_start(handle: &ProxyHandle, error: &str) -> ProxyResult {
+    handle.tun_generation.fetch_add(1, Ordering::AcqRel);
+    if let Ok(mut lifecycle) = handle.tun_lifecycle.lock()
+        && let Some(token) = lifecycle.cancel_token.take()
+    {
+        token.cancel();
+    }
+    handle.tun_running.store(false, Ordering::Release);
+    handle.force_proxy.store(false, Ordering::Release);
+    if let Ok(mut bypass) = handle.tun_bypass.lock() {
+        *bypass = None;
+    }
+    send_log(4, &format!("Failed to start TUN mode: {error}"));
+    ProxyResult::RuntimeError
+}
+
+/// Stop only TUN capture while keeping the local HTTP/SOCKS5 listener active.
+///
+/// # Safety
+/// `handle` must be a valid pointer from `proxy_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_stop_tun(handle: *mut ProxyHandle) -> ProxyResult {
+    if handle.is_null() {
+        return ProxyResult::InvalidParam;
+    }
+    let handle = unsafe { &*handle };
+    let (token, stopped) = match handle.tun_lifecycle.lock() {
+        Ok(mut lifecycle) => (lifecycle.cancel_token.take(), lifecycle.stopped.take()),
+        Err(_) => return ProxyResult::RuntimeError,
+    };
+    let Some(token) = token else {
+        return ProxyResult::NotRunning;
+    };
+    handle.tun_generation.fetch_add(1, Ordering::AcqRel);
+    token.cancel();
+    handle.tun_running.store(false, Ordering::Release);
+    handle.force_proxy.store(false, Ordering::Release);
+    if let Ok(mut bypass) = handle.tun_bypass.lock() {
+        *bypass = None;
+    }
+    if let Some(stopped) = stopped
+        && handle
+            .runtime
+            .block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(5), stopped).await
+            })
+            .is_err()
+    {
+        send_log(3, "Timed out waiting for TUN route cleanup to finish");
+        return ProxyResult::RuntimeError;
+    }
+    send_log(2, "TUN stop requested; local proxy listener remains active");
+    ProxyResult::Ok
+}
+
+/// Check whether TUN adapter and route setup has completed successfully.
+///
+/// # Safety
+/// `handle` must be a valid pointer from `proxy_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_is_tun_running(handle: *const ProxyHandle) -> c_int {
+    if handle.is_null() {
+        return 0;
+    }
+    let handle = unsafe { &*handle };
+    i32::from(handle.tun_running.load(Ordering::Acquire))
+}
+
+/// Return whether the current process can change Windows TUN routes without a
+/// UAC relaunch. Non-Windows platforms return true because their elevation
+/// mechanism is not managed by the Flutter Windows client.
+#[unsafe(no_mangle)]
+pub extern "C" fn proxy_is_elevated() -> c_int {
+    #[cfg(target_os = "windows")]
+    {
+        proxy_client::client::tun::is_elevated().map_or(-1, i32::from)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        1
+    }
+}
+
+/// Relaunch the current Windows GUI with `--enable-tun` through ShellExecute's
+/// `runas` verb. The new process is a GUI process, so no terminal window is
+/// created. The caller remains alive when UAC is cancelled.
+#[unsafe(no_mangle)]
+pub extern "C" fn proxy_relaunch_elevated_for_tun() -> ProxyResult {
+    #[cfg(target_os = "windows")]
+    {
+        match proxy_client::client::tun::relaunch_elevated_for_tun() {
+            Ok(()) => ProxyResult::Ok,
+            Err(error) => {
+                send_log(4, &format!("Failed to request TUN elevation: {error}"));
+                ProxyResult::RuntimeError
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        ProxyResult::InvalidParam
+    }
 }
 
 /// Stop the proxy.
@@ -397,12 +716,33 @@ pub unsafe extern "C" fn proxy_stop(handle: *mut ProxyHandle) -> ProxyResult {
     let handle = unsafe { &mut *handle };
 
     if !handle.running.load(Ordering::SeqCst) {
+        if let Ok(mut lifecycle) = handle.tun_lifecycle.lock() {
+            if let Some(tun_token) = lifecycle.cancel_token.take() {
+                tun_token.cancel();
+            }
+            lifecycle.stopped = None;
+        }
+        handle.tun_generation.fetch_add(1, Ordering::AcqRel);
+        handle.tun_running.store(false, Ordering::Release);
+        handle.force_proxy.store(false, Ordering::Release);
         return ProxyResult::NotRunning;
     }
 
     if let Some(token) = handle.cancel_token.take() {
+        if let Ok(mut lifecycle) = handle.tun_lifecycle.lock() {
+            if let Some(tun_token) = lifecycle.cancel_token.take() {
+                tun_token.cancel();
+            }
+            lifecycle.stopped = None;
+        }
+        handle.tun_generation.fetch_add(1, Ordering::AcqRel);
         token.cancel();
         handle.running.store(false, Ordering::SeqCst);
+        handle.tun_running.store(false, Ordering::Release);
+        handle.force_proxy.store(false, Ordering::Release);
+        if let Ok(mut endpoint) = handle.remote_endpoint.lock() {
+            *endpoint = None;
+        }
         if let Ok(mut http_client) = handle.http_client.lock() {
             *http_client = None;
         }
@@ -499,6 +839,11 @@ pub extern "C" fn proxy_get_tun_self_process() -> *mut c_char {
 pub unsafe extern "C" fn proxy_destroy(handle: *mut ProxyHandle) {
     if !handle.is_null() {
         let handle = unsafe { Box::from_raw(handle) };
+        if let Ok(lifecycle) = handle.tun_lifecycle.lock()
+            && let Some(token) = &lifecycle.cancel_token
+        {
+            token.cancel();
+        }
         if let Some(token) = &handle.cancel_token {
             token.cancel();
         }
@@ -542,5 +887,18 @@ mod tests {
             parse_process_names(json.as_ptr()).unwrap(),
             vec!["name,with,commas.exe".to_string(), "browser".to_string()]
         );
+    }
+
+    #[test]
+    fn tun_cannot_start_before_local_listener() {
+        let handle = proxy_create();
+        assert!(!handle.is_null());
+        assert_eq!(
+            unsafe { proxy_start_tun(handle, ptr::null()) },
+            ProxyResult::NotRunning
+        );
+        assert_eq!(unsafe { proxy_is_tun_running(handle) }, 0);
+        assert_eq!(unsafe { proxy_stop_tun(handle) }, ProxyResult::NotRunning);
+        unsafe { proxy_destroy(handle) };
     }
 }

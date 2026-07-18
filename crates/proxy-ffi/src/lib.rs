@@ -39,9 +39,10 @@ pub(crate) fn init_allocator() {
 // Re-export all public FFI functions and types
 pub use groups::{proxy_free_groups_result, proxy_get_server_groups};
 pub use handle::{
-    ProxyHandle, proxy_create, proxy_destroy, proxy_get_tun_self_process, proxy_is_running,
-    proxy_list_tun_processes, proxy_set_tun_bypass_processes, proxy_start, proxy_start_v2,
-    proxy_start_v3, proxy_stop,
+    ProxyHandle, proxy_create, proxy_destroy, proxy_get_tun_self_process, proxy_is_elevated,
+    proxy_is_running, proxy_is_tun_running, proxy_list_tun_processes,
+    proxy_relaunch_elevated_for_tun, proxy_set_tun_bypass_processes, proxy_start, proxy_start_tun,
+    proxy_start_v2, proxy_start_v3, proxy_stop, proxy_stop_tun,
 };
 pub use latency::{proxy_free_latency_result, proxy_test_latency};
 pub use logging::{proxy_free_string, proxy_init_logging, proxy_set_log_callback};

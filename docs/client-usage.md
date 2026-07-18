@@ -77,6 +77,13 @@ Application TCP/UDP -> Wintun -> tun2proxy -> 127.0.0.1:<client-port>
                     -> proxy-everything client -> remote server -> destination
 ```
 
+The local port is a protocol-multiplexed HTTP/SOCKS5 listener, but tun2proxy
+deliberately uses its SOCKS5 endpoint because SOCKS5 preserves both TCP and UDP
+semantics. A successful local listener bind is therefore a prerequisite for
+starting TUN. TUN mode uses virtual DNS so resolver traffic is answered inside
+the tunnel and the original domain is forwarded to the proxy instead of adding
+a direct DNS route.
+
 On Windows, keep `wintun.dll` in the same directory as
 `http-proxy-cli.exe` or `proxy_ui.exe`. The supported build and staging scripts
 place it there automatically.
@@ -113,10 +120,13 @@ the decision made when they were created.
 
 ### Flutter UI
 
-Enable **TUN Mode** in Proxy Configuration. **TUN Bypass** opens the Windows
-process picker both before startup and while the proxy is connected. Applying
-the selection during a connection updates native routing immediately for new
-sessions and does not recreate the TUN adapter.
+Start the local proxy from the primary Proxy page, then enable the top-level
+**TUN Mode** switch. The switch is disabled until `127.0.0.1:<client-port>` is
+listening, remains busy until Wintun and route setup report ready, and stays off
+when native setup fails. **TUN Bypass** opens the Windows process picker both
+before startup and while the proxy is connected. Applying the selection during
+a connection updates native routing immediately for new sessions and does not
+recreate the TUN adapter.
 
 The current UI executable appears as a required, disabled selection. This is
 not only a presentation rule: Rust always appends the current executable after
@@ -128,8 +138,10 @@ an FFI caller cannot remove it.
 Creating Wintun and changing default routes require administrator privileges.
 The Windows CLI requests UAC elevation and reconnects the elevated child to the
 original console instead of opening a new terminal. The Windows Flutter runner
-uses `requireAdministrator`, so Windows shows UAC when the application starts,
-including launches where TUN mode remains disabled.
+uses `asInvoker`, so HTTP/SOCKS5-only operation never prompts. Enabling TUN
+launches an elevated replacement of the same GUI with `ShellExecute runas`; no
+terminal is created. The original process releases the local port and the new
+process retries the listener handoff before it creates Wintun.
 
 Normal cancellation restores the routes through the TUN setup guard. A hard
 process termination or machine crash can prevent graceful cleanup; restarting
@@ -138,11 +150,18 @@ restores the expected state.
 
 ### Loop-prevention invariant
 
-The proxy client's own process always bypasses TUN and egresses through the
-physical default interface. This rule is mandatory and cannot be overridden by
-CLI, TOML, Flutter, or FFI input. Without it, the client's connection to the
-remote proxy would be captured by Wintun, forwarded to its local SOCKS5 port,
-and repeated indefinitely.
+Loop prevention does not depend on one best-effort process lookup. Before the
+catch-all route is installed, the client resolves its remote proxy endpoint and
+adds each address as a physical route bypass. While TUN is active, it also
+suppresses auto-proxy direct connections so every client-owned outbound session
+uses that protected endpoint. Finally, the current executable is always kept in
+the runtime process-bypass policy and cannot be removed through CLI, TOML,
+Flutter, or FFI input. Without these protections, the remote connection would
+be captured by Wintun, returned to the local SOCKS5 listener, and repeated.
+
+The Auto Proxy preference is retained, but its direct-routing branch is paused
+while TUN is active and resumes after TUN is disabled. This guarantees that
+"all traffic through TUN" does not create client-owned direct-socket loops.
 
 Other bypassed processes connect directly to their original destinations and
 therefore do not use the proxy. Do not add an application to the bypass list if

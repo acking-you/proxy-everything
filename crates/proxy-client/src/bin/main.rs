@@ -451,8 +451,17 @@ async fn main() -> Result<()> {
         None
     };
 
+    let tun_endpoint = upstream_proxy
+        .as_ref()
+        .map(|proxy| (proxy.host.clone(), proxy.port))
+        .or_else(|| server_host.clone().map(|host| (host, server_port)));
     let tun = enable_tun
-        .then(|| TunConfig::new(tun_bypass_processes))
+        .then(|| {
+            TunConfig::new(tun_bypass_processes).map(|config| match tun_endpoint {
+                Some((host, port)) => config.with_remote_endpoint(host, port),
+                None => config,
+            })
+        })
         .transpose()
         .context("Failed to prepare mandatory TUN process bypass")?;
     let client_config = ClientRuntimeConfig {
@@ -463,6 +472,7 @@ async fn main() -> Result<()> {
         },
         upstream_proxy: upstream_proxy.clone(),
         tun,
+        force_proxy: None,
     };
     let listen_host = if upstream_mode {
         "127.0.0.1"

@@ -1,13 +1,16 @@
 //! TUN-mode integration backed by `tun2proxy`.
 //!
-//! The local proxy and TUN stack run in the same process. Consequently the
-//! current executable must always bypass TUN interception: its outbound
-//! connection to the remote proxy would otherwise be captured and fed back to
-//! the local SOCKS5 listener indefinitely.
+//! TUN packets are forwarded to the client's already-bound SOCKS5 listener on
+//! `127.0.0.1`. The current executable is always process-bypassed, and every
+//! resolved remote proxy address receives an explicit physical route before
+//! the catch-all TUN routes are installed. Both protections are required: a
+//! best-effort socket-to-process lookup alone is not a sufficient loop barrier.
 
 #[cfg(target_os = "windows")]
 use std::collections::BTreeSet;
+use std::collections::BTreeSet as IpSet;
 use std::io;
+use std::net::IpAddr;
 
 use tokio_util::sync::CancellationToken;
 use tun2proxy::{ArgDns, ArgProxy, Args, ProcessBypass};
@@ -105,6 +108,8 @@ pub struct TunConfig {
     pub bypass: TunBypassController,
     pub ipv6_enabled: bool,
     pub mtu: u16,
+    /// Remote proxy endpoint whose resolved addresses must never enter TUN.
+    pub remote_endpoint: Option<(String, u16)>,
 }
 
 impl TunConfig {
@@ -113,7 +118,17 @@ impl TunConfig {
             bypass: TunBypassController::new(user_processes)?,
             ipv6_enabled: false,
             mtu: tun2proxy::DEFAULT_MTU,
+            remote_endpoint: None,
         })
+    }
+
+    /// Add the proxy-everything server endpoint as a route-level bypass.
+    ///
+    /// The local SOCKS5 listener opens its own connection to this endpoint. If
+    /// that connection is captured, it returns to the same listener and loops.
+    pub fn with_remote_endpoint(mut self, host: impl Into<String>, port: u16) -> Self {
+        self.remote_endpoint = Some((host.into(), port));
+        self
     }
 }
 
@@ -165,41 +180,117 @@ pub fn running_process_names() -> Vec<String> {
     Vec::new()
 }
 
+/// Whether the current Windows process has the administrator token required
+/// to create the adapter and change system routes.
+#[cfg(target_os = "windows")]
+pub fn is_elevated() -> io::Result<bool> {
+    tun2proxy::windows_elevation::is_elevated()
+}
+
+/// Relaunch the current Windows GUI through UAC for a TUN handoff.
+#[cfg(target_os = "windows")]
+pub fn relaunch_elevated_for_tun() -> io::Result<()> {
+    tun2proxy::windows_elevation::relaunch_gui_elevated(["--enable-tun".into()])
+}
+
 /// Start the TUN device and route it to the already-bound local SOCKS5 port.
 pub async fn run(
     local_port: u16,
     config: TunConfig,
     shutdown_token: CancellationToken,
 ) -> io::Result<usize> {
+    run_with_ready(local_port, config, shutdown_token, None).await
+}
+
+/// Start TUN capture and optionally report when adapter and route setup is
+/// complete. The readiness signal is used by FFI/UI callers to avoid showing a
+/// successful state while Windows setup is still pending or has already failed.
+pub async fn run_with_ready(
+    local_port: u16,
+    config: TunConfig,
+    shutdown_token: CancellationToken,
+    ready: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+) -> io::Result<usize> {
     install_tun_log_bridge();
     let proxy = ArgProxy::try_from(format!("socks5://127.0.0.1:{local_port}").as_str())
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
-    let args = Args {
+    let mut args = Args {
         proxy,
         setup: true,
-        dns: ArgDns::Direct,
+        // Fake-IP DNS keeps resolver traffic inside the TUN path and preserves
+        // the queried domain for the local SOCKS5 listener. `Direct` would add
+        // the resolver as another physical-route exception, contradicting the
+        // all-traffic guarantee and leaking DNS outside the proxy.
+        dns: ArgDns::Virtual,
         ipv6_enabled: config.ipv6_enabled,
         mtu: config.mtu,
         bypass_process: config.bypass.effective_processes(),
         ..Args::default()
     };
 
+    let route_bypass = resolve_remote_addresses(config.remote_endpoint.as_ref()).await?;
+    for address in &route_bypass {
+        args.bypass.push(
+            address
+                .to_string()
+                .parse()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?,
+        );
+    }
+
     tracing::info!(
         local_port,
+        tun_proxy = %format_args!("socks5://127.0.0.1:{local_port}"),
         mtu = config.mtu,
         ipv6_enabled = config.ipv6_enabled,
+        route_bypass = ?route_bypass,
         bypass_processes = ?args.bypass_process,
-        "starting TUN traffic capture"
+        "starting TUN traffic capture with mandatory loop prevention"
     );
 
-    tun2proxy::general_run_async_with_process_bypass(
-        args,
-        config.mtu,
-        cfg!(target_os = "macos"),
-        shutdown_token,
-        config.bypass.process_bypass(),
-    )
-    .await
+    match ready {
+        Some(ready) => {
+            tun2proxy::general_run_async_with_process_bypass_and_ready(
+                args,
+                config.mtu,
+                cfg!(target_os = "macos"),
+                shutdown_token,
+                config.bypass.process_bypass(),
+                ready,
+            )
+            .await
+        }
+        None => {
+            tun2proxy::general_run_async_with_process_bypass(
+                args,
+                config.mtu,
+                cfg!(target_os = "macos"),
+                shutdown_token,
+                config.bypass.process_bypass(),
+            )
+            .await
+        }
+    }
+}
+
+async fn resolve_remote_addresses(endpoint: Option<&(String, u16)>) -> io::Result<Vec<IpAddr>> {
+    let Some((host, port)) = endpoint else {
+        return Ok(Vec::new());
+    };
+    let addresses = tokio::net::lookup_host((host.as_str(), *port))
+        .await?
+        .map(|address| address.ip())
+        .filter(|address| !address.is_loopback() && !address.is_unspecified())
+        .collect::<IpSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if addresses.is_empty() && host.parse::<IpAddr>().is_err() {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            format!("remote proxy endpoint {host}:{port} resolved to no routable address"),
+        ));
+    }
+    Ok(addresses)
 }
 
 #[cfg(test)]
@@ -217,5 +308,13 @@ mod tests {
         assert!(updated.contains(&current));
         assert!(updated.contains(&"curl".to_string()));
         assert!(!updated.contains(&"browser".to_string()));
+    }
+
+    #[tokio::test]
+    async fn remote_proxy_ip_becomes_a_route_bypass() {
+        let addresses = resolve_remote_addresses(Some(&("203.0.113.10".to_string(), 1081)))
+            .await
+            .unwrap();
+        assert_eq!(addresses, vec!["203.0.113.10".parse::<IpAddr>().unwrap()]);
     }
 }
