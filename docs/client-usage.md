@@ -45,7 +45,9 @@ Application -- SOCKS5 UDP --> http-proxy-cli
 Operational details:
 
 - Client and server must both contain UDP-association support. Older servers
-  cannot interpret the new `udp_associate` transport header.
+  cannot interpret the new `udp_associate` transport header. If the remote end
+  closes before the readiness byte, the client now reports this as a likely
+  server-version mismatch instead of the unhelpful `unexpected end of file`.
 - UDP always uses the configured remote proxy server. TCP keyword/GeoIP split
   routing is not applied per UDP datagram.
 - `--msg-key` enables AES-256-GCM authentication and encryption per UDP frame.
@@ -115,18 +117,23 @@ tun_bypass_processes = ["browser.exe", "downloader"]
 ```
 
 Executable matching is case-insensitive and a trailing `.exe` is optional.
-User-selected bypasses apply to new TCP or UDP sessions. Existing sessions keep
-the decision made when they were created.
+User-selected bypasses apply to new TCP or UDP sessions. When a live policy
+change affects an established session, tun2proxy closes that relay so the
+application reconnects through the new route. The TUN adapter and system routes
+remain in place.
 
 ### Flutter UI
 
 Start the local proxy from the primary Proxy page, then enable the top-level
 **TUN Mode** switch. The switch is disabled until `127.0.0.1:<client-port>` is
 listening, remains busy until Wintun and route setup report ready, and stays off
-when native setup fails. **TUN Bypass** opens the Windows process picker both
-before startup and while the proxy is connected. Applying the selection during
-a connection updates native routing immediately for new sessions and does not
-recreate the TUN adapter.
+when native setup fails. Setup errors include the failing stage, the underlying
+Windows detail, and any tunnel/VPN adapters that were already active. **TUN
+Bypass** opens a Task Manager-style Windows picker with executable names, live
+PIDs, instance counts, and paths. It is available before startup and while the
+proxy is connected. Applying a selection updates native routing immediately,
+reconnects affected established sessions, and does not recreate the TUN
+adapter.
 
 The current UI executable appears as a required, disabled selection. This is
 not only a presentation rule: Rust always appends the current executable after
@@ -147,6 +154,13 @@ Normal cancellation restores the routes through the TUN setup guard. A hard
 process termination or machine crash can prevent graceful cleanup; restarting
 the application and stopping TUN normally, or resetting the affected routes,
 restores the expected state.
+
+Only one application should own the fixed proxy-everything Wintun adapter and
+its catch-all route. If another VPN/TUN application or another proxy-everything
+instance is already active, startup stops before changing routes and names the
+detected adapter. Stop it before retrying TUN mode. The GUI error is the
+authoritative setup result; a generic numeric `RuntimeError` is retained only
+for native ABI compatibility.
 
 ### Loop-prevention invariant
 
@@ -171,6 +185,11 @@ TUN TCP continues to work with `--udp false`; captured UDP is rejected by the
 local SOCKS5 listener in that configuration. Leave UDP enabled for complete
 device TCP and UDP forwarding. HTTP upstream proxies cannot relay UDP, while a
 SOCKS5 upstream must implement UDP ASSOCIATE.
+
+When UDP is enabled, TUN startup performs an end-to-end SOCKS5 UDP ASSOCIATE
+preflight before creating Wintun or changing routes. This catches an old remote
+server, blocked UDP relay, or incompatible upstream immediately. Disable UDP
+explicitly only when TCP-only TUN operation is intentional.
 
 ---
 

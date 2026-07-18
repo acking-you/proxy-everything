@@ -126,23 +126,56 @@ impl UdpAssociation {
             )
             .await
             .context(ExternalProxySnafu)?;
-            let ready = tokio::time::timeout(UDP_ASSOCIATION_SETUP_TIMEOUT, stream.read_u8())
+            let ready = match tokio::time::timeout(UDP_ASSOCIATION_SETUP_TIMEOUT, stream.read_u8())
                 .await
-                .map_err(|_| super::ClientError::Datagram {
-                    source: ProxyError::Protocol {
-                        detail: "timed out waiting for remote UDP association readiness"
-                            .to_string(),
-                    },
-                })?
-                .map_err(|source| super::ClientError::Io {
-                    uri: None,
-                    detail: "wait for remote UDP association readiness",
-                    source,
-                })?;
+            {
+                Err(_) => {
+                    return Err(super::ClientError::Datagram {
+                        source: ProxyError::Protocol {
+                            detail: format!(
+                                "remote proxy server {server_host}:{} timed out before confirming \
+                                 UDP support; verify that the server is current and allows UDP \
+                                 egress",
+                                runtime::server_port()
+                            ),
+                        },
+                    });
+                }
+                Ok(Err(source)) if is_expected_disconnect(&source) => {
+                    return Err(super::ClientError::Datagram {
+                        source: ProxyError::Protocol {
+                            detail: format!(
+                                "remote proxy server {server_host}:{} closed the UDP association \
+                                 before readiness; its binary likely predates UDP support or UDP \
+                                 relay initialization failed. Upgrade and restart \
+                                 http-proxy-server with the same release as this client",
+                                runtime::server_port()
+                            ),
+                        },
+                    });
+                }
+                Ok(Err(source)) => {
+                    return Err(super::ClientError::Io {
+                        uri: None,
+                        detail: "wait for remote UDP association readiness",
+                        source,
+                    });
+                }
+                Ok(Ok(ready)) => ready,
+            };
             if ready != UDP_ASSOCIATION_READY {
                 return Err(super::ClientError::Datagram {
                     source: ProxyError::Protocol {
-                        detail: format!("unexpected UDP association status {ready:#x}"),
+                        detail: if ready == 1 {
+                            "remote proxy server could not initialize its UDP relay; check server \
+                             logs, firewall rules, and any configured upstream SOCKS5 UDP support"
+                                .to_string()
+                        } else {
+                            format!(
+                                "remote proxy server returned unknown UDP association status \
+                                 {ready:#x}; client and server versions may be incompatible"
+                            )
+                        },
                     },
                 });
             }

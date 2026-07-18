@@ -457,10 +457,12 @@ async fn main() -> Result<()> {
         .or_else(|| server_host.clone().map(|host| (host, server_port)));
     let tun = enable_tun
         .then(|| {
-            TunConfig::new(tun_bypass_processes).map(|config| match tun_endpoint {
-                Some((host, port)) => config.with_remote_endpoint(host, port),
-                None => config,
-            })
+            TunConfig::new(tun_bypass_processes)
+                .map(|config| config.with_udp_enabled(enable_udp))
+                .map(|config| match tun_endpoint {
+                    Some((host, port)) => config.with_remote_endpoint(host, port),
+                    None => config,
+                })
         })
         .transpose()
         .context("Failed to prepare mandatory TUN process bypass")?;

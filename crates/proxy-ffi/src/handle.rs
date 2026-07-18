@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use proxy_client::cli_config::SystemProxyGuard;
 use proxy_client::client::tun::{
     TunBypassController, TunConfig, current_process_name, run_with_ready, running_process_names,
+    running_processes,
 };
 use proxy_client::client::{
     ClientConfig, ClientRuntimeConfig, run_client_with_listener_runtime_config,
@@ -35,6 +36,8 @@ pub struct ProxyHandle {
     tun_generation: Arc<AtomicU64>,
     force_proxy: Arc<AtomicBool>,
     remote_endpoint: Mutex<Option<(String, u16)>>,
+    last_error: Arc<Mutex<Option<String>>>,
+    udp_enabled: AtomicBool,
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     system_proxy_guard: Arc<Mutex<Option<SystemProxyGuard>>>,
 }
@@ -72,6 +75,8 @@ pub extern "C" fn proxy_create() -> *mut ProxyHandle {
         tun_generation: Arc::new(AtomicU64::new(0)),
         force_proxy: Arc::new(AtomicBool::new(false)),
         remote_endpoint: Mutex::new(None),
+        last_error: Arc::new(Mutex::new(None)),
+        udp_enabled: AtomicBool::new(true),
         #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
         system_proxy_guard: Arc::new(Mutex::new(None)),
     }))
@@ -278,7 +283,11 @@ fn proxy_start_inner(
 
     let tun_config = if enable_tun {
         match TunConfig::new(tun_bypass_processes) {
-            Ok(config) => Some(config.with_remote_endpoint(server_host.clone(), server_port)),
+            Ok(config) => Some(
+                config
+                    .with_udp_enabled(enable_udp)
+                    .with_remote_endpoint(server_host.clone(), server_port),
+            ),
             Err(error) => {
                 send_log(
                     4,
@@ -349,6 +358,7 @@ fn proxy_start_inner(
     handle.cancel_token = Some(cancel_token.clone());
     handle.running.store(true, Ordering::SeqCst);
     handle.local_port = local_port;
+    handle.udp_enabled.store(enable_udp, Ordering::Release);
     if let Ok(mut endpoint) = handle.remote_endpoint.lock() {
         *endpoint = Some((server_host.clone(), server_port));
     }
@@ -441,8 +451,12 @@ pub unsafe extern "C" fn proxy_start_tun(
         Err(result) => return result,
     };
     let handle = unsafe { &*handle };
+    clear_last_error(handle);
     if !handle.running.load(Ordering::Acquire) || handle.local_port == 0 {
-        send_log(4, "Start the local proxy listener before enabling TUN mode");
+        record_error(
+            handle,
+            "Start the local proxy listener before enabling TUN mode",
+        );
         return ProxyResult::NotRunning;
     }
     if handle.tun_running.load(Ordering::Acquire) {
@@ -453,15 +467,15 @@ pub unsafe extern "C" fn proxy_start_tun(
     match proxy_client::client::tun::is_elevated() {
         Ok(true) => {}
         Ok(false) => {
-            send_log(
-                4,
+            record_error(
+                handle,
                 "TUN mode requires administrator privileges; request UAC elevation first",
             );
             return ProxyResult::RuntimeError;
         }
         Err(error) => {
-            send_log(
-                4,
+            record_error(
+                handle,
                 &format!("Failed to inspect Windows elevation state: {error}"),
             );
             return ProxyResult::RuntimeError;
@@ -473,17 +487,19 @@ pub unsafe extern "C" fn proxy_start_tun(
         Err(_) => return ProxyResult::RuntimeError,
     };
     let Some((remote_host, remote_port)) = endpoint else {
-        send_log(
-            4,
+        record_error(
+            handle,
             "Remote proxy endpoint is unavailable for mandatory TUN route bypass",
         );
         return ProxyResult::RuntimeError;
     };
     let config = match TunConfig::new(processes) {
-        Ok(config) => config.with_remote_endpoint(remote_host.clone(), remote_port),
+        Ok(config) => config
+            .with_udp_enabled(handle.udp_enabled.load(Ordering::Acquire))
+            .with_remote_endpoint(remote_host.clone(), remote_port),
         Err(error) => {
-            send_log(
-                4,
+            record_error(
+                handle,
                 &format!("Failed to initialize TUN process bypass: {error}"),
             );
             return ProxyResult::RuntimeError;
@@ -532,6 +548,7 @@ pub unsafe extern "C" fn proxy_start_tun(
     let running = Arc::clone(&handle.tun_running);
     let force_proxy = Arc::clone(&handle.force_proxy);
     let bypass_cleanup = Arc::clone(&handle.tun_bypass);
+    let last_error = Arc::clone(&handle.last_error);
     let (setup_sender, setup_receiver) = tokio::sync::oneshot::channel();
     let (caller_sender, caller_receiver) = tokio::sync::oneshot::channel();
     let (stopped_sender, stopped_receiver) = tokio::sync::oneshot::channel();
@@ -552,14 +569,16 @@ pub unsafe extern "C" fn proxy_start_tun(
             let readiness = setup_receiver.await.unwrap_or_else(|_| {
                 Err("TUN setup task ended without reporting readiness".to_string())
             });
-            if readiness.is_ok() && ready_generation.load(Ordering::Acquire) == generation {
+            let setup_succeeded = readiness.is_ok();
+            if setup_succeeded && ready_generation.load(Ordering::Acquire) == generation {
                 ready_running.store(true, Ordering::Release);
             }
             let _ = caller_sender.send(readiness);
+            setup_succeeded
         });
 
         let result = run_with_ready(local_port, config, shutdown_token, Some(setup_sender)).await;
-        let _ = readiness_task.await;
+        let setup_succeeded = readiness_task.await.unwrap_or(false);
         // A stop followed immediately by a new start can leave the old async
         // task finishing after the replacement has begun. Only the current
         // generation may clear shared state for loop prevention.
@@ -574,7 +593,15 @@ pub unsafe extern "C" fn proxy_start_tun(
             Ok(sessions) => {
                 tracing::info!(remaining_sessions = sessions, "TUN traffic capture stopped")
             }
-            Err(error) => tracing::error!(%error, "TUN traffic capture failed"),
+            Err(error) if setup_succeeded => {
+                let message = format!("TUN traffic capture failed after startup: {error}");
+                match last_error.lock() {
+                    Ok(mut current) => *current = Some(message.clone()),
+                    Err(poisoned) => *poisoned.into_inner() = Some(message.clone()),
+                }
+                tracing::error!(%error, "TUN traffic capture failed")
+            }
+            Err(error) => tracing::error!(%error, "TUN traffic capture setup failed"),
         }
         let _ = stopped_sender.send(());
     });
@@ -611,8 +638,23 @@ fn fail_tun_start(handle: &ProxyHandle, error: &str) -> ProxyResult {
     if let Ok(mut bypass) = handle.tun_bypass.lock() {
         *bypass = None;
     }
-    send_log(4, &format!("Failed to start TUN mode: {error}"));
+    record_error(handle, &format!("Failed to start TUN mode: {error}"));
     ProxyResult::RuntimeError
+}
+
+fn clear_last_error(handle: &ProxyHandle) {
+    match handle.last_error.lock() {
+        Ok(mut error) => *error = None,
+        Err(poisoned) => *poisoned.into_inner() = None,
+    }
+}
+
+fn record_error(handle: &ProxyHandle, message: &str) {
+    match handle.last_error.lock() {
+        Ok(mut error) => *error = Some(message.to_string()),
+        Err(poisoned) => *poisoned.into_inner() = Some(message.to_string()),
+    }
+    send_log(4, message);
 }
 
 /// Stop only TUN capture while keeping the local HTTP/SOCKS5 listener active.
@@ -767,8 +809,8 @@ pub unsafe extern "C" fn proxy_stop(handle: *mut ProxyHandle) -> ProxyResult {
 /// Replace the user-selected process bypass list of an active TUN session.
 ///
 /// The current executable remains mandatory even when `processes` is null or
-/// empty. The replacement affects newly observed sessions; established relays
-/// retain their original routing decision.
+/// empty. Established relays whose decision changes are closed so their source
+/// application reconnects through the newly selected route.
 ///
 /// # Safety
 /// - `handle` must be a valid pointer from `proxy_create`
@@ -797,6 +839,7 @@ pub unsafe extern "C" fn proxy_set_tun_bypass_processes(
         return ProxyResult::NotRunning;
     };
     controller.set_user_processes(processes);
+    clear_last_error(handle);
     ProxyResult::Ok
 }
 
@@ -819,6 +862,27 @@ pub extern "C" fn proxy_list_tun_processes() -> *mut c_char {
     CString::new(json).map_or(ptr::null_mut(), CString::into_raw)
 }
 
+/// Return grouped running process details as JSON for Task Manager-style UIs.
+///
+/// This is additive to `proxy_list_tun_processes`, which retains its original
+/// string-array ABI for existing native consumers. The caller must release the
+/// returned pointer with `proxy_free_string`.
+#[unsafe(no_mangle)]
+pub extern "C" fn proxy_list_tun_processes_v2() -> *mut c_char {
+    crate::init_allocator();
+    let json = match serde_json::to_string(&running_processes()) {
+        Ok(json) => json,
+        Err(error) => {
+            send_log(
+                4,
+                &format!("Failed to serialize detailed running process list: {error}"),
+            );
+            return ptr::null_mut();
+        }
+    };
+    CString::new(json).map_or(ptr::null_mut(), CString::into_raw)
+}
+
 /// Return the normalized executable name that is always excluded from TUN.
 ///
 /// The caller must release the returned pointer with `proxy_free_string`.
@@ -828,6 +892,30 @@ pub extern "C" fn proxy_get_tun_self_process() -> *mut c_char {
     current_process_name()
         .ok()
         .and_then(|name| CString::new(name).ok())
+        .map_or(ptr::null_mut(), CString::into_raw)
+}
+
+/// Return the most recent detailed error associated with this handle.
+///
+/// Result codes remain stable for ABI compatibility; this additive accessor
+/// lets UI clients display the native operation and OS detail instead of a
+/// generic `RuntimeError`. The caller must use `proxy_free_string`.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer returned by `proxy_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_get_last_error(handle: *const ProxyHandle) -> *mut c_char {
+    crate::init_allocator();
+    if handle.is_null() {
+        return ptr::null_mut();
+    }
+    let handle = unsafe { &*handle };
+    let error = match handle.last_error.lock() {
+        Ok(error) => error.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    };
+    error
+        .and_then(|error| CString::new(error).ok())
         .map_or(ptr::null_mut(), CString::into_raw)
 }
 
@@ -898,6 +986,14 @@ mod tests {
             ProxyResult::NotRunning
         );
         assert_eq!(unsafe { proxy_is_tun_running(handle) }, 0);
+        let error = unsafe { proxy_get_last_error(handle) };
+        assert!(!error.is_null());
+        assert!(
+            unsafe { CStr::from_ptr(error) }
+                .to_string_lossy()
+                .contains("Start the local proxy listener")
+        );
+        unsafe { crate::logging::proxy_free_string(error) };
         assert_eq!(unsafe { proxy_stop_tun(handle) }, ProxyResult::NotRunning);
         unsafe { proxy_destroy(handle) };
     }
