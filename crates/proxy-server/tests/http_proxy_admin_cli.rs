@@ -50,6 +50,10 @@ fn start_server(extra_envs: &[(&str, &str)]) -> (TestServer, u16) {
         .arg("-p")
         .arg(port.to_string())
         .env("HOME", &home)
+        // `HOME` is not the authoritative home directory on Windows. Pin the
+        // server state explicitly so repeated integration-test runs cannot
+        // reuse node groups from the developer's real profile.
+        .env("PROXY_DATA_DIR", &home)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     for (key, value) in extra_envs {

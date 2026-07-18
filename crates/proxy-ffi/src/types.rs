@@ -52,6 +52,29 @@ pub struct ProxyConfigV2 {
     pub enable_udp: c_int, // 0 = reject UDP ASSOCIATE, non-zero = accept
 }
 
+/// Versioned proxy configuration with local TUN traffic capture.
+///
+/// The V1 and V2 layouts and entry points remain unchanged. TUN mode is
+/// disabled for those callers, preserving their existing behavior.
+#[repr(C)]
+pub struct ProxyConfigV3 {
+    pub server_host: *const c_char,
+    pub server_port: u16,
+    pub local_port: u16,
+    pub session_key: *const c_char,
+    pub auto_proxy: c_int,
+    pub reverse_geo: c_int,
+    pub cache_dir: *const c_char,
+    pub need_codec_ips: *const c_char,
+    pub force_codec: c_int,
+    pub set_system_proxy: c_int,
+    pub enable_udp: c_int,
+    pub enable_tun: c_int,
+    /// JSON array of executable names. The current executable is always added
+    /// internally and cannot be removed through this field.
+    pub tun_bypass_processes: *const c_char,
+}
+
 /// Result of latency test.
 #[repr(C)]
 pub struct LatencyResult {
@@ -96,4 +119,46 @@ pub struct GroupsResult {
     pub groups: *mut NodeGroupInfo,
     pub count: usize,
     pub error: *mut c_char,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn versioned_config_layouts_preserve_legacy_field_offsets() {
+        macro_rules! assert_same_offset {
+            ($left:ty, $right:ty, $field:ident) => {
+                assert_eq!(
+                    std::mem::offset_of!($left, $field),
+                    std::mem::offset_of!($right, $field),
+                    "offset changed for {}",
+                    stringify!($field)
+                );
+            };
+        }
+
+        assert_same_offset!(ProxyConfig, ProxyConfigV2, server_host);
+        assert_same_offset!(ProxyConfig, ProxyConfigV2, server_port);
+        assert_same_offset!(ProxyConfig, ProxyConfigV2, local_port);
+        assert_same_offset!(ProxyConfig, ProxyConfigV2, session_key);
+        assert_same_offset!(ProxyConfig, ProxyConfigV2, auto_proxy);
+        assert_same_offset!(ProxyConfig, ProxyConfigV2, reverse_geo);
+        assert_same_offset!(ProxyConfig, ProxyConfigV2, cache_dir);
+        assert_same_offset!(ProxyConfig, ProxyConfigV2, need_codec_ips);
+        assert_same_offset!(ProxyConfig, ProxyConfigV2, force_codec);
+        assert_same_offset!(ProxyConfig, ProxyConfigV2, set_system_proxy);
+
+        assert_same_offset!(ProxyConfigV2, ProxyConfigV3, server_host);
+        assert_same_offset!(ProxyConfigV2, ProxyConfigV3, server_port);
+        assert_same_offset!(ProxyConfigV2, ProxyConfigV3, local_port);
+        assert_same_offset!(ProxyConfigV2, ProxyConfigV3, session_key);
+        assert_same_offset!(ProxyConfigV2, ProxyConfigV3, auto_proxy);
+        assert_same_offset!(ProxyConfigV2, ProxyConfigV3, reverse_geo);
+        assert_same_offset!(ProxyConfigV2, ProxyConfigV3, cache_dir);
+        assert_same_offset!(ProxyConfigV2, ProxyConfigV3, need_codec_ips);
+        assert_same_offset!(ProxyConfigV2, ProxyConfigV3, force_codec);
+        assert_same_offset!(ProxyConfigV2, ProxyConfigV3, set_system_proxy);
+        assert_same_offset!(ProxyConfigV2, ProxyConfigV3, enable_udp);
+    }
 }

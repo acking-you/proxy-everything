@@ -95,6 +95,9 @@ jobs:
             mkdir -p "$dirname"
             if [ "${{ matrix.os }}" = "windows-latest" ]; then
               cp "target/${{ matrix.target }}/release/$binary_name.exe" "$dirname/" 2>/dev/null || true
+              if [ "$binary_name" = "http-proxy-cli" ]; then
+                cp "target/${{ matrix.target }}/release/wintun.dll" "$dirname/"
+              fi
             else
               cp "target/${{ matrix.target }}/release/$binary_name" "$dirname/" 2>/dev/null || true
             fi
@@ -259,6 +262,7 @@ jobs:
             cp "target/${{ matrix.target }}/release/http_proxy.lib" "$dirname/" 2>/dev/null || true
             cp "target/${{ matrix.target }}/release/http_proxy.dll" "$dirname/" 2>/dev/null || true
             cp "target/${{ matrix.target }}/release/http_proxy.dll.lib" "$dirname/" 2>/dev/null || true
+            cp "target/${{ matrix.target }}/release/wintun.dll" "$dirname/"
           else
             cp "target/${{ matrix.target }}/release/libhttp_proxy.a" "$dirname/" 2>/dev/null || true
             cp "target/${{ matrix.target }}/release/libhttp_proxy.so" "$dirname/" 2>/dev/null || true

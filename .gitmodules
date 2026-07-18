@@ -16,3 +16,6 @@
 [submodule "deps/rust-smallvec"]
 	path = deps/rust-smallvec
 	url = git@github.com:acking-you/rust-smallvec.git
+[submodule "deps/tun2proxy"]
+	path = deps/tun2proxy
+	url = git@github.com:acking-you/tun2proxy.git

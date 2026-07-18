@@ -26,6 +26,10 @@ pub struct Config {
     pub auto_proxy: Option<bool>,
     /// Accept SOCKS5 UDP ASSOCIATE requests. Missing values default to enabled.
     pub udp: Option<bool>,
+    /// Capture device traffic through a TUN interface. Missing values default to disabled.
+    pub tun: Option<bool>,
+    /// Executable names routed outside the TUN. The client executable is always added.
+    pub tun_bypass_processes: Option<Vec<String>>,
     pub nonproxy_keywords: Option<Vec<String>>,
     pub proxy_keywords: Option<Vec<String>>,
     pub need_codec_ip: Option<Vec<String>>,

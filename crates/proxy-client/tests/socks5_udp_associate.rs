@@ -76,6 +76,7 @@ async fn socks5_udp_associate_supports_plain_encrypted_and_chained_relays() {
                 cache_dir: None,
             },
             upstream_proxy: None,
+            tun: None,
         }),
     ));
     assert_udp_round_trip(
@@ -100,6 +101,7 @@ async fn socks5_udp_associate_supports_plain_encrypted_and_chained_relays() {
                 cache_dir: None,
             },
             upstream_proxy: None,
+            tun: None,
         }),
     ));
 
@@ -127,6 +129,7 @@ async fn socks5_udp_associate_supports_plain_encrypted_and_chained_relays() {
             upstream_proxy: Some(
                 ExternalProxyTarget::parse(&format!("socks5h://{client_addr}")).unwrap(),
             ),
+            tun: None,
         }),
     ));
     assert_udp_round_trip(
@@ -167,6 +170,7 @@ async fn socks5_udp_associate_returns_command_not_supported_when_disabled() {
                 cache_dir: None,
             },
             upstream_proxy: None,
+            tun: None,
         }),
     ));
 

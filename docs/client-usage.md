@@ -20,6 +20,9 @@ Without `--set-system-proxy`, manually configure system proxy to `127.0.0.1:<loc
 | `--reverse-geo` | Reverse geo logic: proxy CN, direct others |
 | `-m, --msg-key` | Enable random message key |
 | `--udp <true\|false>` | Enable SOCKS5 UDP ASSOCIATE (default: `true`) |
+| `--tun` | Capture device traffic with a local TUN interface |
+| `--tun-bypass-process <name>` | Bypass TUN for an executable name (repeatable) |
+| `--tun-list-processes` | List running Windows executable names and exit |
 
 ---
 
@@ -60,6 +63,95 @@ Operational details:
 - System HTTP proxy settings, including `--set-system-proxy`, do not capture UDP
   automatically. Use an application with SOCKS5 UDP support or a TUN adapter
   that emits SOCKS5 UDP ASSOCIATE.
+
+---
+
+## TUN Mode
+
+TUN mode sends device traffic to the SOCKS5 listener already hosted on the
+client port. It does not require a second proxy process or a separately
+installed TUN device:
+
+```text
+Application TCP/UDP -> Wintun -> tun2proxy -> 127.0.0.1:<client-port>
+                    -> proxy-everything client -> remote server -> destination
+```
+
+On Windows, keep `wintun.dll` in the same directory as
+`http-proxy-cli.exe` or `proxy_ui.exe`. The supported build and staging scripts
+place it there automatically.
+
+### CLI
+
+Enable complete TCP and UDP capture:
+
+```powershell
+.\http-proxy-cli.exe -s YOUR_SERVER_IP -p 1081 -c 1080 --tun --udp true
+```
+
+List current process names and let selected applications use the physical
+network directly:
+
+```powershell
+.\http-proxy-cli.exe --tun-list-processes
+.\http-proxy-cli.exe -s YOUR_SERVER_IP -c 1080 --tun `
+  --tun-bypass-process browser.exe `
+  --tun-bypass-process downloader
+```
+
+Equivalent TOML configuration:
+
+```toml
+tun = true
+udp = true
+tun_bypass_processes = ["browser.exe", "downloader"]
+```
+
+Executable matching is case-insensitive and a trailing `.exe` is optional.
+User-selected bypasses apply to new TCP or UDP sessions. Existing sessions keep
+the decision made when they were created.
+
+### Flutter UI
+
+Enable **TUN Mode** in Proxy Configuration. **TUN Bypass** opens the Windows
+process picker both before startup and while the proxy is connected. Applying
+the selection during a connection updates native routing immediately for new
+sessions and does not recreate the TUN adapter.
+
+The current UI executable appears as a required, disabled selection. This is
+not only a presentation rule: Rust always appends the current executable after
+every configuration or runtime replacement, so malformed imported settings or
+an FFI caller cannot remove it.
+
+### Privileges and shutdown
+
+Creating Wintun and changing default routes require administrator privileges.
+The Windows CLI requests UAC elevation and reconnects the elevated child to the
+original console instead of opening a new terminal. The Windows Flutter runner
+uses `requireAdministrator`, so Windows shows UAC when the application starts,
+including launches where TUN mode remains disabled.
+
+Normal cancellation restores the routes through the TUN setup guard. A hard
+process termination or machine crash can prevent graceful cleanup; restarting
+the application and stopping TUN normally, or resetting the affected routes,
+restores the expected state.
+
+### Loop-prevention invariant
+
+The proxy client's own process always bypasses TUN and egresses through the
+physical default interface. This rule is mandatory and cannot be overridden by
+CLI, TOML, Flutter, or FFI input. Without it, the client's connection to the
+remote proxy would be captured by Wintun, forwarded to its local SOCKS5 port,
+and repeated indefinitely.
+
+Other bypassed processes connect directly to their original destinations and
+therefore do not use the proxy. Do not add an application to the bypass list if
+its traffic should remain proxied.
+
+TUN TCP continues to work with `--udp false`; captured UDP is rejected by the
+local SOCKS5 listener in that configuration. Leave UDP enabled for complete
+device TCP and UDP forwarding. HTTP upstream proxies cannot relay UDP, while a
+SOCKS5 upstream must implement UDP ASSOCIATE.
 
 ---
 

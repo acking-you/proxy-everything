@@ -15,6 +15,14 @@ client_port = 7890
 # [Optional] Reverse geo-proxy: CN sites use proxy, foreign sites direct
 reverse_geo = false
 
+# [Optional] Accept SOCKS5 UDP ASSOCIATE on the same local port as TCP.
+udp = true
+
+# [Optional] Capture device TCP/UDP traffic through TUN. The current client
+# executable is always excluded to prevent a routing loop.
+tun = false
+tun_bypass_processes = []
+
 # [Optional] Use local GeoIP database instead of ip-api.com API
 # use_local_geoip = false
 

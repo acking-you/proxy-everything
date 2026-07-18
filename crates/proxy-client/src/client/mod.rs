@@ -50,6 +50,7 @@
 pub mod auto_proxy;
 pub mod http;
 pub mod socks;
+pub mod tun;
 mod udp;
 
 use std::borrow::Cow;
@@ -172,6 +173,8 @@ impl Default for ClientConfig {
 pub struct ClientRuntimeConfig {
     pub client: ClientConfig,
     pub upstream_proxy: Option<ExternalProxyTarget>,
+    /// Optional device-wide TUN capture routed through the local SOCKS5 listener.
+    pub tun: Option<tun::TunConfig>,
 }
 
 impl From<ClientConfig> for ClientRuntimeConfig {
@@ -179,6 +182,7 @@ impl From<ClientConfig> for ClientRuntimeConfig {
         Self {
             client,
             upstream_proxy: None,
+            tun: None,
         }
     }
 }
@@ -717,6 +721,7 @@ pub async fn run_client_with_listener_runtime_config<const NEED_CODEC: bool>(
         .map(|c| c.client.enable_auto_proxy)
         .unwrap_or(true);
     let upstream_proxy = config.as_ref().and_then(|c| c.upstream_proxy.clone());
+    let tun_config = config.as_ref().and_then(|c| c.tun.clone());
     let enable_udp = config.as_ref().map(|c| c.client.enable_udp).unwrap_or(true);
     let enable_auto_proxy = enable_auto_proxy && upstream_proxy.is_none();
     let force_proxy = !enable_auto_proxy;
@@ -727,9 +732,42 @@ pub async fn run_client_with_listener_runtime_config<const NEED_CODEC: bool>(
         enable_auto_proxy,
         enable_udp,
         force_proxy,
+        tun_enabled = tun_config.is_some(),
         upstream_proxy = ?upstream_proxy_display,
         "client listener configured"
     );
+
+    let tun_task = tun_config.map(|tun_config| {
+        let token = cancel_token.clone();
+        let local_port = listener.local_addr().map(|address| address.port());
+        async move {
+            let local_port = match local_port {
+                Ok(port) => port,
+                Err(error) => {
+                    tracing::error!(%error, "cannot determine local listener port for TUN mode");
+                    return;
+                }
+            };
+            match tun::run(local_port, tun_config, token.clone()).await {
+                Ok(sessions) => {
+                    tracing::info!(remaining_sessions = sessions, "TUN traffic capture stopped");
+                }
+                Err(error) => {
+                    tracing::error!(%error, "TUN traffic capture failed");
+                    // Do not leave the application claiming to proxy device
+                    // traffic after TUN setup or its relay loop has failed.
+                    token.cancel();
+                }
+            }
+        }
+    });
+    if let Some(task) = tun_task {
+        if let Some(ref tracker) = tracker {
+            tracker.spawn(task);
+        } else {
+            tokio::spawn(task);
+        }
+    }
 
     #[cfg(feature = "auto-proxy")]
     let sender: Option<SenderChan> = if enable_auto_proxy {
@@ -869,6 +907,7 @@ mod tests {
                     cache_dir: None,
                 },
                 upstream_proxy: Some(upstream_proxy),
+                tun: None,
             }),
         ));
         (addr, token)

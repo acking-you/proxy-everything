@@ -18,6 +18,7 @@ then local implementation simplicity.
 - `crates/proxy-server`: remote server, admin CLI, control plane, relay routing.
 - `crates/proxy-tui`: terminal control-plane interface.
 - `crates/proxy-ffi`: C ABI consumed by Flutter; builds as `http_proxy`.
+- `deps/tun2proxy`: TUN capture, route setup, and runtime process bypass.
 - `ui/flutter`: Flutter UI Git submodule.
 - `scripts/windows`: supported Windows build and run entry points.
 - `scripts/build`, `scripts/release`, `docker`, `services`: release and operations.
@@ -67,7 +68,7 @@ Run these from the repository root in PowerShell:
 ```
 
 `stage-ui-native.ps1` is the single source of truth for placing
-`target/<profile>/http_proxy.dll` under
+`target/<profile>/http_proxy.dll` and `wintun.dll` under
 `ui/flutter/native/windows/<architecture>/`. Do not duplicate this copy logic
 in ad hoc commands or commit the resulting DLL.
 
@@ -139,6 +140,8 @@ cargo fmt -p proxy-core -p proxy-client -p proxy-server -p proxy-tui -p proxy-ff
   `proxy-core` before testing the UI.
 - Keep UI state and blocking native calls off the render path. Preserve the
   existing provider/service boundaries.
+- TUN integrations must enforce the current executable in native process
+  bypass state; UI configuration is not a security or loop-prevention boundary.
 - Update `pubspec.lock` when dependency resolution changes. Generated Flutter
   plugin files should change only when dependencies or platform configuration
   change.
@@ -188,5 +191,6 @@ Before handing off a change:
 3. Run strict Clippy and Rust formatting checks for Rust changes.
 4. Run `cargo test --workspace` for shared or protocol changes.
 5. Run FVM analyze/test/build for Flutter or FFI changes.
-6. Confirm no secrets, generated binaries, caches, or unrelated files are staged.
-7. Update README/docs whenever commands, configuration, or behavior changed.
+6. Confirm Windows UI bundles contain both `http_proxy.dll` and `wintun.dll`.
+7. Confirm no secrets, generated binaries, caches, or unrelated files are staged.
+8. Update README/docs whenever commands, configuration, or behavior changed.

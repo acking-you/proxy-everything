@@ -7,6 +7,7 @@ use comfy_table::{Cell, Color, Table, presets};
 use proxy_client::cli_config::{
     Config, DEFAULT_CONFIG_TEMPLATE, SystemProxyGuard, find_config, get_default_config_path,
 };
+use proxy_client::client::tun::{TunConfig, running_process_names};
 use proxy_client::client::{ClientConfig, ClientRuntimeConfig, start_client_with_runtime_config};
 use proxy_core::config::{CLIENT_PORT, SERVER_PORT, init_tracing};
 use proxy_core::relay::ExternalProxyTarget;
@@ -71,6 +72,19 @@ struct Cli {
     /// [optional] Accept SOCKS5 UDP ASSOCIATE on the local proxy port (true/false)
     #[arg(long, value_name = "UDP")]
     udp: Option<bool>,
+    /// [optional] Capture all device TCP/UDP traffic through a local TUN interface
+    #[arg(long)]
+    tun: bool,
+    /// [optional] Executable name that should bypass TUN capture (repeatable)
+    #[arg(long = "tun-bypass-process", value_name = "PROCESS")]
+    tun_bypass_processes: Vec<String>,
+    /// List running executable names that can be used with --tun-bypass-process
+    #[arg(long)]
+    tun_list_processes: bool,
+    /// Internal console owner used while a Windows child is elevating.
+    #[cfg(windows)]
+    #[arg(long, hide = true, value_name = "PID")]
+    elevated_console_pid: Option<u32>,
     /// [optional] Use local GeoIP database instead of ip-api.com API
     #[arg(long, env = "USE_LOCAL_GEOIP")]
     use_local_geoip: bool,
@@ -90,6 +104,9 @@ impl Cli {
             secret_key: self.secret_key.clone(),
             auto_proxy: self.auto_proxy,
             udp: self.udp,
+            tun: self.tun.then_some(true),
+            tun_bypass_processes: (!self.tun_bypass_processes.is_empty())
+                .then(|| self.tun_bypass_processes.clone()),
             nonproxy_keywords: self
                 .nonproxy_keywords
                 .as_ref()
@@ -128,6 +145,8 @@ impl Cli {
             || self.reverse_geo
             || self.auto_proxy.is_some()
             || self.udp.is_some()
+            || self.tun
+            || !self.tun_bypass_processes.is_empty()
             || self.set_system_proxy
     }
 }
@@ -144,6 +163,24 @@ fn parse_bool_env(value: &str) -> Option<bool> {
 async fn main() -> Result<()> {
     init_allocator();
     let cli: Cli = Cli::parse();
+
+    #[cfg(windows)]
+    if let Some(parent_pid) = cli.elevated_console_pid {
+        tun2proxy::windows_elevation::attach_to_parent_console(parent_pid)
+            .context("Failed to reconnect the elevated client to its original console")?;
+    }
+
+    if cli.tun_list_processes {
+        let processes = running_process_names();
+        if processes.is_empty() {
+            eprintln!("No process names are available on this platform.");
+        } else {
+            for process in processes {
+                println!("{process}");
+            }
+        }
+        return Ok(());
+    }
 
     // Load config based on scenario:
     // 1. -f specified: use that file
@@ -225,6 +262,20 @@ async fn main() -> Result<()> {
                 .and_then(|v| parse_bool_env(&v))
         })
         .unwrap_or(true);
+    let enable_tun = cli.tun || config.tun.unwrap_or(false);
+    let tun_bypass_processes = if cli.tun_bypass_processes.is_empty() {
+        config.tun_bypass_processes.clone().unwrap_or_default()
+    } else {
+        cli.tun_bypass_processes.clone()
+    };
+
+    #[cfg(windows)]
+    if enable_tun
+        && let Some(exit_code) = tun2proxy::windows_elevation::relaunch_if_needed()
+            .context("Failed to request administrator privileges for TUN mode")?
+    {
+        std::process::exit(exit_code as i32);
+    }
 
     // SAFETY: Environment variables are set before any async code runs.
     // The tokio runtime hasn't started yet, so there are no other threads
@@ -363,6 +414,17 @@ async fn main() -> Result<()> {
         status_cell(effective_auto_proxy),
     ]);
     table.add_row(vec![Cell::new("SOCKS5 UDP"), status_cell(enable_udp)]);
+    table.add_row(vec![Cell::new("TUN Mode"), status_cell(enable_tun)]);
+    if enable_tun {
+        table.add_row(vec![
+            Cell::new("TUN Process Bypass"),
+            Cell::new(format!(
+                "{} user-selected + current executable",
+                tun_bypass_processes.len()
+            ))
+            .fg(Color::Cyan),
+        ]);
+    }
     table.add_row(vec![
         Cell::new("System Proxy"),
         status_cell(do_set_system_proxy),
@@ -389,6 +451,10 @@ async fn main() -> Result<()> {
         None
     };
 
+    let tun = enable_tun
+        .then(|| TunConfig::new(tun_bypass_processes))
+        .transpose()
+        .context("Failed to prepare mandatory TUN process bypass")?;
     let client_config = ClientRuntimeConfig {
         client: ClientConfig {
             enable_auto_proxy: effective_auto_proxy,
@@ -396,6 +462,7 @@ async fn main() -> Result<()> {
             cache_dir: None,
         },
         upstream_proxy: upstream_proxy.clone(),
+        tun,
     };
     let listen_host = if upstream_mode {
         "127.0.0.1"
@@ -425,6 +492,27 @@ mod tests {
 
         assert_eq!(cli.udp, Some(false));
         assert_eq!(cli.to_config().udp, Some(false));
+        assert!(cli.has_args());
+    }
+
+    #[test]
+    fn tun_cli_options_are_written_to_config() {
+        let cli = Cli::try_parse_from([
+            "http-proxy-cli",
+            "--tun",
+            "--tun-bypass-process",
+            "browser.exe",
+            "--tun-bypass-process",
+            "downloader",
+        ])
+        .unwrap();
+
+        let config = cli.to_config();
+        assert_eq!(config.tun, Some(true));
+        assert_eq!(
+            config.tun_bypass_processes,
+            Some(vec!["browser.exe".to_string(), "downloader".to_string()])
+        );
         assert!(cli.has_args());
     }
 }

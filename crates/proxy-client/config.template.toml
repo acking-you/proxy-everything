@@ -29,6 +29,14 @@ auto_proxy = true
 # Defaults to true when omitted. Set to false to expose TCP-only SOCKS5.
 udp = true
 
+# Capture all local TCP and UDP traffic at the TUN layer. Administrator/root
+# privileges are required. The client executable always bypasses TUN capture.
+tun = false
+
+# Additional executable names that should bypass the TUN. Names are
+# case-insensitive and a trailing .exe is optional.
+tun_bypass_processes = []
+
 # [Optional] Use local GeoIP database instead of ip-api.com API
 # use_local_geoip = false
 

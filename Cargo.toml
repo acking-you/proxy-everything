@@ -7,7 +7,7 @@ members = [
     "crates/proxy-tui",
     "crates/proxy-ffi",
 ]
-exclude = ["deps/kanal", "deps/uni-stream", "deps/sysproxy-rs"]
+exclude = ["deps/kanal", "deps/uni-stream", "deps/sysproxy-rs", "deps/tun2proxy"]
 
 [workspace.package]
 version = "0.4.23"
@@ -34,6 +34,7 @@ ring = "0.17.14"
 
 # Logging
 tracing = "0.1.44"
+log = "0.4.33"
 tracing-subscriber = { version = "0.3.22", features = [
     "env-filter",
     "fmt",
@@ -95,3 +96,4 @@ rand = "0.9"
 kanal = { path = "deps/kanal" }
 sysproxy = { path = "deps/sysproxy-rs" }
 smallvec = { path = "deps/rust-smallvec", features = ["std"] }
+tun2proxy = { path = "deps/tun2proxy", default-features = false }

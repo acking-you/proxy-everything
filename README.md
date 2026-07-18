@@ -76,6 +76,29 @@ switch when a TCP-only local listener is required.
 System HTTP proxy settings do not redirect application UDP automatically. The
 application, TUN adapter, or other ingress must explicitly use SOCKS5 UDP.
 
+#### Local TUN mode
+
+The CLI and Windows Flutter client can capture device traffic through the
+bundled `tun2proxy` dependency and forward it to the client's local SOCKS5
+listener. This captures TCP and, while SOCKS5 UDP is enabled, UDP without
+per-application proxy settings:
+
+```powershell
+http-proxy-cli.exe -s YOUR_SERVER_IP -c 7890 --tun
+```
+
+The client executable is always placed in the TUN process-bypass policy. This
+rule is enforced by native code and cannot be removed, because capturing the
+client's own outbound connection would create a routing loop. Additional
+processes can bypass TUN with repeatable `--tun-bypass-process` options. Use
+`--tun-list-processes` to list currently running Windows executable names.
+
+TUN mode requires administrator privileges. The Windows CLI requests UAC
+elevation in the existing terminal, and the Flutter application declares this
+requirement in its manifest. Windows builds bundle `wintun.dll` next to the CLI
+or UI executable. See the [client usage guide](docs/client-usage.md#tun-mode)
+for configuration and runtime process updates.
+
 ### Proxy TUI
 
 `proxy-tui` is a control-plane monitor and runtime config tool. It is not a
@@ -187,7 +210,7 @@ Run a command-line component and pass its arguments after `--`:
 ```
 
 Start the Flutter desktop app with hot reload. The script builds and stages
-`http_proxy.dll` before invoking the project-pinned Flutter SDK:
+`http_proxy.dll` and `wintun.dll` before invoking the project-pinned Flutter SDK:
 
 ```powershell
 .\scripts\windows\run-ui.ps1
@@ -200,6 +223,7 @@ Run Flutter commands from `ui/flutter` through FVM only, for example
 
 - AES-256-GCM encryption
 - HTTP/HTTPS/SOCKS5 proxy support, including SOCKS5 UDP ASSOCIATE
+- Local TUN capture with mandatory self-process loop prevention
 - Auto-routing based on geo-location
 - Reverse geo mode (`--reverse-geo`): proxy CN sites, direct for others
 - Auto system proxy setup (`--set-system-proxy`): Linux/macOS/Windows
