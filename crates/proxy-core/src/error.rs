@@ -256,9 +256,9 @@ impl ProxyError {
         };
 
         match self {
-            ProxyError::Io { source, .. } | ProxyError::ProtocolIo { source, .. } => {
-                is_expected(source.kind())
-            }
+            ProxyError::Io { source, .. }
+            | ProxyError::ProtocolIo { source, .. }
+            | ProxyError::CodecRead { source } => is_expected(source.kind()),
             _ => false,
         }
     }

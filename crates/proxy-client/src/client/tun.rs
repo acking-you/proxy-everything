@@ -14,6 +14,7 @@ use std::net::IpAddr;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
+pub use tun2proxy::VirtualDnsState as TunVirtualDnsState;
 use tun2proxy::{ArgDns, ArgProxy, Args, ProcessBypass};
 
 struct TunLogBridge;
@@ -108,6 +109,10 @@ impl TunBypassController {
 #[derive(Clone, Debug)]
 pub struct TunConfig {
     pub bypass: TunBypassController,
+    /// Fake-IP allocations shared by every route generation of this logical
+    /// TUN session. Reusing them is required for application DNS caches to
+    /// remain valid during an upstream hot switch.
+    pub virtual_dns_state: TunVirtualDnsState,
     pub ipv6_enabled: bool,
     pub mtu: u16,
     /// Require a successful end-to-end SOCKS5 UDP readiness check before
@@ -121,6 +126,7 @@ impl TunConfig {
     pub fn new(user_processes: impl IntoIterator<Item = String>) -> io::Result<Self> {
         Ok(Self {
             bypass: TunBypassController::new(user_processes)?,
+            virtual_dns_state: TunVirtualDnsState::default(),
             ipv6_enabled: false,
             mtu: tun2proxy::DEFAULT_MTU,
             udp_enabled: true,
@@ -134,6 +140,12 @@ impl TunConfig {
     /// that connection is captured, it returns to the same listener and loops.
     pub fn with_remote_endpoint(mut self, host: impl Into<String>, port: u16) -> Self {
         self.remote_endpoint = Some((host.into(), port));
+        self
+    }
+
+    /// Reuse fake-IP allocations owned by the surrounding client handle.
+    pub fn with_virtual_dns_state(mut self, state: TunVirtualDnsState) -> Self {
+        self.virtual_dns_state = state;
         self
     }
 
@@ -359,13 +371,14 @@ pub async fn run_with_ready(
 
     match ready {
         Some(ready) => {
-            tun2proxy::general_run_async_with_process_bypass_and_ready(
+            tun2proxy::general_run_async_with_process_bypass_and_ready_and_virtual_dns(
                 args,
                 config.mtu,
                 cfg!(target_os = "macos"),
                 shutdown_token,
                 config.bypass.process_bypass(),
                 ready,
+                config.virtual_dns_state,
             )
             .await
         }

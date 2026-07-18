@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 use proxy_client::cli_config::SystemProxyGuard;
 use proxy_client::client::tun::{
-    TunBypassController, TunConfig, current_process_name, run_with_ready, running_process_names,
-    running_processes,
+    TunBypassController, TunConfig, TunVirtualDnsState, current_process_name, run_with_ready,
+    running_process_names, running_processes,
 };
 use proxy_client::client::{
     ClientConfig, ClientRuntimeConfig, run_client_with_listener_runtime_config,
@@ -34,6 +34,7 @@ pub struct ProxyHandle {
     tun_lifecycle: Mutex<TunLifecycle>,
     tun_running: Arc<AtomicBool>,
     tun_generation: Arc<AtomicU64>,
+    tun_virtual_dns: TunVirtualDnsState,
     force_proxy: Arc<AtomicBool>,
     remote_endpoint: Mutex<Option<(String, u16)>>,
     last_error: Arc<Mutex<Option<String>>>,
@@ -73,6 +74,7 @@ pub extern "C" fn proxy_create() -> *mut ProxyHandle {
         tun_lifecycle: Mutex::new(TunLifecycle::default()),
         tun_running: Arc::new(AtomicBool::new(false)),
         tun_generation: Arc::new(AtomicU64::new(0)),
+        tun_virtual_dns: TunVirtualDnsState::default(),
         force_proxy: Arc::new(AtomicBool::new(false)),
         remote_endpoint: Mutex::new(None),
         last_error: Arc::new(Mutex::new(None)),
@@ -286,6 +288,7 @@ fn proxy_start_inner(
             Ok(config) => Some(
                 config
                     .with_udp_enabled(enable_udp)
+                    .with_virtual_dns_state(handle.tun_virtual_dns.clone())
                     .with_remote_endpoint(server_host.clone(), server_port),
             ),
             Err(error) => {
@@ -564,6 +567,7 @@ pub unsafe extern "C" fn proxy_start_tun(
     let config = match TunConfig::new(processes) {
         Ok(config) => config
             .with_udp_enabled(handle.udp_enabled.load(Ordering::Acquire))
+            .with_virtual_dns_state(handle.tun_virtual_dns.clone())
             .with_remote_endpoint(remote_host.clone(), remote_port),
         Err(error) => {
             record_error(

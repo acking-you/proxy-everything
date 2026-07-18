@@ -140,6 +140,57 @@ pub fn proxy_result_handle(host: impl AsRef<str>, ret: Result<DataSize>, detail:
     }
 }
 
+struct ProxyDirectionResults {
+    client_to_server: Option<Result<DataSize>>,
+    server_to_client: Option<Result<DataSize>>,
+}
+
+/// Drive both relay directions while preserving a clean TCP half-close.
+///
+/// A clean EOF shuts down the opposite writer inside [`codec::copy`], so the
+/// peer direction is allowed to drain. An I/O error cannot make that progress:
+/// waiting for the other future would retain both socket halves indefinitely,
+/// which accumulates `CLOSE_WAIT` connections after peer resets. Dropping the
+/// other future immediately closes its reader and writer halves.
+async fn drive_proxy_directions<ClientToServer, ServerToClient>(
+    client_to_server: ClientToServer,
+    server_to_client: ServerToClient,
+) -> ProxyDirectionResults
+where
+    ClientToServer: std::future::Future<Output = Result<DataSize>>,
+    ServerToClient: std::future::Future<Output = Result<DataSize>>,
+{
+    tokio::pin!(client_to_server);
+    tokio::pin!(server_to_client);
+
+    tokio::select! {
+        client_result = &mut client_to_server => {
+            if client_result.is_err() {
+                return ProxyDirectionResults {
+                    client_to_server: Some(client_result),
+                    server_to_client: None,
+                };
+            }
+            ProxyDirectionResults {
+                client_to_server: Some(client_result),
+                server_to_client: Some(server_to_client.await),
+            }
+        }
+        server_result = &mut server_to_client => {
+            if server_result.is_err() {
+                return ProxyDirectionResults {
+                    client_to_server: None,
+                    server_to_client: Some(server_result),
+                };
+            }
+            ProxyDirectionResults {
+                client_to_server: Some(client_to_server.await),
+                server_to_client: Some(server_result),
+            }
+        }
+    }
+}
+
 // ============================================================================
 // Codec Factory Functions
 // ============================================================================
@@ -192,9 +243,25 @@ pub async fn start_proxy<
     let client_to_server = codec::copy(client_codec, server_writer);
     let server_to_client = codec::copy(server_codec, client_writer);
 
-    let (client_result, server_result) = tokio::join!(client_to_server, server_to_client);
-    proxy_result_handle(&host, client_result, "client->server");
-    proxy_result_handle(&host, server_result, "server->client");
+    let results = drive_proxy_directions(client_to_server, server_to_client).await;
+    if let Some(client_result) = results.client_to_server {
+        proxy_result_handle(&host, client_result, "client->server");
+    } else {
+        tracing::debug!(
+            host = host.as_ref(),
+            direction = "client->server",
+            "relay direction canceled after the peer direction failed"
+        );
+    }
+    if let Some(server_result) = results.server_to_client {
+        proxy_result_handle(&host, server_result, "server->client");
+    } else {
+        tracing::debug!(
+            host = host.as_ref(),
+            direction = "server->client",
+            "relay direction canceled after the peer direction failed"
+        );
+    }
     Ok(())
 }
 
@@ -291,3 +358,52 @@ pub async fn proxy_with_normal_codec<
 
 // Backward compatibility alias
 pub use proxy_with_normal_codec as proxy_with_norlmal_codec;
+
+#[cfg(test)]
+mod tests {
+    use std::future;
+    use std::time::Duration;
+
+    use super::*;
+
+    fn reset_error() -> ProxyError {
+        ProxyError::CodecRead {
+            source: std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "peer reset test connection",
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn relay_error_cancels_pending_peer_direction() {
+        assert!(reset_error().is_expected_disconnect());
+        let results = tokio::time::timeout(
+            Duration::from_millis(100),
+            drive_proxy_directions(
+                future::ready(Err(reset_error())),
+                future::pending::<Result<DataSize>>(),
+            ),
+        )
+        .await
+        .expect("relay error must not wait for the peer direction");
+
+        assert!(matches!(
+            results.client_to_server,
+            Some(Err(ProxyError::CodecRead { .. }))
+        ));
+        assert!(results.server_to_client.is_none());
+    }
+
+    #[tokio::test]
+    async fn clean_half_close_drains_peer_direction() {
+        let results = drive_proxy_directions(future::ready(Ok(11)), async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            Ok(17)
+        })
+        .await;
+
+        assert!(matches!(results.client_to_server, Some(Ok(11))));
+        assert!(matches!(results.server_to_client, Some(Ok(17))));
+    }
+}
