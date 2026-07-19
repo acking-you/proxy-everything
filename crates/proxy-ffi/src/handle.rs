@@ -1,13 +1,16 @@
 //! ProxyHandle and lifecycle management.
 
 use std::ffi::{CStr, CString, c_char, c_int};
+use std::future::Future;
 use std::path::PathBuf;
-use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::{io, ptr};
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 use proxy_client::cli_config::SystemProxyGuard;
+#[cfg(target_os = "android")]
+use proxy_client::client::tun::run_with_ready_on_fd;
 use proxy_client::client::tun::{
     TunBypassController, TunConfig, TunVirtualDnsState, current_process_name, run_with_ready,
     running_process_names, running_processes,
@@ -578,6 +581,107 @@ pub unsafe extern "C" fn proxy_start_tun(
         }
     };
 
+    start_tun_runtime(
+        handle,
+        config,
+        run_with_ready,
+        format!(
+            "TUN ready: device traffic -> socks5://127.0.0.1:{}; remote endpoint \
+             {remote_host}:{remote_port} bypasses TUN",
+            handle.local_port
+        ),
+    )
+}
+
+/// Start forwarding an Android `VpnService` interface.
+///
+/// The Java service retains its `ParcelFileDescriptor`; native code duplicates
+/// it synchronously and owns only the duplicate. Android's per-application VPN
+/// policy must exclude this package (or omit it from an allow-list) so the
+/// local proxy's upstream sockets cannot loop back into the TUN.
+///
+/// # Safety
+/// - `handle` must be a valid pointer returned by `proxy_create`
+/// - `tun_fd` must name a live TUN descriptor in the current process
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_start_android_tun(
+    handle: *mut ProxyHandle,
+    tun_fd: c_int,
+    mtu: u16,
+) -> ProxyResult {
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    if handle.is_null() || tun_fd < 0 || !(1280..=9000).contains(&mtu) {
+        return ProxyResult::InvalidParam;
+    }
+    let handle = unsafe { &*handle };
+    clear_last_error(handle);
+    if !handle.running.load(Ordering::Acquire) || handle.local_port == 0 {
+        record_error(
+            handle,
+            "Start the local proxy listener before enabling Android VPN capture",
+        );
+        return ProxyResult::NotRunning;
+    }
+    if handle.tun_running.load(Ordering::Acquire) {
+        return ProxyResult::AlreadyRunning;
+    }
+
+    let duplicated = unsafe { libc::dup(tun_fd) };
+    if duplicated < 0 {
+        let error = io::Error::last_os_error();
+        record_error(
+            handle,
+            &format!("Failed to duplicate Android VPN TUN descriptor: {error}"),
+        );
+        return ProxyResult::RuntimeError;
+    }
+    let owned_fd = unsafe { OwnedFd::from_raw_fd(duplicated) };
+
+    let config = match TunConfig::new(Vec::<String>::new()) {
+        Ok(config) => config
+            .with_udp_enabled(handle.udp_enabled.load(Ordering::Acquire))
+            .with_ipv6_enabled(true)
+            .with_mtu(mtu)
+            .with_virtual_dns_state(handle.tun_virtual_dns.clone()),
+        Err(error) => {
+            record_error(
+                handle,
+                &format!("Failed to initialize Android TUN forwarding: {error}"),
+            );
+            return ProxyResult::RuntimeError;
+        }
+    };
+
+    let local_port = handle.local_port;
+    start_tun_runtime(
+        handle,
+        config,
+        move |port, config, shutdown_token, ready| {
+            run_with_ready_on_fd(port, config, owned_fd, shutdown_token, ready)
+        },
+        format!("Android VPN ready: IPv4/IPv6 device traffic -> socks5://127.0.0.1:{local_port}"),
+    )
+}
+
+fn start_tun_runtime<Runner, RunnerFuture>(
+    handle: &ProxyHandle,
+    config: TunConfig,
+    runner: Runner,
+    ready_message: String,
+) -> ProxyResult
+where
+    Runner: FnOnce(
+            u16,
+            TunConfig,
+            CancellationToken,
+            Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+        ) -> RunnerFuture
+        + Send
+        + 'static,
+    RunnerFuture: Future<Output = io::Result<usize>> + Send + 'static,
+{
     let (previous, stopped) = match handle.tun_lifecycle.lock() {
         Ok(mut lifecycle) => (lifecycle.cancel_token.take(), lifecycle.stopped.take()),
         Err(_) => return ProxyResult::RuntimeError,
@@ -649,7 +753,7 @@ pub unsafe extern "C" fn proxy_start_tun(
             setup_succeeded
         });
 
-        let result = run_with_ready(local_port, config, shutdown_token, Some(setup_sender)).await;
+        let result = runner(local_port, config, shutdown_token, Some(setup_sender)).await;
         let setup_succeeded = readiness_task.await.unwrap_or(false);
         // A stop followed immediately by a new start can leave the old async
         // task finishing after the replacement has begun. Only the current
@@ -683,13 +787,7 @@ pub unsafe extern "C" fn proxy_start_tun(
     });
     match readiness {
         Ok(Ok(Ok(()))) => {
-            send_log(
-                2,
-                &format!(
-                    "TUN ready: device traffic -> socks5://127.0.0.1:{local_port}; remote \
-                     endpoint {remote_host}:{remote_port} bypasses TUN"
-                ),
-            );
+            send_log(2, &ready_message);
             ProxyResult::Ok
         }
         Ok(Ok(Err(error))) => fail_tun_start(handle, &error),

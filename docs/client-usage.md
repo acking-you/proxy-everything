@@ -71,13 +71,17 @@ Operational details:
 ## TUN Mode
 
 TUN mode sends device traffic to the SOCKS5 listener already hosted on the
-client port. It does not require a second proxy process or a separately
-installed TUN device:
+client port. It does not require a second proxy process:
 
 ```text
 Application TCP/UDP -> Wintun -> tun2proxy -> 127.0.0.1:<client-port>
                     -> proxy-everything client -> remote server -> destination
 ```
+
+On Android, the Flutter client replaces Wintun and desktop route setup with an
+Android `VpnService` interface. Kotlin owns the TUN descriptor, Rust forwards a
+duplicate through the same tun2proxy and local SOCKS5 path, and Android applies
+capture policy by application package name.
 
 The local port is a protocol-multiplexed HTTP/SOCKS5 listener, but tun2proxy
 deliberately uses its SOCKS5 endpoint because SOCKS5 preserves both TCP and UDP
@@ -146,6 +150,21 @@ The current UI executable appears as a required, disabled selection. This is
 not only a presentation rule: Rust always appends the current executable after
 every configuration or runtime replacement, so malformed imported settings or
 an FFI caller cannot remove it.
+
+### Android Flutter UI
+
+On Android the desktop process picker is replaced by **VPN Applications**.
+Choose **All** to capture every eligible application, **Bypass** to let selected
+applications use the physical network, or **Only** to capture only selected
+applications. The picker displays installed application names, package names,
+icons, and system-app status. A live policy change recreates the Android VPN
+interface while keeping the local proxy listener active.
+
+The Proxy Everything package is always outside its own VPN so its upstream
+socket cannot be captured and returned to the local listener. Android shows its
+standard one-time VPN consent dialog on first use and a foreground notification
+while capture is active. See [Android VPN Development](android-vpn.md) for the
+build, descriptor-ownership, application-policy, and emulator workflow.
 
 ### Privileges and shutdown
 
@@ -320,22 +339,13 @@ explicitly only when TCP-only TUN operation is intentional.
 
 ## Android
 
-1. Download `http-proxy-cli-*-armv7-unknown-linux-musleabi.tar.gz` (32-bit) or `aarch64-unknown-linux-musl` (64-bit)
+Use the Flutter Android client for whole-device IPv4/IPv6 capture. Configure
+and start the local proxy, choose an application policy under **VPN
+Applications**, then enable **VPN Service** and approve Android's consent
+dialog. Manual Wi-Fi proxy settings are not required.
 
-2. Use Termux to run:
-   ```bash
-   pkg install proot
-   tar -xzf http-proxy-cli-*.tar.gz
-   chmod +x http-proxy-cli
-   ./http-proxy-cli -s YOUR_SERVER_IP -c 7890
-   ```
-
-3. Configure Wi-Fi proxy:
-   - Settings → Wi-Fi → Long press connected network → Modify network
-   - Proxy: Manual
-   - Hostname: `127.0.0.1`, Port: `7890`
-
-**Alternative:** Use apps like "Proxy Server" or "Every Proxy" to set system-wide proxy.
+For local builds, physical-device ABIs, package visibility, and 4 KB/16 KB
+emulator verification, follow [Android VPN Development](android-vpn.md).
 
 ---
 

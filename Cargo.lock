@@ -2868,6 +2868,7 @@ dependencies = [
 name = "proxy-ffi"
 version = "0.4.23"
 dependencies = [
+ "libc",
  "proxy-client",
  "proxy-core",
  "reqwest",

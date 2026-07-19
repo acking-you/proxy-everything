@@ -21,3 +21,6 @@ reqwest = { workspace = true }
 
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
 sysproxy = { workspace = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+libc = "0.2"

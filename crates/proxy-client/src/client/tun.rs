@@ -11,6 +11,8 @@ use std::collections::BTreeSet as IpSet;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::net::IpAddr;
+#[cfg(unix)]
+use std::os::fd::{IntoRawFd, OwnedFd};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
@@ -155,7 +157,24 @@ impl TunConfig {
         self.udp_enabled = enabled;
         self
     }
+
+    /// Enable or disable IPv6 forwarding in the userspace network stack.
+    pub fn with_ipv6_enabled(mut self, enabled: bool) -> Self {
+        self.ipv6_enabled = enabled;
+        self
+    }
+
+    /// Override the TUN MTU supplied by the platform interface owner.
+    pub fn with_mtu(mut self, mtu: u16) -> Self {
+        self.mtu = mtu;
+        self
+    }
 }
+
+#[cfg(unix)]
+type PlatformTunFd = Option<OwnedFd>;
+#[cfg(not(unix))]
+type PlatformTunFd = Option<()>;
 
 /// Return the current executable's file name in the same normalized form used
 /// by `tun2proxy` process matching.
@@ -322,7 +341,31 @@ pub async fn run_with_ready(
     local_port: u16,
     config: TunConfig,
     shutdown_token: CancellationToken,
+    ready: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+) -> io::Result<usize> {
+    run_with_ready_inner(local_port, config, shutdown_token, ready, None).await
+}
+
+/// Forward an Android/iOS TUN interface that was established by the platform
+/// VPN API. The supplied descriptor is owned by this call and remains open for
+/// the complete forwarding lifetime.
+#[cfg(unix)]
+pub async fn run_with_ready_on_fd(
+    local_port: u16,
+    config: TunConfig,
+    tun_fd: OwnedFd,
+    shutdown_token: CancellationToken,
+    ready: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+) -> io::Result<usize> {
+    run_with_ready_inner(local_port, config, shutdown_token, ready, Some(tun_fd)).await
+}
+
+async fn run_with_ready_inner(
+    local_port: u16,
+    config: TunConfig,
+    shutdown_token: CancellationToken,
     mut ready: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    tun_fd: PlatformTunFd,
 ) -> io::Result<usize> {
     install_tun_log_bridge();
     if config.udp_enabled
@@ -335,9 +378,12 @@ pub async fn run_with_ready(
     }
     let proxy = ArgProxy::try_from(format!("socks5://127.0.0.1:{local_port}").as_str())
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
+    let platform_owned_tun = tun_fd.is_some();
     let mut args = Args {
         proxy,
-        setup: true,
+        // Android's VpnService already owns addresses, routes, DNS, and the
+        // per-application policy. Desktop platforms remain managed here.
+        setup: !platform_owned_tun,
         // Fake-IP DNS keeps resolver traffic inside the TUN path and preserves
         // the queried domain for the local SOCKS5 listener. `Direct` would add
         // the resolver as another physical-route exception, contradicting the
@@ -349,7 +395,11 @@ pub async fn run_with_ready(
         ..Args::default()
     };
 
-    let route_bypass = resolve_remote_addresses(config.remote_endpoint.as_ref()).await?;
+    let route_bypass = if platform_owned_tun {
+        Vec::new()
+    } else {
+        resolve_remote_addresses(config.remote_endpoint.as_ref()).await?
+    };
     for address in &route_bypass {
         args.bypass.push(
             address
@@ -359,6 +409,12 @@ pub async fn run_with_ready(
         );
     }
 
+    #[cfg(unix)]
+    if let Some(tun_fd) = tun_fd {
+        args.tun_fd = Some(tun_fd.into_raw_fd());
+        args.close_fd_on_drop = Some(true);
+    }
+
     tracing::info!(
         local_port,
         tun_proxy = %format_args!("socks5://127.0.0.1:{local_port}"),
@@ -366,6 +422,7 @@ pub async fn run_with_ready(
         ipv6_enabled = config.ipv6_enabled,
         route_bypass = ?route_bypass,
         bypass_processes = ?args.bypass_process,
+        platform_owned_tun,
         "starting TUN traffic capture with mandatory loop prevention"
     );
 

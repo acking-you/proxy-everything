@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 use proxy_core::util::error_report;
 use serde::{Deserialize, Serialize};
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]

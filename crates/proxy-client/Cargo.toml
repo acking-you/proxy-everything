@@ -26,6 +26,12 @@ uni-stream = { workspace = true }
 base64 = { workspace = true }
 tun2proxy = { workspace = true }
 
+# auto-proxy dependencies
+hashbrown = { workspace = true, optional = true }
+kanal = { workspace = true, optional = true }
+async-broadcast = { workspace = true, optional = true }
+dashmap = { workspace = true, optional = true }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 png = "0.18"
 sysinfo = { workspace = true }
@@ -36,12 +42,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
-
-# auto-proxy dependencies
-hashbrown = { workspace = true, optional = true }
-kanal = { workspace = true, optional = true }
-async-broadcast = { workspace = true, optional = true }
-dashmap = { workspace = true, optional = true }
 
 [features]
 default = ["auto-proxy"]

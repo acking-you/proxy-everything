@@ -16,6 +16,8 @@ pub(crate) fn init_allocator() {
 
 // Re-export all public FFI functions and types
 pub use groups::{proxy_free_groups_result, proxy_get_server_groups};
+#[cfg(target_os = "android")]
+pub use handle::proxy_start_android_tun;
 pub use handle::{
     ProxyHandle, proxy_create, proxy_destroy, proxy_get_last_error, proxy_get_tun_self_process,
     proxy_is_elevated, proxy_is_running, proxy_is_tun_running, proxy_list_tun_processes,
