@@ -8,11 +8,18 @@ data path is:
 Android application TCP/UDP
   -> VpnService TUN file descriptor
   -> tun2proxy
-  -> socks5://127.0.0.1:<local-port>
-  -> proxy-everything client
-  -> remote proxy server
-  -> destination
+     -> TCP and proxy-enabled UDP -> socks5://127.0.0.1:<local-port>
+        -> proxy-everything client -> remote proxy server -> destination
+     -> UDP when SOCKS5 UDP is off
+        -> direct fallback on  -> physical network -> destination
+        -> direct fallback off -> blocked
 ```
+
+Virtual DNS remains local in every UDP policy so TCP applications can still
+resolve hostnames without external UDP. Direct UDP fallback matches
+Mihomo's behavior for an outbound without UDP support, but that traffic does
+not traverse the proxy. Fake-IP hostnames are resolved over the TCP proxy before
+the direct UDP socket is opened, preventing resolver recursion through the VPN.
 
 `ProxyVpnService` retains the `ParcelFileDescriptor`. The platform channel
 passes its integer descriptor to `proxy_start_android_tun`, which duplicates
@@ -29,6 +36,11 @@ Open **VPN Applications** on the main Proxy page to choose one of three modes:
 | **All** | Every eligible application uses the VPN except Proxy Everything |
 | **Bypass** | Selected applications and Proxy Everything bypass the VPN |
 | **Only** | Only selected applications use the VPN |
+
+In **Proxy Configuration**, leave **Direct UDP fallback** enabled to send
+captured UDP directly when **SOCKS5 UDP** is off. Disable both switches for a
+strict TCP-only VPN that blocks captured non-DNS UDP. The same policy is used
+by desktop TUN mode.
 
 Allowed and disallowed application lists are mutually exclusive Android APIs,
 so the UI always applies exactly one policy. Changing the policy while the VPN
@@ -126,8 +138,11 @@ Useful checks:
 ```
 
 The VPN interface uses `172.19.0.1/30`,
-`fdfe:dcba:9876::1/126`, IPv4 and IPv6 default routes, MTU 1500, and the
-tun2proxy virtual DNS address `198.18.0.1`.
+`fdfe:dcba:9876::1/126`, IPv4 and IPv6 default routes, and MTU 1500. Its DNS
+portal is `172.19.0.2`, while fake-IP allocations remain in tun2proxy's
+separate `198.18.0.0/15` pool. The ranges must not overlap: Android probes a
+VPN DNS server with opportunistic DNS-over-TLS, and a portal/fake-IP collision
+can send that probe to an unrelated hostname.
 
 ## 16 KB page-size verification
 
@@ -156,8 +171,8 @@ Verify APK zip alignment and ELF load-segment alignment before release:
 - Start the local proxy before enabling **VPN Service**. Native forwarding
   deliberately rejects a TUN descriptor when the SOCKS5 listener is absent.
 - Complete TCP and UDP capture requires a remote server from the same release.
-  If UDP readiness fails against an older server, upgrade the server. Disabling
-  SOCKS5 UDP is only a deliberate TCP-only fallback.
+  If UDP readiness fails against an older server, upgrade the server. Otherwise
+  disable SOCKS5 UDP and choose either direct fallback or strict UDP blocking.
 - If Android reports another VPN, disconnect it first. Only one VPN interface
   can own the user's default VPN routes.
 - An empty **Only** selection is rejected. Uninstalled packages in a stored

@@ -17,7 +17,7 @@ use std::os::fd::{IntoRawFd, OwnedFd};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 pub use tun2proxy::VirtualDnsState as TunVirtualDnsState;
-use tun2proxy::{ArgDns, ArgProxy, Args, ProcessBypass};
+use tun2proxy::{ArgDns, ArgProxy, ArgUdpStrategy, Args, ProcessBypass};
 
 struct TunLogBridge;
 
@@ -120,6 +120,9 @@ pub struct TunConfig {
     /// Require a successful end-to-end SOCKS5 UDP readiness check before
     /// changing system routes.
     pub udp_enabled: bool,
+    /// Relay non-DNS UDP directly when SOCKS5 UDP is disabled. When false,
+    /// captured non-DNS UDP is blocked instead.
+    pub udp_direct_fallback: bool,
     /// Remote proxy endpoint whose resolved addresses must never enter TUN.
     pub remote_endpoint: Option<(String, u16)>,
 }
@@ -132,6 +135,7 @@ impl TunConfig {
             ipv6_enabled: false,
             mtu: tun2proxy::DEFAULT_MTU,
             udp_enabled: true,
+            udp_direct_fallback: true,
             remote_endpoint: None,
         })
     }
@@ -151,10 +155,17 @@ impl TunConfig {
         self
     }
 
-    /// Keep TCP-only TUN mode available when the local SOCKS5 UDP command was
-    /// explicitly disabled by configuration.
+    /// Proxy non-DNS UDP through SOCKS5 when enabled. When disabled, keep DNS
+    /// inside the virtual resolver and relay other captured UDP directly.
     pub fn with_udp_enabled(mut self, enabled: bool) -> Self {
         self.udp_enabled = enabled;
+        self
+    }
+
+    /// Choose whether disabling SOCKS5 UDP falls back to direct UDP or blocks
+    /// captured non-DNS UDP entirely.
+    pub fn with_udp_direct_fallback(mut self, enabled: bool) -> Self {
+        self.udp_direct_fallback = enabled;
         self
     }
 
@@ -389,6 +400,7 @@ async fn run_with_ready_inner(
         // the resolver as another physical-route exception, contradicting the
         // all-traffic guarantee and leaking DNS outside the proxy.
         dns: ArgDns::Virtual,
+        udp_strategy: tun_udp_strategy(config.udp_enabled, config.udp_direct_fallback),
         ipv6_enabled: config.ipv6_enabled,
         mtu: config.mtu,
         bypass_process: config.bypass.effective_processes(),
@@ -420,6 +432,7 @@ async fn run_with_ready_inner(
         tun_proxy = %format_args!("socks5://127.0.0.1:{local_port}"),
         mtu = config.mtu,
         ipv6_enabled = config.ipv6_enabled,
+        udp_strategy = ?args.udp_strategy,
         route_bypass = ?route_bypass,
         bypass_processes = ?args.bypass_process,
         platform_owned_tun,
@@ -449,6 +462,16 @@ async fn run_with_ready_inner(
             )
             .await
         }
+    }
+}
+
+fn tun_udp_strategy(udp_enabled: bool, udp_direct_fallback: bool) -> ArgUdpStrategy {
+    if udp_enabled {
+        ArgUdpStrategy::Proxy
+    } else if udp_direct_fallback {
+        ArgUdpStrategy::Direct
+    } else {
+        ArgUdpStrategy::Block
     }
 }
 
@@ -488,7 +511,7 @@ async fn validate_local_socks5_udp(local_port: u16) -> io::Result<()> {
                     io::ErrorKind::Unsupported,
                     "UDP preflight failed: the remote proxy closed the association before \
                      readiness. Upgrade and restart http-proxy-server with the same release as \
-                     this client, or disable SOCKS5 UDP for TCP-only TUN mode",
+                     this client, or disable SOCKS5 UDP to use direct UDP fallback",
                 ));
             }
             return Err(error);
@@ -561,6 +584,14 @@ mod tests {
         assert!(updated.contains(&current));
         assert!(updated.contains(&"curl".to_string()));
         assert!(!updated.contains(&"browser".to_string()));
+    }
+
+    #[test]
+    fn tun_udp_policy_selects_proxy_direct_or_block() {
+        assert_eq!(tun_udp_strategy(true, true), ArgUdpStrategy::Proxy);
+        assert_eq!(tun_udp_strategy(true, false), ArgUdpStrategy::Proxy);
+        assert_eq!(tun_udp_strategy(false, true), ArgUdpStrategy::Direct);
+        assert_eq!(tun_udp_strategy(false, false), ArgUdpStrategy::Block);
     }
 
     #[cfg(target_os = "windows")]

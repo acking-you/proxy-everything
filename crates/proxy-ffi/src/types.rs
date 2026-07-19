@@ -75,6 +75,29 @@ pub struct ProxyConfigV3 {
     pub tun_bypass_processes: *const c_char,
 }
 
+/// Versioned proxy configuration with explicit TUN UDP fallback policy.
+///
+/// V1-V3 callers retain direct UDP fallback when SOCKS5 UDP is disabled.
+#[repr(C)]
+pub struct ProxyConfigV4 {
+    pub server_host: *const c_char,
+    pub server_port: u16,
+    pub local_port: u16,
+    pub session_key: *const c_char,
+    pub auto_proxy: c_int,
+    pub reverse_geo: c_int,
+    pub cache_dir: *const c_char,
+    pub need_codec_ips: *const c_char,
+    pub force_codec: c_int,
+    pub set_system_proxy: c_int,
+    pub enable_udp: c_int,
+    pub enable_tun: c_int,
+    pub tun_bypass_processes: *const c_char,
+    /// 0 blocks captured non-DNS UDP when UDP proxying is disabled; non-zero
+    /// relays it directly.
+    pub tun_udp_direct_fallback: c_int,
+}
+
 /// Result of latency test.
 #[repr(C)]
 pub struct LatencyResult {
@@ -160,5 +183,19 @@ mod tests {
         assert_same_offset!(ProxyConfigV2, ProxyConfigV3, force_codec);
         assert_same_offset!(ProxyConfigV2, ProxyConfigV3, set_system_proxy);
         assert_same_offset!(ProxyConfigV2, ProxyConfigV3, enable_udp);
+
+        assert_same_offset!(ProxyConfigV3, ProxyConfigV4, server_host);
+        assert_same_offset!(ProxyConfigV3, ProxyConfigV4, server_port);
+        assert_same_offset!(ProxyConfigV3, ProxyConfigV4, local_port);
+        assert_same_offset!(ProxyConfigV3, ProxyConfigV4, session_key);
+        assert_same_offset!(ProxyConfigV3, ProxyConfigV4, auto_proxy);
+        assert_same_offset!(ProxyConfigV3, ProxyConfigV4, reverse_geo);
+        assert_same_offset!(ProxyConfigV3, ProxyConfigV4, cache_dir);
+        assert_same_offset!(ProxyConfigV3, ProxyConfigV4, need_codec_ips);
+        assert_same_offset!(ProxyConfigV3, ProxyConfigV4, force_codec);
+        assert_same_offset!(ProxyConfigV3, ProxyConfigV4, set_system_proxy);
+        assert_same_offset!(ProxyConfigV3, ProxyConfigV4, enable_udp);
+        assert_same_offset!(ProxyConfigV3, ProxyConfigV4, enable_tun);
+        assert_same_offset!(ProxyConfigV3, ProxyConfigV4, tun_bypass_processes);
     }
 }

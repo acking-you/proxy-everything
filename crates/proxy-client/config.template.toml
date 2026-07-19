@@ -33,6 +33,10 @@ udp = true
 # privileges are required. The client executable always bypasses TUN capture.
 tun = false
 
+# When SOCKS5 UDP is disabled, send captured non-DNS UDP directly instead of
+# blocking it. This defaults to true. Set false for a strict TCP-only TUN.
+tun_udp_direct_fallback = true
+
 # Additional executable names that should bypass the TUN. Names are
 # case-insensitive and a trailing .exe is optional.
 tun_bypass_processes = []

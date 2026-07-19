@@ -24,7 +24,7 @@ use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
 
 use crate::logging::send_log;
-use crate::types::{ProxyConfig, ProxyConfigV2, ProxyConfigV3, ProxyResult};
+use crate::types::{ProxyConfig, ProxyConfigV2, ProxyConfigV3, ProxyConfigV4, ProxyResult};
 
 /// Opaque handle to the proxy client.
 pub struct ProxyHandle {
@@ -42,6 +42,7 @@ pub struct ProxyHandle {
     remote_endpoint: Mutex<Option<(String, u16)>>,
     last_error: Arc<Mutex<Option<String>>>,
     udp_enabled: AtomicBool,
+    tun_udp_direct_fallback: AtomicBool,
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     system_proxy_guard: Arc<Mutex<Option<SystemProxyGuard>>>,
 }
@@ -82,6 +83,7 @@ pub extern "C" fn proxy_create() -> *mut ProxyHandle {
         remote_endpoint: Mutex::new(None),
         last_error: Arc::new(Mutex::new(None)),
         udp_enabled: AtomicBool::new(true),
+        tun_udp_direct_fallback: AtomicBool::new(true),
         #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
         system_proxy_guard: Arc::new(Mutex::new(None)),
     }))
@@ -102,7 +104,7 @@ pub unsafe extern "C" fn proxy_start(
     }
 
     let config = unsafe { &*config };
-    proxy_start_inner(handle, config, true, false, Vec::new())
+    proxy_start_inner(handle, config, true, false, true, Vec::new())
 }
 
 /// Start the proxy with the version 2 configuration.
@@ -140,6 +142,7 @@ pub unsafe extern "C" fn proxy_start_v2(
         &legacy_config,
         config.enable_udp != 0,
         false,
+        true,
         Vec::new(),
     )
 }
@@ -185,6 +188,51 @@ pub unsafe extern "C" fn proxy_start_v3(
         &legacy_config,
         config.enable_udp != 0,
         config.enable_tun != 0,
+        true,
+        bypass_processes,
+    )
+}
+
+/// Start the proxy with the version 4 configuration.
+///
+/// V4 adds a TUN-only policy for non-DNS UDP when SOCKS5 UDP is disabled.
+/// Older entry points keep direct fallback enabled for compatibility.
+///
+/// # Safety
+/// - `handle` must be a valid pointer from `proxy_create`
+/// - `config` fields must be valid C strings
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_start_v4(
+    handle: *mut ProxyHandle,
+    config: *const ProxyConfigV4,
+) -> ProxyResult {
+    if handle.is_null() || config.is_null() {
+        return ProxyResult::InvalidParam;
+    }
+
+    let config = unsafe { &*config };
+    let legacy_config = ProxyConfig {
+        server_host: config.server_host,
+        server_port: config.server_port,
+        local_port: config.local_port,
+        session_key: config.session_key,
+        auto_proxy: config.auto_proxy,
+        reverse_geo: config.reverse_geo,
+        cache_dir: config.cache_dir,
+        need_codec_ips: config.need_codec_ips,
+        force_codec: config.force_codec,
+        set_system_proxy: config.set_system_proxy,
+    };
+    let bypass_processes = match parse_process_names(config.tun_bypass_processes) {
+        Ok(names) => names,
+        Err(result) => return result,
+    };
+    proxy_start_inner(
+        handle,
+        &legacy_config,
+        config.enable_udp != 0,
+        config.enable_tun != 0,
+        config.tun_udp_direct_fallback != 0,
         bypass_processes,
     )
 }
@@ -218,6 +266,7 @@ fn proxy_start_inner(
     config: &ProxyConfig,
     enable_udp: bool,
     enable_tun: bool,
+    tun_udp_direct_fallback: bool,
     tun_bypass_processes: Vec<String>,
 ) -> ProxyResult {
     if config.server_host.is_null() {
@@ -291,6 +340,7 @@ fn proxy_start_inner(
             Ok(config) => Some(
                 config
                     .with_udp_enabled(enable_udp)
+                    .with_udp_direct_fallback(tun_udp_direct_fallback)
                     .with_virtual_dns_state(handle.tun_virtual_dns.clone())
                     .with_remote_endpoint(server_host.clone(), server_port),
             ),
@@ -365,6 +415,9 @@ fn proxy_start_inner(
     handle.running.store(true, Ordering::SeqCst);
     handle.local_port = local_port;
     handle.udp_enabled.store(enable_udp, Ordering::Release);
+    handle
+        .tun_udp_direct_fallback
+        .store(tun_udp_direct_fallback, Ordering::Release);
     if let Ok(mut endpoint) = handle.remote_endpoint.lock() {
         *endpoint = Some((server_host.clone(), server_port));
     }
@@ -393,6 +446,7 @@ fn proxy_start_inner(
             enable_auto_proxy,
             enable_udp,
             enable_tun,
+            tun_udp_direct_fallback,
             force_codec,
             "proxy started"
         );
@@ -570,6 +624,7 @@ pub unsafe extern "C" fn proxy_start_tun(
     let config = match TunConfig::new(processes) {
         Ok(config) => config
             .with_udp_enabled(handle.udp_enabled.load(Ordering::Acquire))
+            .with_udp_direct_fallback(handle.tun_udp_direct_fallback.load(Ordering::Acquire))
             .with_virtual_dns_state(handle.tun_virtual_dns.clone())
             .with_remote_endpoint(remote_host.clone(), remote_port),
         Err(error) => {
@@ -642,6 +697,7 @@ pub unsafe extern "C" fn proxy_start_android_tun(
     let config = match TunConfig::new(Vec::<String>::new()) {
         Ok(config) => config
             .with_udp_enabled(handle.udp_enabled.load(Ordering::Acquire))
+            .with_udp_direct_fallback(handle.tun_udp_direct_fallback.load(Ordering::Acquire))
             .with_ipv6_enabled(true)
             .with_mtu(mtu)
             .with_virtual_dns_state(handle.tun_virtual_dns.clone()),

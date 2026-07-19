@@ -56,6 +56,9 @@ struct Cli {
     /// [optional] Capture all device TCP/UDP traffic through a local TUN interface
     #[arg(long)]
     tun: bool,
+    /// [optional] Send TUN UDP directly when SOCKS5 UDP is disabled; false blocks it
+    #[arg(long, value_name = "DIRECT")]
+    tun_udp_direct_fallback: Option<bool>,
     /// [optional] Executable name that should bypass TUN capture (repeatable)
     #[arg(long = "tun-bypass-process", value_name = "PROCESS")]
     tun_bypass_processes: Vec<String>,
@@ -86,6 +89,7 @@ impl Cli {
             auto_proxy: self.auto_proxy,
             udp: self.udp,
             tun: self.tun.then_some(true),
+            tun_udp_direct_fallback: self.tun_udp_direct_fallback,
             tun_bypass_processes: (!self.tun_bypass_processes.is_empty())
                 .then(|| self.tun_bypass_processes.clone()),
             nonproxy_keywords: self
@@ -127,6 +131,7 @@ impl Cli {
             || self.auto_proxy.is_some()
             || self.udp.is_some()
             || self.tun
+            || self.tun_udp_direct_fallback.is_some()
             || !self.tun_bypass_processes.is_empty()
             || self.set_system_proxy
     }
@@ -243,6 +248,15 @@ async fn main() -> Result<()> {
         })
         .unwrap_or(true);
     let enable_tun = cli.tun || config.tun.unwrap_or(false);
+    let tun_udp_direct_fallback = cli
+        .tun_udp_direct_fallback
+        .or(config.tun_udp_direct_fallback)
+        .or_else(|| {
+            std::env::var("TUN_UDP_DIRECT_FALLBACK")
+                .ok()
+                .and_then(|v| parse_bool_env(&v))
+        })
+        .unwrap_or(true);
     let tun_bypass_processes = if cli.tun_bypass_processes.is_empty() {
         config.tun_bypass_processes.clone().unwrap_or_default()
     } else {
@@ -397,6 +411,10 @@ async fn main() -> Result<()> {
     table.add_row(vec![Cell::new("TUN Mode"), status_cell(enable_tun)]);
     if enable_tun {
         table.add_row(vec![
+            Cell::new("TUN UDP Direct Fallback"),
+            status_cell(tun_udp_direct_fallback),
+        ]);
+        table.add_row(vec![
             Cell::new("TUN Process Bypass"),
             Cell::new(format!(
                 "{} user-selected + current executable",
@@ -438,7 +456,11 @@ async fn main() -> Result<()> {
     let tun = enable_tun
         .then(|| {
             TunConfig::new(tun_bypass_processes)
-                .map(|config| config.with_udp_enabled(enable_udp))
+                .map(|config| {
+                    config
+                        .with_udp_enabled(enable_udp)
+                        .with_udp_direct_fallback(tun_udp_direct_fallback)
+                })
                 .map(|config| match tun_endpoint {
                     Some((host, port)) => config.with_remote_endpoint(host, port),
                     None => config,
@@ -492,6 +514,8 @@ mod tests {
         let cli = Cli::try_parse_from([
             "http-proxy-cli",
             "--tun",
+            "--tun-udp-direct-fallback",
+            "false",
             "--tun-bypass-process",
             "browser.exe",
             "--tun-bypass-process",
@@ -501,6 +525,7 @@ mod tests {
 
         let config = cli.to_config();
         assert_eq!(config.tun, Some(true));
+        assert_eq!(config.tun_udp_direct_fallback, Some(false));
         assert_eq!(
             config.tun_bypass_processes,
             Some(vec!["browser.exe".to_string(), "downloader".to_string()])

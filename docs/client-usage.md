@@ -21,6 +21,7 @@ Without `--set-system-proxy`, manually configure system proxy to `127.0.0.1:<loc
 | `-m, --msg-key` | Enable random message key |
 | `--udp <true\|false>` | Enable SOCKS5 UDP ASSOCIATE (default: `true`) |
 | `--tun` | Capture device traffic with a local TUN interface |
+| `--tun-udp-direct-fallback <true\|false>` | Send UDP directly when proxy UDP is off; `false` blocks it (default: `true`) |
 | `--tun-bypass-process <name>` | Bypass TUN for an executable name (repeatable) |
 | `--tun-list-processes` | List running Windows executable names and exit |
 
@@ -88,7 +89,9 @@ deliberately uses its SOCKS5 endpoint because SOCKS5 preserves both TCP and UDP
 semantics. A successful local listener bind is therefore a prerequisite for
 starting TUN. TUN mode uses virtual DNS so resolver traffic is answered inside
 the tunnel and the original domain is forwarded to the proxy instead of adding
-a direct DNS route.
+a direct DNS route. Android exposes that resolver at `172.19.0.2`, outside the
+`198.18.0.0/15` fake-IP pool, so its opportunistic private-DNS probe cannot
+collide with an allocated application hostname.
 
 On Windows, keep `wintun.dll` in the same directory as
 `http-proxy-cli.exe` or `proxy_ui.exe`. The supported build and staging scripts
@@ -217,15 +220,24 @@ Other bypassed processes connect directly to their original destinations and
 therefore do not use the proxy. Do not add an application to the bypass list if
 its traffic should remain proxied.
 
-TUN TCP continues to work with `--udp false`; captured UDP is rejected by the
-local SOCKS5 listener in that configuration. Leave UDP enabled for complete
-device TCP and UDP forwarding. HTTP upstream proxies cannot relay UDP, while a
-SOCKS5 upstream must implement UDP ASSOCIATE.
+TUN TCP continues to work with `--udp false`. By default, virtual DNS remains
+inside the TUN resolver while other captured UDP is relayed directly instead
+of being sent to the local SOCKS5 listener. This matches the practical fallback
+used when a selected outbound cannot carry UDP, but it means non-DNS UDP
+bypasses the configured proxy. Add `--tun-udp-direct-fallback false` to block
+captured non-DNS UDP instead. Virtual DNS remains available in strict mode so
+TCP applications can still resolve hostnames. HTTP upstream proxies cannot
+relay UDP, while a SOCKS5 upstream must implement UDP ASSOCIATE.
+
+When a direct UDP flow targets a virtual DNS address, tun2proxy resolves its
+stored hostname with DNS-over-TCP through the working TCP proxy before opening
+the direct UDP socket. This avoids feeding the hostname back into Android's VPN
+resolver and receiving a second fake IP.
 
 When UDP is enabled, TUN startup performs an end-to-end SOCKS5 UDP ASSOCIATE
 preflight before creating Wintun or changing routes. This catches an old remote
 server, blocked UDP relay, or incompatible upstream immediately. Disable UDP
-explicitly only when TCP-only TUN operation is intentional.
+explicitly and select either the default direct fallback or strict blocking.
 
 ---
 

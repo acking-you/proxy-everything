@@ -29,6 +29,8 @@ pub struct Config {
     pub udp: Option<bool>,
     /// Capture device traffic through a TUN interface. Missing values default to disabled.
     pub tun: Option<bool>,
+    /// Send non-DNS UDP directly when SOCKS5 UDP is disabled. Defaults to true.
+    pub tun_udp_direct_fallback: Option<bool>,
     /// Executable names routed outside the TUN. The client executable is always added.
     pub tun_bypass_processes: Option<Vec<String>>,
     pub nonproxy_keywords: Option<Vec<String>>,
