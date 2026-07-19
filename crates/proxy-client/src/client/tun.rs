@@ -21,6 +21,11 @@ use tokio_util::sync::CancellationToken;
 pub use tun2proxy::VirtualDnsState as TunVirtualDnsState;
 use tun2proxy::{ArgDns, ArgProxy, ArgUdpStrategy, Args, ProcessBypass};
 
+// Desktop browsers and Android applications can create hundreds of concurrent
+// TCP and QUIC flows. Keep tun2proxy's standalone default conservative while
+// giving the embedded client enough headroom for a full-device workload.
+const EMBEDDED_TUN_MAX_SESSIONS: usize = 1024;
+
 #[cfg(target_os = "android")]
 const ANDROID_VIRTUAL_DNS_PORTAL: IpAddr = IpAddr::V4(Ipv4Addr::new(172, 19, 0, 2));
 
@@ -408,6 +413,7 @@ async fn run_with_ready_inner(
         udp_strategy: tun_udp_strategy(config.udp_enabled, config.udp_direct_fallback),
         ipv6_enabled: config.ipv6_enabled,
         mtu: config.mtu,
+        max_sessions: EMBEDDED_TUN_MAX_SESSIONS,
         bypass_process: config.bypass.effective_processes(),
         ..Args::default()
     };

@@ -233,6 +233,14 @@ addresses are failed locally so the operating system promptly returns to plain
 DNS. HTTP upstream proxies cannot
 relay UDP, while a SOCKS5 upstream must implement UDP ASSOCIATE.
 
+Embedded desktop and Android clients allow up to 1024 concurrent TUN sessions.
+The standalone tun2proxy CLI keeps its conservative 200-session default. Each
+session is accounted for by an owned permit so completion, cancellation, and
+task failure all release capacity. Limit warnings report separate TCP and UDP
+counts, which distinguishes a genuine TCP connection surge from UDP or QUIC
+flows consuming the shared budget. UDP proxy setup is bounded by the configured
+UDP timeout so an unavailable UDP upstream cannot retain a slot indefinitely.
+
 When a direct UDP flow targets a virtual DNS address, tun2proxy resolves its
 stored hostname with DNS-over-TCP through the working TCP proxy before opening
 the direct UDP socket. This avoids feeding the hostname back into Android's VPN
