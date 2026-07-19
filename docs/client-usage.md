@@ -226,7 +226,11 @@ of being sent to the local SOCKS5 listener. This matches the practical fallback
 used when a selected outbound cannot carry UDP, but it means non-DNS UDP
 bypasses the configured proxy. Add `--tun-udp-direct-fallback false` to block
 captured non-DNS UDP instead. Virtual DNS remains available in strict mode so
-TCP applications can still resolve hostnames. HTTP upstream proxies cannot
+TCP applications can still resolve hostnames, including through DNS-over-TCP
+on port 53. Embedders can declare local DNS portal addresses with repeatable
+`--virtual-dns-portal`; opportunistic TLS probes to port 853 on those exact
+addresses are failed locally so the operating system promptly returns to plain
+DNS. HTTP upstream proxies cannot
 relay UDP, while a SOCKS5 upstream must implement UDP ASSOCIATE.
 
 When a direct UDP flow targets a virtual DNS address, tun2proxy resolves its

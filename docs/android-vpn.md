@@ -15,11 +15,17 @@ Android application TCP/UDP
         -> direct fallback off -> blocked
 ```
 
-Virtual DNS remains local in every UDP policy so TCP applications can still
-resolve hostnames without external UDP. Direct UDP fallback matches
+Virtual DNS remains local in every UDP policy and accepts both UDP and
+length-prefixed TCP queries on port 53, so TCP applications can still resolve
+hostnames without external UDP. Direct UDP fallback matches
 Mihomo's behavior for an outbound without UDP support, but that traffic does
 not traverse the proxy. Fake-IP hostnames are resolved over the TCP proxy before
 the direct UDP socket is opened, preventing resolver recursion through the VPN.
+Internationalized DNS labels are retained in their ASCII/Punycode wire form
+when a fake IP is converted back to a hostname. Rendering an IDN such as
+`xn--ngstr-lra8j.com` as Unicode is useful for display, but forwarding that
+display string to a remote SOCKS or system resolver can make an otherwise valid
+Google CDN destination unresolvable.
 
 `ProxyVpnService` retains the `ParcelFileDescriptor`. The platform channel
 passes its integer descriptor to `proxy_start_android_tun`, which duplicates
@@ -96,6 +102,26 @@ fvm flutter build apk --release `
   --target-platform "android-arm,android-arm64,android-x64"
 ```
 
+`ui/flutter/pubspec.yaml` uses Flutter's `versionName+versionCode` form, for
+example `1.2.9+2`. Android only accepts an in-place update when the new APK has
+the same application ID and signing certificate and its numeric `versionCode`
+is not lower than the installed package. Increment the value after `+` for
+every Android release. Flutter adds an ABI-specific prefix to APKs produced by
+`--split-per-abi` (for example, ARM64 build number `2` becomes version code
+`2002`), so update a split APK with the new APK for the same architecture. Do
+not replace an installed split release with a universal or debug APK whose
+effective version code is lower. Previously the project omitted
+`+build-number`, so every release reused the same base code and normal
+package-installer updates could be rejected even though the saved application
+data was compatible.
+
+The release build currently uses the local Android debug certificate for
+compatibility with existing installations. Keep and back up the original
+`%USERPROFILE%\.android\debug.keystore`: replacing it changes the signing
+identity and Android cannot update an app signed by the old certificate. A
+future production signing-key migration must be planned separately rather than
+silently replacing this file.
+
 The current Android release build still uses the debug signing configuration.
 Configure a private release keystore before publishing an APK or app bundle.
 
@@ -142,7 +168,10 @@ The VPN interface uses `172.19.0.1/30`,
 portal is `172.19.0.2`, while fake-IP allocations remain in tun2proxy's
 separate `198.18.0.0/15` pool. The ranges must not overlap: Android probes a
 VPN DNS server with opportunistic DNS-over-TLS, and a portal/fake-IP collision
-can send that probe to an unrelated hostname.
+can send that probe to an unrelated hostname. tun2proxy rejects TCP port 853
+only for the configured virtual portal, making Android fall back immediately
+to the local plain-DNS handler instead of proxying an unreachable private
+address until timeout.
 
 ## 16 KB page-size verification
 

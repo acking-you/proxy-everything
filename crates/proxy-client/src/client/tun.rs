@@ -11,6 +11,8 @@ use std::collections::BTreeSet as IpSet;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::net::IpAddr;
+#[cfg(target_os = "android")]
+use std::net::Ipv4Addr;
 #[cfg(unix)]
 use std::os::fd::{IntoRawFd, OwnedFd};
 
@@ -18,6 +20,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 pub use tun2proxy::VirtualDnsState as TunVirtualDnsState;
 use tun2proxy::{ArgDns, ArgProxy, ArgUdpStrategy, Args, ProcessBypass};
+
+#[cfg(target_os = "android")]
+const ANDROID_VIRTUAL_DNS_PORTAL: IpAddr = IpAddr::V4(Ipv4Addr::new(172, 19, 0, 2));
 
 struct TunLogBridge;
 
@@ -407,6 +412,14 @@ async fn run_with_ready_inner(
         ..Args::default()
     };
 
+    // Keep synchronized with ProxyVpnService.VIRTUAL_DNS. Android probes each
+    // VPN DNS address with opportunistic DNS-over-TLS; tun2proxy must fail that
+    // private portal probe locally so netd immediately uses plain DNS.
+    #[cfg(target_os = "android")]
+    if platform_owned_tun {
+        args.virtual_dns_portals.push(ANDROID_VIRTUAL_DNS_PORTAL);
+    }
+
     let route_bypass = if platform_owned_tun {
         Vec::new()
     } else {
@@ -433,6 +446,7 @@ async fn run_with_ready_inner(
         mtu = config.mtu,
         ipv6_enabled = config.ipv6_enabled,
         udp_strategy = ?args.udp_strategy,
+        virtual_dns_portals = ?args.virtual_dns_portals,
         route_bypass = ?route_bypass,
         bypass_processes = ?args.bypass_process,
         platform_owned_tun,
