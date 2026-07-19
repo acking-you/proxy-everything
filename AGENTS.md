@@ -72,6 +72,108 @@ Run these from the repository root in PowerShell:
 `ui/flutter/native/windows/<architecture>/`. Do not duplicate this copy logic
 in ad hoc commands or commit the resulting DLL.
 
+## Upgrade and Release Packaging Rules
+
+Treat every package given to a user as an upgradeable release, even when it is
+only for local testing. A request to "publish" means producing verified,
+versioned local artifacts unless the user explicitly requests a tag, push, or
+remote upload.
+
+### Versioning and Android Upgrade Compatibility
+
+- Before every new Android package, increment the build number in
+  `ui/flutter/pubspec.yaml` (`version: <version-name>+<build-number>`). Increment
+  it even when the human-readable version name does not change. Never reuse or
+  decrease a build number from an APK that may already be installed.
+- Keep the Android application ID `com.proxyui.proxy_ui` unchanged. An APK can
+  update an installed copy only when its application ID and signing certificate
+  match and its effective `versionCode` is greater than the installed one.
+- Android release builds currently use the existing local debug signing key.
+  Do not delete, regenerate, or silently replace `%USERPROFILE%\.android\debug.keystore`.
+  A production signing migration must be planned explicitly because changing
+  the key prevents in-place upgrades and discards the current installation path.
+- Flutter adds ABI-specific offsets to split APK version codes. Do not infer the
+  final code only from `pubspec.yaml`; inspect every APK with `aapt dump badging`
+  and confirm its package name, `versionName`, effective `versionCode`, SDKs, and
+  ABI before delivery.
+- Verify every APK certificate with `apksigner verify --print-certs`. Compare
+  its certificate digest with the previous release when one is available.
+
+### Android Release Build
+
+- Android releases are split per ABI by default; do not distribute a universal
+  APK unless the user explicitly requests one. Build at least `arm64-v8a` for a
+  physical modern device, and build `armeabi-v7a` or `x86_64` when the target
+  device or emulator requires it.
+- After changes to `proxy-core`, `proxy-client`, `proxy-ffi`, or `tun2proxy`,
+  always rebuild the native library before Flutter. Never package stale staged
+  `.so` files. From the repository root, use the needed architectures:
+
+```powershell
+.\scripts\android\build-native.ps1 -Configuration Release -Architectures aarch64
+# For all currently supported Android ABIs:
+.\scripts\android\build-native.ps1 -Configuration Release -Architectures x86_64,aarch64,armv7
+```
+
+- Run Flutter only through FVM from `ui/flutter`. Use matching target platforms
+  and split the output by ABI, for example:
+
+```powershell
+fvm flutter pub get
+fvm flutter analyze --no-fatal-infos
+fvm flutter test
+fvm flutter build apk --release --target-platform android-arm64 --split-per-abi
+```
+
+- Rename or copy deliverables to an unambiguous ignored build location using
+  `proxy-ui-v<version-name>-<build-number>-<abi>-release.apk`. Report the absolute
+  path, ABI, `versionName`, effective `versionCode`, file size, SHA-256, and
+  certificate verification result.
+- Never commit APKs, `ui/flutter/build/`, or `ui/flutter/native/`.
+
+### Windows Release Build
+
+- Use the supported root workflow so Rust, the FFI DLL, native staging, and
+  Flutter are rebuilt together:
+
+```powershell
+.\scripts\windows\build.ps1 -Configuration Release
+```
+
+- Never stop or kill a currently running `proxy_ui` merely to build or package
+  an upgrade. If an executable or DLL is locked, use a separate staging/output
+  directory when possible; otherwise report the lock instead of terminating the
+  user's process.
+- Verify that `ui/flutter/build/windows/<architecture>/runner/Release` contains
+  `proxy_ui.exe`, `http_proxy.dll`, `wintun.dll`, `flutter_windows.dll`, and the
+  required `data` and plugin files. A Windows release is the complete directory,
+  not the executable alone.
+- Package that directory as
+  `ui/flutter/build/packages/proxy-ui-v<version-name>-<build-number>-windows-<architecture>.zip`.
+  Keep one containing application directory in the archive. Inspect the archive
+  contents, then report the absolute path, version, architecture, size, and
+  SHA-256. Do not commit the ZIP or other generated artifacts.
+
+### Release Verification and Commits
+
+- Scale checks to the changes. For `tun2proxy`, run its tests, strict Clippy,
+  and formatting checks directly:
+
+```powershell
+cargo test --manifest-path deps/tun2proxy/Cargo.toml
+cargo clippy --manifest-path deps/tun2proxy/Cargo.toml --all-targets --all-features -- -D warnings
+cargo fmt --manifest-path deps/tun2proxy/Cargo.toml -- --check
+```
+
+- Run the relevant root Rust checks plus FVM analyze and tests before packaging.
+  A successful compile alone is not sufficient release verification.
+- When the user asks to commit a release, commit source changes inside affected
+  submodules first, then commit their updated gitlinks and any root changes.
+  Use Conventional Commits, report each commit hash separately, and confirm the
+  root and affected submodule worktrees are clean.
+- Do not tag, push, create a remote release, or upload artifacts unless the user
+  explicitly asks for that action.
+
 ## Direct Development Commands
 
 ```bash
