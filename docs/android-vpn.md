@@ -27,6 +27,15 @@ when a fake IP is converted back to a hostname. Rendering an IDN such as
 display string to a remote SOCKS or system resolver can make an otherwise valid
 Google CDN destination unresolvable.
 
+Fake-IP allocations are persisted in the application's private support
+directory and restored before the VPN starts. Android services such as Google
+Play can retain DNS answers across a VPN restart or an in-place Proxy Everything
+upgrade; without persistent mappings, a cached `198.18.0.0/15` address could be
+reassigned to another hostname and make an otherwise working TCP or QUIC path
+look offline. The cache is append-only during normal allocation and is compacted
+after enough entries become stale. A truncated final record is repaired at the
+next start.
+
 `ProxyVpnService` retains the `ParcelFileDescriptor`. The platform channel
 passes its integer descriptor to `proxy_start_android_tun`, which duplicates
 it synchronously. Rust owns and closes only that duplicate. Closing either the
@@ -58,6 +67,32 @@ Proxy Everything is always outside its own VPN. In **All** and **Bypass** it is
 added to the disallowed list; in **Only** it is omitted from the allowed list.
 This is a loop-prevention invariant, not a user preference: the same process
 owns both the local SOCKS5 listener and the upstream connection.
+
+That platform-enforced exclusion also allows the local listener to preserve
+the configured auto-proxy decision while VPN capture is active. Android TUN
+therefore does not enable the desktop-only `force_proxy` loop guard. Desktop
+TUN retains that guard because it does not have Android's package-level routing
+boundary.
+
+The service registers a default-network callback and explicitly publishes the
+current non-VPN network through `VpnService.setUnderlyingNetworks`. This is
+updated when Wi-Fi or mobile connectivity changes. Some update schedulers,
+including vendor-customized Google Play builds, reject work from network
+capabilities before opening a payload connection; leaving Android or an OEM to
+infer the VPN's underlying transport can therefore produce an immediate
+"offline" result even while ordinary sockets work. The VPN start log records
+the underlying and VPN transports together with their validated and metered
+capabilities so this preflight path can be distinguished from DNS, TCP, and UDP
+failures.
+
+Establishing the Java VPN interface happens before Rust can attach the duplicated
+TUN descriptor. Android may begin connectivity validation during that short
+window, when no packet consumer exists yet. The Flutter startup sequence now
+waits for native TUN readiness and then polls the live VPN
+`NET_CAPABILITY_VALIDATED` state. It does not report VPN startup success until
+validation completes; after ten seconds it tears the incomplete VPN down and
+reports the captured capabilities instead of leaving update schedulers to emit
+a misleading offline error.
 
 The app requests `QUERY_ALL_PACKAGES` to show installed, enabled applications
 that hold the `INTERNET` permission. A Play-distributed build must declare this

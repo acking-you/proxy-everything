@@ -93,6 +93,14 @@ a direct DNS route. Android exposes that resolver at `172.19.0.2`, outside the
 `198.18.0.0/15` fake-IP pool, so its opportunistic private-DNS probe cannot
 collide with an allocated application hostname.
 
+The Flutter client supplies a stable private application-support directory on
+Android, iOS, Windows, macOS, and Linux. The CLI uses its existing
+`~/http-proxy-cli-config` data directory. TUN virtual-DNS allocations are
+restored from those locations before capture starts, so cached fake-IP answers
+remain valid across process restarts and in-place upgrades on every supported
+client platform. Embedders using the FFI should likewise provide a stable
+`cache_dir`; leaving it null intentionally disables persistent client state.
+
 On Windows, keep `wintun.dll` in the same directory as
 `http-proxy-cli.exe` or `proxy_ui.exe`. The supported build and staging scripts
 place it there automatically.

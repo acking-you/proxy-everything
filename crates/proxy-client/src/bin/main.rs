@@ -4,9 +4,10 @@ use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use comfy_table::{Cell, Color, Table, presets};
 use proxy_client::cli_config::{
-    Config, DEFAULT_CONFIG_TEMPLATE, SystemProxyGuard, find_config, get_default_config_path,
+    Config, DEFAULT_CONFIG_TEMPLATE, SystemProxyGuard, find_config, get_data_dir,
+    get_default_config_path,
 };
-use proxy_client::client::tun::{TunConfig, running_process_names};
+use proxy_client::client::tun::{TunConfig, TunVirtualDnsState, running_process_names};
 use proxy_client::client::{ClientConfig, ClientRuntimeConfig, start_client_with_runtime_config};
 use proxy_core::config::{CLIENT_PORT, SERVER_PORT, init_tracing};
 use proxy_core::relay::ExternalProxyTarget;
@@ -453,26 +454,37 @@ async fn main() -> Result<()> {
         .as_ref()
         .map(|proxy| (proxy.host.clone(), proxy.port))
         .or_else(|| server_host.clone().map(|host| (host, server_port)));
-    let tun = enable_tun
-        .then(|| {
-            TunConfig::new(tun_bypass_processes)
-                .map(|config| {
-                    config
-                        .with_udp_enabled(enable_udp)
-                        .with_udp_direct_fallback(tun_udp_direct_fallback)
-                })
-                .map(|config| match tun_endpoint {
-                    Some((host, port)) => config.with_remote_endpoint(host, port),
-                    None => config,
-                })
+    let cache_dir = match get_data_dir() {
+        Ok(directory) => Some(directory),
+        Err(error) => {
+            tracing::warn!(%error, "persistent client state is unavailable");
+            None
+        }
+    };
+    let tun = if enable_tun {
+        let virtual_dns = TunVirtualDnsState::default();
+        if let Some(cache_dir) = &cache_dir
+            && let Err(error) = virtual_dns.enable_persistence_in(cache_dir).await
+        {
+            tracing::warn!(%error, cache_dir = %cache_dir.display(), "TUN virtual DNS mappings will not survive a restart");
+        }
+        let config = TunConfig::new(tun_bypass_processes)
+            .context("Failed to prepare mandatory TUN process bypass")?
+            .with_udp_enabled(enable_udp)
+            .with_udp_direct_fallback(tun_udp_direct_fallback)
+            .with_virtual_dns_state(virtual_dns);
+        Some(match tun_endpoint {
+            Some((host, port)) => config.with_remote_endpoint(host, port),
+            None => config,
         })
-        .transpose()
-        .context("Failed to prepare mandatory TUN process bypass")?;
+    } else {
+        None
+    };
     let client_config = ClientRuntimeConfig {
         client: ClientConfig {
             enable_auto_proxy: effective_auto_proxy,
             enable_udp,
-            cache_dir: None,
+            cache_dir,
         },
         upstream_proxy: upstream_proxy.clone(),
         tun,

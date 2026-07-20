@@ -27,10 +27,11 @@ pub struct ProxyConfig {
     pub session_key: *const c_char, // can be null to use default key
     pub auto_proxy: c_int,          // 0 = disabled, 1 = enabled
     pub reverse_geo: c_int,         // 0 = CN direct, 1 = CN proxy
-    pub cache_dir: *const c_char,   // cache directory for auto-proxy (required on mobile)
+    // Stable application cache directory; recommended on every platform.
+    pub cache_dir: *const c_char,
     pub need_codec_ips: *const c_char, // comma-separated IPs (default: null = empty list)
-    pub force_codec: c_int,         // default: 0 = only specified IPs use codec
-    pub set_system_proxy: c_int,    // desktop only: 0 = disabled, 1 = set system proxy
+    pub force_codec: c_int,            // default: 0 = only specified IPs use codec
+    pub set_system_proxy: c_int,       // desktop only: 0 = disabled, 1 = set system proxy
 }
 
 /// Versioned proxy configuration with SOCKS5 UDP control.

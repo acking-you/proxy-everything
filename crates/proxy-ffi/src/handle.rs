@@ -47,6 +47,11 @@ pub struct ProxyHandle {
     system_proxy_guard: Arc<Mutex<Option<SystemProxyGuard>>>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct TunOutboundPolicy {
+    force_proxy: bool,
+}
+
 #[derive(Default)]
 struct TunLifecycle {
     cancel_token: Option<CancellationToken>,
@@ -309,6 +314,24 @@ fn proxy_start_inner(
         }
     };
 
+    if let Some(cache_dir) = &cache_dir {
+        match handle
+            .runtime
+            .block_on(handle.tun_virtual_dns.enable_persistence_in(cache_dir))
+        {
+            Ok(entries) => tracing::info!(
+                entries,
+                cache_dir = %cache_dir.display(),
+                "loaded persistent TUN virtual DNS mappings"
+            ),
+            Err(error) => tracing::warn!(
+                cache_dir = %cache_dir.display(),
+                %error,
+                "TUN virtual DNS mappings will not survive a process restart"
+            ),
+        }
+    }
+
     // need_codec_ips: null or empty = empty list (no codec IPs), otherwise comma-separated
     let need_codec_ips = if config.need_codec_ips.is_null() {
         Some(vec![]) // default: empty list
@@ -559,9 +582,9 @@ pub unsafe extern "C" fn proxy_switch_upstream(
 /// Captured packets are always forwarded to `socks5://127.0.0.1:<local_port>`.
 /// The remote proxy endpoint is installed as an explicit route bypass, the
 /// current executable remains in the process bypass list, and auto-proxy direct
-/// connections are suppressed while TUN is active. Together these invariants
-/// prevent client-owned outbound connections from returning to the local
-/// listener.
+/// connections are suppressed while desktop TUN is active. Together these
+/// invariants prevent client-owned outbound connections from returning to the
+/// local listener.
 ///
 /// # Safety
 /// - `handle` must be a valid pointer from `proxy_create`
@@ -639,6 +662,9 @@ pub unsafe extern "C" fn proxy_start_tun(
     start_tun_runtime(
         handle,
         config,
+        // Desktop TUN cannot exclude this process at the OS package boundary,
+        // so direct sockets would be captured and loop into the listener.
+        TunOutboundPolicy { force_proxy: true },
         run_with_ready,
         format!(
             "TUN ready: device traffic -> socks5://127.0.0.1:{}; remote endpoint \
@@ -653,7 +679,9 @@ pub unsafe extern "C" fn proxy_start_tun(
 /// The Java service retains its `ParcelFileDescriptor`; native code duplicates
 /// it synchronously and owns only the duplicate. Android's per-application VPN
 /// policy must exclude this package (or omit it from an allow-list) so the
-/// local proxy's upstream sockets cannot loop back into the TUN.
+/// local proxy's upstream sockets cannot loop back into the TUN. Because that
+/// exclusion is enforced by Android before routing, the local listener keeps
+/// its configured auto-proxy/direct decisions while VPN capture is active.
 ///
 /// # Safety
 /// - `handle` must be a valid pointer returned by `proxy_create`
@@ -714,6 +742,9 @@ pub unsafe extern "C" fn proxy_start_android_tun(
     start_tun_runtime(
         handle,
         config,
+        // VpnService excludes this package before routing. Preserve the same
+        // auto-proxy decisions used when an external TUN forwards here.
+        TunOutboundPolicy { force_proxy: false },
         move |port, config, shutdown_token, ready| {
             run_with_ready_on_fd(port, config, owned_fd, shutdown_token, ready)
         },
@@ -724,6 +755,7 @@ pub unsafe extern "C" fn proxy_start_android_tun(
 fn start_tun_runtime<Runner, RunnerFuture>(
     handle: &ProxyHandle,
     config: TunConfig,
+    outbound_policy: TunOutboundPolicy,
     runner: Runner,
     ready_message: String,
 ) -> ProxyResult
@@ -763,7 +795,10 @@ where
     } else {
         return ProxyResult::RuntimeError;
     }
-    handle.force_proxy.store(true, Ordering::Release);
+    handle
+        .force_proxy
+        .store(outbound_policy.force_proxy, Ordering::Release);
+    tracing::info!(?outbound_policy, "applying TUN outbound routing policy");
     if let Ok(mut bypass) = handle.tun_bypass.lock() {
         *bypass = Some(config.bypass.clone());
     } else {

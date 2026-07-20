@@ -4234,6 +4234,7 @@ dependencies = [
  "digest_auth",
  "dotenvy",
  "env_logger",
+ "hashbrown 0.17.1",
  "hashlink",
  "hickory-proto",
  "httparse",
