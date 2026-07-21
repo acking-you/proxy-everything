@@ -63,7 +63,7 @@ struct Cli {
     /// [optional] Executable name that should bypass TUN capture (repeatable)
     #[arg(long = "tun-bypass-process", value_name = "PROCESS")]
     tun_bypass_processes: Vec<String>,
-    /// List running executable names that can be used with --tun-bypass-process
+    /// List live and registered executable names usable with --tun-bypass-process
     #[arg(long)]
     tun_list_processes: bool,
     /// Internal console owner used while a Windows child is elevating.

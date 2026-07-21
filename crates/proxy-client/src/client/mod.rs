@@ -53,6 +53,8 @@ pub mod socks;
 pub mod tun;
 mod udp;
 #[cfg(target_os = "windows")]
+mod windows_apps;
+#[cfg(target_os = "windows")]
 mod windows_icon;
 
 use std::borrow::Cow;

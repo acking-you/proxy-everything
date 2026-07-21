@@ -26,7 +26,9 @@ pub use handle::{
     proxy_stop_tun, proxy_switch_upstream,
 };
 pub use latency::{proxy_free_latency_result, proxy_test_latency};
-pub use logging::{proxy_free_string, proxy_init_logging, proxy_set_log_callback};
+pub use logging::{
+    proxy_free_string, proxy_init_logging, proxy_set_log_callback, proxy_set_log_level,
+};
 pub use nodes::{proxy_free_nodes_result, proxy_get_server_nodes};
 pub use types::{
     GroupsResult, LatencyResult, LogCallback, NodeGroupInfo, NodeInfoWithGeo, NodesResult,

@@ -35,6 +35,13 @@ dashmap = { workspace = true, optional = true }
 [target.'cfg(target_os = "windows")'.dependencies]
 png = "0.18"
 sysinfo = { workspace = true }
+winreg = "0.52"
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

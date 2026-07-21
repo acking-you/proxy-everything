@@ -2826,7 +2826,9 @@ dependencies = [
  "tracing",
  "tun2proxy",
  "uni-stream",
+ "windows 0.61.3",
  "windows-sys 0.61.2",
+ "winreg 0.52.0",
 ]
 
 [[package]]

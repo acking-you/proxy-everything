@@ -34,8 +34,11 @@ struct TunLogBridge;
 static TUN_LOG_BRIDGE: TunLogBridge = TunLogBridge;
 
 impl log::Log for TunLogBridge {
-    fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
-        true
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        // ipstack emits multiple trace records for every packet. Never bridge
+        // those into Flutter: a multicast or retransmit storm can otherwise
+        // enqueue millions of cross-isolate callbacks and starve forwarding.
+        metadata.level() <= log::Level::Debug
     }
 
     fn log(&self, record: &log::Record<'_>) {
@@ -220,11 +223,17 @@ pub fn current_process_name() -> io::Result<String> {
     Ok(name)
 }
 
-/// One grouped executable row for a Task Manager-style process picker.
+/// One grouped executable row for the Windows application picker.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct RunningProcessInfo {
     /// Normalized executable basename used by the TUN policy.
     pub name: String,
+    /// Original-cased executable basename presented by the process picker.
+    pub display_name: String,
+    /// Installed-app names that can also be used to find this executable.
+    pub aliases: Vec<String>,
+    /// Whether Windows app registration or a Start Menu shortcut advertises it.
+    pub installed: bool,
     /// All live PIDs with this executable basename.
     pub pids: Vec<u32>,
     /// Distinct executable paths visible to the current security token.
@@ -243,29 +252,44 @@ pub struct RunningProcessInstance {
     pub executable_path: Option<String>,
 }
 
-/// List running executables with the context needed by the Windows picker.
+#[cfg(target_os = "windows")]
+#[derive(Default)]
+struct RunningProcessGroup {
+    display_name: String,
+    aliases: BTreeSet<String>,
+    installed: bool,
+    pids: BTreeSet<u32>,
+    executable_paths: BTreeSet<String>,
+    instances: Vec<RunningProcessInstance>,
+}
+
+/// List live and registered executables with context for the Windows picker.
 #[cfg(target_os = "windows")]
 pub fn running_processes() -> Vec<RunningProcessInfo> {
     use base64::Engine;
 
     let system = sysinfo::System::new_all();
-    let mut grouped =
-        BTreeMap::<String, (BTreeSet<u32>, BTreeSet<String>, Vec<RunningProcessInstance>)>::new();
+    let mut grouped = BTreeMap::<String, RunningProcessGroup>::new();
     for process in system.processes().values() {
-        let name = tun2proxy::normalize_process_name(&process.name().to_string_lossy());
+        let raw_name = process.name().to_string_lossy();
+        let name = tun2proxy::normalize_process_name(&raw_name);
         if name.is_empty() {
             continue;
         }
+        let display_name = process_display_name(&raw_name);
         let pid = process.pid().as_u32();
         let executable_path = process
             .exe()
             .map(|path| path.to_string_lossy().into_owned());
-        let (pids, paths, instances) = grouped.entry(name).or_default();
-        pids.insert(pid);
+        let group = grouped.entry(name).or_insert_with(|| RunningProcessGroup {
+            display_name,
+            ..RunningProcessGroup::default()
+        });
+        group.pids.insert(pid);
         if let Some(path) = &executable_path {
-            paths.insert(path.clone());
+            group.executable_paths.insert(path.clone());
         }
-        instances.push(RunningProcessInstance {
+        group.instances.push(RunningProcessInstance {
             pid,
             parent_pid: process.parent().map(|pid| pid.as_u32()),
             executable_path,
@@ -273,41 +297,81 @@ pub fn running_processes() -> Vec<RunningProcessInfo> {
     }
     if let Ok(current) = current_process_name() {
         let pid = std::process::id();
-        let (pids, paths, instances) = grouped.entry(current).or_default();
-        if pids.insert(pid) {
+        let group = grouped
+            .entry(current.clone())
+            .or_insert_with(|| RunningProcessGroup {
+                display_name: process_display_name(&current),
+                ..RunningProcessGroup::default()
+            });
+        if group.display_name.is_empty() {
+            group.display_name = current;
+        }
+        if group.pids.insert(pid) {
             let executable_path = std::env::current_exe()
                 .ok()
                 .map(|path| path.to_string_lossy().into_owned());
             if let Some(path) = &executable_path {
-                paths.insert(path.clone());
+                group.executable_paths.insert(path.clone());
             }
-            instances.push(RunningProcessInstance {
+            group.instances.push(RunningProcessInstance {
                 pid,
                 parent_pid: None,
                 executable_path,
             });
         }
     }
+    for installed in super::windows_apps::installed_processes() {
+        let group = grouped
+            .entry(installed.name)
+            .or_insert_with(|| RunningProcessGroup {
+                display_name: installed.display_name.clone(),
+                ..RunningProcessGroup::default()
+            });
+        if group.display_name.is_empty() {
+            group.display_name = installed.display_name;
+        }
+        group.aliases.extend(installed.aliases);
+        group.executable_paths.extend(installed.executable_paths);
+        group.installed = true;
+    }
     grouped
         .into_iter()
-        .map(|(name, (pids, executable_paths, mut instances))| {
-            instances.sort_by_key(|instance| instance.pid);
-            let executable_paths = executable_paths.into_iter().collect::<Vec<_>>();
-            let icon_png_base64 = executable_paths
-                .first()
-                .and_then(|path| {
-                    super::windows_icon::executable_icon_png(std::path::Path::new(path))
+        .map(|(name, mut group)| {
+            group.instances.sort_by_key(|instance| instance.pid);
+            let executable_paths = group.executable_paths.into_iter().collect::<Vec<_>>();
+            // Avoid extracting hundreds of Shell icons eagerly for dormant
+            // installed applications. Live rows retain their icons; dormant
+            // rows are still searchable by name, alias, and executable path.
+            let icon_png_base64 = (!group.pids.is_empty())
+                .then(|| {
+                    executable_paths.first().and_then(|path| {
+                        super::windows_icon::executable_icon_png(std::path::Path::new(path))
+                    })
                 })
+                .flatten()
                 .map(|icon| base64::engine::general_purpose::STANDARD.encode(icon));
             RunningProcessInfo {
                 name,
-                pids: pids.into_iter().collect(),
+                display_name: group.display_name,
+                aliases: group.aliases.into_iter().collect(),
+                installed: group.installed,
+                pids: group.pids.into_iter().collect(),
                 executable_paths,
-                instances,
+                instances: group.instances,
                 icon_png_base64,
             }
         })
         .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn process_display_name(name: &str) -> String {
+    let trimmed = name.trim();
+    trimmed
+        .get(..trimmed.len().saturating_sub(4))
+        .filter(|_| trimmed.to_ascii_lowercase().ends_with(".exe"))
+        .unwrap_or(trimmed)
+        .to_string()
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -315,7 +379,7 @@ pub fn running_processes() -> Vec<RunningProcessInfo> {
     Vec::new()
 }
 
-/// List unique running executable names available for Windows process bypass.
+/// List unique live and registered executable names for Windows process bypass.
 ///
 /// Other platforms return an empty list because the UI currently exposes the
 /// picker only on Windows. Manually configured process names remain valid on
@@ -614,6 +678,23 @@ mod tests {
         assert_eq!(tun_udp_strategy(false, false), ArgUdpStrategy::Block);
     }
 
+    #[test]
+    fn tun_log_bridge_rejects_per_packet_trace_events() {
+        use log::Log;
+
+        let trace = log::Metadata::builder()
+            .level(log::Level::Trace)
+            .target("ipstack")
+            .build();
+        let debug = log::Metadata::builder()
+            .level(log::Level::Debug)
+            .target("tun2proxy")
+            .build();
+
+        assert!(!TUN_LOG_BRIDGE.enabled(&trace));
+        assert!(TUN_LOG_BRIDGE.enabled(&debug));
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn detailed_process_list_groups_the_current_executable_and_pid() {
@@ -623,6 +704,19 @@ mod tests {
             .find(|process| process.name == current)
             .expect("current executable must be listed");
         assert!(process.pids.contains(&std::process::id()));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn process_display_name_preserves_game_name_casing() {
+        assert_eq!(
+            process_display_name("League of Legends.EXE"),
+            "League of Legends"
+        );
+        assert_eq!(
+            process_display_name("RiotClientServices"),
+            "RiotClientServices"
+        );
     }
 
     #[tokio::test]

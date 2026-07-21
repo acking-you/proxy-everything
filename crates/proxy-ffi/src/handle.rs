@@ -1104,7 +1104,7 @@ pub unsafe extern "C" fn proxy_set_tun_bypass_processes(
     ProxyResult::Ok
 }
 
-/// Return running Windows process names as a JSON string.
+/// Return live and registered Windows executable names as a JSON string.
 ///
 /// The caller must release the returned pointer with `proxy_free_string`.
 #[unsafe(no_mangle)]
@@ -1123,7 +1123,7 @@ pub extern "C" fn proxy_list_tun_processes() -> *mut c_char {
     CString::new(json).map_or(ptr::null_mut(), CString::into_raw)
 }
 
-/// Return grouped running process details as JSON for Task Manager-style UIs.
+/// Return grouped live and registered application details as JSON.
 ///
 /// This is additive to `proxy_list_tun_processes`, which retains its original
 /// string-array ABI for existing native consumers. The caller must release the

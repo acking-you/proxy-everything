@@ -228,6 +228,23 @@ Other bypassed processes connect directly to their original destinations and
 therefore do not use the proxy. Do not add an application to the bypass list if
 its traffic should remain proxied.
 
+The Windows picker combines live processes with installed Win32 applications
+registered through App Paths, Uninstall metadata, and Start Menu Shell links.
+For registrations that only expose an application directory, scanning is
+bounded by depth and entry count rather than walking arbitrary drives. Use the
+All, Running, and Installed views to control list density. Launcher trees are
+expanded on first load so protected child processes remain individually
+selectable. Executable names keep their original casing, and search accepts
+registered aliases and common initialisms; for example, either `lol` or
+`英雄联盟` finds `League of Legends.exe` even when it is not currently running.
+
+IPv4 and IPv6 multicast UDP is always treated as local-link traffic rather than
+sent to an Internet proxy. Direct relays select the physical multicast
+interface explicitly; on Windows, `IP_UNICAST_IF` is insufficient because it
+does not control multicast egress. Without the multicast-specific binding, an
+SSDP packet such as `239.255.255.250:1900` can return through Wintun, create a
+new proxy-ui UDP socket, and amplify into a self-sustaining relay loop.
+
 TUN TCP continues to work with `--udp false`. By default, virtual DNS remains
 inside the TUN resolver while other captured UDP is relayed directly instead
 of being sent to the local SOCKS5 listener. This matches the practical fallback
@@ -258,6 +275,17 @@ When UDP is enabled, TUN startup performs an end-to-end SOCKS5 UDP ASSOCIATE
 preflight before creating Wintun or changing routes. This catches an old remote
 server, blocked UDP relay, or incompatible upstream immediately. Disable UDP
 explicitly and select either the default direct fallback or strict blocking.
+
+### Desktop log safeguards
+
+The GUI requests native logs at `INFO` by default. Selecting a more verbose
+level changes the native callback threshold, but burst delivery remains capped
+and reports how many low-priority records were omitted. The in-memory viewer is
+an O(1) 1,000-entry queue and refreshes at most ten times per second. Disk
+logging batches writes, bounds its pending queue, caps each hourly file at 64
+MiB, and retains at most 512 MiB across hourly files. These limits keep packet
+or connection storms from turning diagnostic work into forwarding latency or
+unbounded memory growth.
 
 ---
 

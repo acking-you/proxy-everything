@@ -2,12 +2,54 @@
 
 use std::ffi::{CString, c_char, c_int};
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::types::LogCallback;
 
 /// Global log callback
 pub(crate) static LOG_CALLBACK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+static MIN_LOG_LEVEL: AtomicU8 = AtomicU8::new(2);
+static CALLBACK_RATE_LIMITER: Mutex<CallbackRateLimiter> = Mutex::new(CallbackRateLimiter::new());
+
+const MAX_CALLBACK_EVENTS_PER_SECOND: u32 = 512;
+
+#[derive(Debug)]
+struct CallbackRateLimiter {
+    second: u64,
+    emitted: u32,
+    dropped: u64,
+}
+
+impl CallbackRateLimiter {
+    const fn new() -> Self {
+        Self {
+            second: 0,
+            emitted: 0,
+            dropped: 0,
+        }
+    }
+
+    fn decide(&mut self, second: u64, level: c_int) -> (bool, u64) {
+        let dropped = if self.second == second {
+            0
+        } else {
+            self.second = second;
+            self.emitted = 0;
+            std::mem::take(&mut self.dropped)
+        };
+
+        // Warnings and errors are never hidden by burst protection.
+        if level >= 3 || self.emitted < MAX_CALLBACK_EVENTS_PER_SECOND {
+            self.emitted = self.emitted.saturating_add(1);
+            (true, dropped)
+        } else {
+            self.dropped = self.dropped.saturating_add(1);
+            (false, dropped)
+        }
+    }
+}
 
 /// Internal function to send log to callback
 pub(crate) fn send_log(level: c_int, message: &str) {
@@ -29,6 +71,15 @@ pub(crate) fn send_log(level: c_int, message: &str) {
 pub extern "C" fn proxy_set_log_callback(callback: Option<LogCallback>) {
     let ptr = callback.map(|f| f as *mut ()).unwrap_or(ptr::null_mut());
     LOG_CALLBACK.store(ptr, Ordering::SeqCst);
+}
+
+/// Set the minimum level delivered to the FFI callback.
+///
+/// Levels use the stable callback ABI: 0=trace, 1=debug, 2=info, 3=warn,
+/// 4=error. Values outside that range are clamped. The default is info.
+#[unsafe(no_mangle)]
+pub extern "C" fn proxy_set_log_level(level: c_int) {
+    MIN_LOG_LEVEL.store(level.clamp(0, 4) as u8, Ordering::Relaxed);
 }
 
 /// Free a string allocated by the library (e.g., from log callback).
@@ -61,6 +112,33 @@ where
             tracing::Level::WARN => 3,
             tracing::Level::ERROR => 4,
         };
+        if level < MIN_LOG_LEVEL.load(Ordering::Relaxed) as c_int
+            || LOG_CALLBACK.load(Ordering::Relaxed).is_null()
+        {
+            return;
+        }
+
+        let second = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs());
+        let mut limiter = match CALLBACK_RATE_LIMITER.lock() {
+            Ok(limiter) => limiter,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let (forward, dropped) = limiter.decide(second, level);
+        drop(limiter);
+        if dropped > 0 {
+            send_log(
+                3,
+                &format!(
+                    "[proxy_ffi::logging] dropped {dropped} native log entries in the previous \
+                     second to protect UI memory and latency"
+                ),
+            );
+        }
+        if !forward {
+            return;
+        }
 
         let mut visitor = MessageVisitor::default();
         event.record(&mut visitor);
@@ -122,4 +200,23 @@ pub extern "C" fn proxy_init_logging() {
                 ),
         )
         .try_init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn callback_rate_limit_bounds_low_priority_bursts() {
+        let mut limiter = CallbackRateLimiter::new();
+        for _ in 0..MAX_CALLBACK_EVENTS_PER_SECOND {
+            assert_eq!(limiter.decide(10, 2), (true, 0));
+        }
+        assert_eq!(limiter.decide(10, 2), (false, 0));
+        assert_eq!(limiter.decide(10, 4), (true, 0));
+
+        let (forward, dropped) = limiter.decide(11, 2);
+        assert!(forward);
+        assert_eq!(dropped, 1);
+    }
 }
