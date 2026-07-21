@@ -95,9 +95,11 @@ reports the captured capabilities instead of leaving update schedulers to emit
 a misleading offline error.
 
 The app requests `QUERY_ALL_PACKAGES` to show installed, enabled applications
-that hold the `INTERNET` permission. A Play-distributed build must declare this
-core VPN use case in Play Console and satisfy Google Play's package-visibility
-policy before release.
+that hold the `INTERNET` permission. The package catalog is read with requested
+permissions in one query and cached in memory. Icons are fetched lazily only
+for visible rows, batched across a frame, and kept in a bounded LRU cache. A
+Play-distributed build must declare this core VPN use case in Play Console and
+satisfy Google Play's package-visibility policy before release.
 
 ## Build native libraries
 

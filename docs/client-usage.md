@@ -168,8 +168,12 @@ On Android the desktop process picker is replaced by **VPN Applications**.
 Choose **All** to capture every eligible application, **Bypass** to let selected
 applications use the physical network, or **Only** to capture only selected
 applications. The picker displays installed application names, package names,
-icons, and system-app status. A live policy change recreates the Android VPN
-interface while keeping the local proxy listener active.
+icons, and system-app status. Application metadata is cached after the first
+package query, while icons are loaded only for visible rows in small batches;
+opening the picker therefore does not decode every installed application icon
+before showing the list. The refresh button explicitly rebuilds both caches. A
+live policy change recreates the Android VPN interface while keeping the local
+proxy listener active.
 
 The Proxy Everything package is always outside its own VPN so its upstream
 socket cannot be captured and returned to the local listener. Android shows its
