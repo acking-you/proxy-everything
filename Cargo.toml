@@ -50,6 +50,7 @@ parking_lot = "0.12"
 indexmap = "2"
 hashbrown = "0.16.1"
 lru = "0.16"
+moka = { version = "0.12.12", features = ["sync"] }
 
 # Async utilities
 futures = "0.3"

@@ -537,12 +537,13 @@ async fn run_with_ready_inner(
             .await
         }
         None => {
-            tun2proxy::general_run_async_with_process_bypass(
+            tun2proxy::general_run_async_with_process_bypass_and_virtual_dns(
                 args,
                 config.mtu,
                 cfg!(target_os = "macos"),
                 shutdown_token,
                 config.bypass.process_bypass(),
+                config.virtual_dns_state,
             )
             .await
         }

@@ -4,22 +4,33 @@
 //! between the client and control modules, avoiding circular dependencies.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::net::IpAddr;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use base64::Engine;
-use dashmap::DashMap;
+use moka::sync::Cache;
 use snafu::{ResultExt, Snafu};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_socks::tcp::Socks5Stream;
 
-/// Permanent DNS cache for resolved domain names.
+const DNS_CACHE_CAPACITY: u64 = 4096;
+const DNS_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+
+/// Bounded, expiring cache for system DNS results.
 ///
-/// This cache is designed primarily for proxy server addresses, which are expected
-/// to have stable IP addresses. Once resolved, the IP is cached permanently without
-/// expiration, avoiding repeated DNS lookups for frequently accessed proxy servers.
-static DNS_CACHE: LazyLock<DashMap<String, IpAddr>> = LazyLock::new(DashMap::new);
+/// Proxy endpoints can move during failover and users can change networks while
+/// the process remains alive. A permanent single-address cache made both cases
+/// fail until restart and allowed arbitrary destination names to grow memory
+/// without a limit.
+static DNS_CACHE: LazyLock<Cache<String, Arc<[IpAddr]>>> = LazyLock::new(|| {
+    Cache::builder()
+        .max_capacity(DNS_CACHE_CAPACITY)
+        .time_to_live(DNS_CACHE_TTL)
+        .build()
+});
 
 use crate::codec::AsyncReaderWriterRef;
 use crate::config::runtime;
@@ -60,50 +71,90 @@ fn get_uri(host: &str, port: u16) -> String {
     format!("{host}:{port}")
 }
 
-/// Resolves a hostname to an IP address with caching and fallback.
-///
-/// This function:
-/// 1. Returns immediately if the host is already an IP address
-/// 2. Checks the permanent DNS cache for previously resolved addresses
-/// 3. Tries uni_stream DNS resolution first
-/// 4. Falls back to tokio DNS resolution if uni_stream fails
-/// 5. Caches the result permanently for future lookups
-#[inline]
-pub async fn resolve_host(host: &str) -> std::io::Result<IpAddr> {
-    // Fast path: already an IP
+fn dns_cache_key(host: &str) -> String {
+    host.trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// Resolve all addresses for a host through the bounded process cache.
+pub async fn resolve_host_addresses(host: &str) -> std::io::Result<Arc<[IpAddr]>> {
     if let Ok(ip) = host.parse::<IpAddr>() {
-        return Ok(ip);
+        return Ok(Arc::from([ip]));
     }
 
-    // Check cache
-    if let Some(cached_ip) = DNS_CACHE.get(host) {
-        tracing::debug!(host, ip = ?*cached_ip, "DNS cache hit");
-        return Ok(*cached_ip);
+    let cache_key = dns_cache_key(host);
+    if cache_key.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "DNS host is empty",
+        ));
+    }
+    if let Some(cached) = DNS_CACHE.get(&cache_key) {
+        tracing::debug!(host, addresses = ?cached, "DNS cache hit");
+        return Ok(cached);
     }
 
-    // Try uni_stream DNS
-    let ip = match uni_stream::addr::get_ip_addrs(host).await {
-        Ok(addrs) => addrs.into_iter().next(),
-        Err(e) => {
-            tracing::warn!(host, error = %e, "uni_stream DNS failed, falling back to tokio");
-            None
+    let mut addresses = match tokio::net::lookup_host((host, 0)).await {
+        Ok(addresses) => addresses.map(|address| address.ip()).collect(),
+        Err(error) => {
+            tracing::warn!(host, %error, "system DNS failed, falling back to secondary resolvers");
+            Vec::new()
         }
     };
+    if addresses.is_empty() {
+        addresses = uni_stream::addr::get_ip_addrs(host).await?;
+    }
+    let mut seen = HashSet::with_capacity(addresses.len());
+    addresses.retain(|address| seen.insert(*address));
+    if addresses.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Empty DNS record",
+        ));
+    }
 
-    // Fallback to tokio DNS
-    let ip = match ip {
-        Some(ip) => ip,
-        None => tokio::net::lookup_host((host, 80))
-            .await?
-            .next()
-            .map(|addr| addr.ip())
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "Empty DNS record"))?,
-    };
+    let addresses: Arc<[IpAddr]> = addresses.into();
+    DNS_CACHE.insert(cache_key, Arc::clone(&addresses));
+    tracing::debug!(host, ?addresses, "DNS resolved and cached");
+    Ok(addresses)
+}
 
-    // Cache result
-    DNS_CACHE.insert(host.to_string(), ip);
-    tracing::debug!(host, ?ip, "DNS resolved and cached");
-    Ok(ip)
+/// Resolves a hostname to the first currently preferred IP address.
+#[inline]
+pub async fn resolve_host(host: &str) -> std::io::Result<IpAddr> {
+    resolve_host_addresses(host)
+        .await?
+        .first()
+        .copied()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "Empty DNS record"))
+}
+
+/// Connect to every resolved address in resolver preference order, refreshing
+/// the cache once when all cached candidates fail.
+pub async fn connect_tcp_host(host: &str, port: u16) -> std::io::Result<TcpStream> {
+    let mut addresses = resolve_host_addresses(host).await?;
+    let mut socket_addresses = addresses
+        .iter()
+        .map(|address| std::net::SocketAddr::new(*address, port))
+        .collect::<Vec<std::net::SocketAddr>>();
+
+    match TcpStream::connect(socket_addresses.as_slice()).await {
+        Ok(stream) => return Ok(stream),
+        Err(_) if host.parse::<IpAddr>().is_err() => {
+            // A cached endpoint can disappear before its TTL expires. Force
+            // one fresh lookup before reporting the connection failure.
+            DNS_CACHE.invalidate(&dns_cache_key(host));
+            addresses = resolve_host_addresses(host).await?;
+            socket_addresses.clear();
+            socket_addresses.extend(
+                addresses
+                    .iter()
+                    .map(|address| std::net::SocketAddr::new(*address, port)),
+            );
+        }
+        Err(source) => return Err(source),
+    }
+
+    TcpStream::connect(socket_addresses.as_slice()).await
 }
 
 /// Establishes a TCP connection to the given host and port.
@@ -112,12 +163,7 @@ pub async fn resolve_host(host: &str) -> std::io::Result<IpAddr> {
 /// If the host is a domain name, performs DNS resolution first.
 #[inline]
 pub async fn get_tcp_stream(host: &str, port: u16, detail: &'static str) -> Result<TcpStream> {
-    let ipaddr = resolve_host(host).await.context(IoSnafu {
-        uri: Some(host.into()),
-        detail,
-    })?;
-
-    TcpStream::connect((ipaddr, port))
+    connect_tcp_host(host, port)
         .await
         .with_context(|_| IoSnafu {
             uri: Some(format!("TcpStream({}:{})", host, port)),
@@ -398,6 +444,11 @@ mod tests {
 
     use super::*;
     use crate::relay::ExternalProxyTarget;
+
+    #[test]
+    fn dns_cache_keys_are_case_and_root_dot_insensitive() {
+        assert_eq!(dns_cache_key("Example.COM."), "example.com");
+    }
 
     async fn start_echo_server() -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

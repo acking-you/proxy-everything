@@ -36,6 +36,7 @@ parking_lot = { workspace = true }
 # Collections
 indexmap = { workspace = true }
 lru = { workspace = true }
+moka = { workspace = true }
 
 # Async utilities
 futures = { workspace = true }

@@ -13,7 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 
 use crate::crypto::{Decryptor, Encryptor};
-use crate::protocol::{get_data_size, set_data_size};
+use crate::protocol::{current_checksum_key, set_data_size_with_key, validate_data_size};
 use crate::relay::{ExternalProxyKind, ExternalProxyTarget};
 use crate::{Aes256GcmDecryptor, Aes256GcmEncryptor, MyAsyncReadExt, MyAsyncWriteExt, ProxyError};
 
@@ -26,6 +26,7 @@ const SOCKS5_ATYP_IPV4: u8 = 0x01;
 const SOCKS5_ATYP_DOMAIN: u8 = 0x03;
 const SOCKS5_ATYP_IPV6: u8 = 0x04;
 const AES_GCM_TAG_LEN: usize = 16;
+const DATAGRAM_FRAME_PREFIX_SIZE: usize = 8;
 
 /// Largest UDP packet accepted by the local SOCKS5 relay.
 pub const MAX_SOCKS5_UDP_DATAGRAM_SIZE: usize = u16::MAX as usize;
@@ -66,20 +67,16 @@ impl DatagramAddress {
         match self {
             Self::Ip(addr) => Ok(vec![*addr]),
             Self::Domain(host, port) => {
-                let addrs = tokio::net::lookup_host((host.as_str(), *port))
+                let addrs = crate::transport::resolve_host_addresses(host)
                     .await
                     .map_err(|source| ProxyError::Io {
                         context: "udp_resolve",
                         detail: format!("resolve {host}:{port}"),
                         source,
                     })?
+                    .iter()
+                    .map(|address| SocketAddr::new(*address, *port))
                     .collect::<Vec<_>>();
-                if addrs.is_empty() {
-                    return Err(ProxyError::IoSimple {
-                        context: "udp_resolve",
-                        detail: format!("no address found for {host}:{port}"),
-                    });
-                }
                 tracing::debug!(host, port, ?addrs, "resolved SOCKS5 UDP destination");
                 Ok(addrs)
             }
@@ -213,6 +210,11 @@ pub struct DatagramTunnelReader<R> {
     reader: R,
     decryptor: Option<Aes256GcmDecryptor>,
     buffer: Vec<u8>,
+    prefix: [u8; DATAGRAM_FRAME_PREFIX_SIZE],
+    prefix_read: usize,
+    frame_size: Option<usize>,
+    frame_read: usize,
+    checksum_key: u32,
 }
 
 impl<R: MyAsyncReadExt + Send + Unpin> DatagramTunnelReader<R> {
@@ -228,23 +230,64 @@ impl<R: MyAsyncReadExt + Send + Unpin> DatagramTunnelReader<R> {
             reader,
             decryptor,
             buffer: Vec::new(),
+            prefix: [0; DATAGRAM_FRAME_PREFIX_SIZE],
+            prefix_read: 0,
+            frame_size: None,
+            frame_read: 0,
+            checksum_key: current_checksum_key(),
         })
     }
 
     pub async fn recv(&mut self) -> crate::Result<Vec<u8>> {
-        let size = get_data_size(&mut self.reader).await? as usize;
-        if size == 0 || size > MAX_DATAGRAM_TUNNEL_FRAME_SIZE {
-            return protocol_error(format!("invalid UDP tunnel frame size {size}"));
+        while self.prefix_read < self.prefix.len() {
+            let read = self
+                .reader
+                .read(&mut self.prefix[self.prefix_read..])
+                .await
+                .map_err(|source| tunnel_read_error("read datagram frame prefix", source))?;
+            if read == 0 {
+                return Err(tunnel_eof("read datagram frame prefix"));
+            }
+            self.prefix_read += read;
         }
-        self.buffer.resize(size, 0);
-        self.reader
-            .read_exact(&mut self.buffer)
-            .await
-            .map_err(|source| ProxyError::Io {
-                context: "udp_tunnel",
-                detail: "read datagram frame".to_string(),
-                source,
-            })?;
+
+        let size = match self.frame_size {
+            Some(size) => size,
+            None => {
+                let checksum =
+                    u32::from_be_bytes(self.prefix[..4].try_into().expect("fixed prefix"));
+                let wire_size =
+                    u32::from_be_bytes(self.prefix[4..].try_into().expect("fixed prefix"));
+                let size = match validate_data_size(checksum, wire_size, self.checksum_key) {
+                    Ok(size) => size as usize,
+                    Err(error) => {
+                        self.reset_frame();
+                        return Err(error);
+                    }
+                };
+                if size == 0 || size > MAX_DATAGRAM_TUNNEL_FRAME_SIZE {
+                    self.reset_frame();
+                    return protocol_error(format!("invalid UDP tunnel frame size {size}"));
+                }
+                self.buffer.resize(size, 0);
+                self.frame_size = Some(size);
+                size
+            }
+        };
+
+        while self.frame_read < size {
+            let read = self
+                .reader
+                .read(&mut self.buffer[self.frame_read..size])
+                .await
+                .map_err(|source| tunnel_read_error("read datagram frame body", source))?;
+            if read == 0 {
+                return Err(tunnel_eof("read datagram frame body"));
+            }
+            self.frame_read += read;
+        }
+
+        self.reset_frame();
 
         let plaintext_len = match &mut self.decryptor {
             Some(decryptor) => decryptor
@@ -267,6 +310,12 @@ impl<R: MyAsyncReadExt + Send + Unpin> DatagramTunnelReader<R> {
         self.buffer.truncate(plaintext_len);
         Ok(self.buffer.clone())
     }
+
+    fn reset_frame(&mut self) {
+        self.prefix_read = 0;
+        self.frame_size = None;
+        self.frame_read = 0;
+    }
 }
 
 /// Writes one length-delimited datagram per proxy TCP tunnel frame.
@@ -277,6 +326,7 @@ impl<R: MyAsyncReadExt + Send + Unpin> DatagramTunnelReader<R> {
 pub struct DatagramTunnelWriter<W> {
     writer: W,
     encryptor: Option<Aes256GcmEncryptor>,
+    checksum_key: u32,
 }
 
 impl<W: MyAsyncWriteExt + Send + Unpin> DatagramTunnelWriter<W> {
@@ -288,7 +338,11 @@ impl<W: MyAsyncWriteExt + Send + Unpin> DatagramTunnelWriter<W> {
                 })
             })
             .transpose()?;
-        Ok(Self { writer, encryptor })
+        Ok(Self {
+            writer,
+            encryptor,
+            checksum_key: current_checksum_key(),
+        })
     }
 
     pub async fn send(&mut self, packet: &[u8]) -> crate::Result<()> {
@@ -310,7 +364,7 @@ impl<W: MyAsyncWriteExt + Send + Unpin> DatagramTunnelWriter<W> {
             encrypted = self.encryptor.is_some(),
             "sending one framed UDP datagram through the proxy tunnel"
         );
-        set_data_size(&mut self.writer, frame.len() as u32).await?;
+        set_data_size_with_key(&mut self.writer, frame.len() as u32, self.checksum_key).await?;
         self.writer
             .write_all(&frame)
             .await
@@ -892,10 +946,29 @@ fn protocol_error<T>(detail: impl Into<String>) -> crate::Result<T> {
     })
 }
 
+fn tunnel_read_error(detail: &'static str, source: std::io::Error) -> ProxyError {
+    ProxyError::Io {
+        context: "udp_tunnel",
+        detail: detail.to_string(),
+        source,
+    }
+}
+
+fn tunnel_eof(detail: &'static str) -> ProxyError {
+    tunnel_read_error(
+        detail,
+        std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "proxy UDP tunnel closed during a datagram frame",
+        ),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::codec::{AsyncReader, AsyncWriter};
+    use crate::protocol::get_check_sum;
 
     #[test]
     fn socks5_udp_packet_round_trips_all_address_types() {
@@ -960,6 +1033,60 @@ mod tests {
 
         writer.send(&packet).await.unwrap();
         assert_eq!(reader.recv().await.unwrap(), packet);
+    }
+
+    #[tokio::test]
+    async fn datagram_tunnel_resumes_after_prefix_read_is_cancelled() {
+        let (mut wire_writer, wire_reader) = tokio::io::duplex(4096);
+        let mut reader = DatagramTunnelReader::new(AsyncReader::new(wire_reader), None).unwrap();
+        let packet = encode_socks5_udp_packet(
+            &DatagramAddress::Domain("example.com".to_string(), 53),
+            b"cancel-prefix",
+        )
+        .unwrap();
+        let frame = plain_tunnel_frame(&packet);
+
+        wire_writer.write_all(&frame[..3]).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), reader.recv())
+                .await
+                .is_err()
+        );
+        wire_writer.write_all(&frame[3..]).await.unwrap();
+
+        assert_eq!(reader.recv().await.unwrap(), packet);
+    }
+
+    #[tokio::test]
+    async fn datagram_tunnel_resumes_after_body_read_is_cancelled() {
+        let (mut wire_writer, wire_reader) = tokio::io::duplex(4096);
+        let mut reader = DatagramTunnelReader::new(AsyncReader::new(wire_reader), None).unwrap();
+        let packet = encode_socks5_udp_packet(
+            &DatagramAddress::Ip("127.0.0.1:53".parse().unwrap()),
+            b"cancel-body",
+        )
+        .unwrap();
+        let frame = plain_tunnel_frame(&packet);
+        let split = DATAGRAM_FRAME_PREFIX_SIZE + 2;
+
+        wire_writer.write_all(&frame[..split]).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), reader.recv())
+                .await
+                .is_err()
+        );
+        wire_writer.write_all(&frame[split..]).await.unwrap();
+
+        assert_eq!(reader.recv().await.unwrap(), packet);
+    }
+
+    fn plain_tunnel_frame(packet: &[u8]) -> Vec<u8> {
+        let size = packet.len() as u32;
+        let mut frame = Vec::with_capacity(DATAGRAM_FRAME_PREFIX_SIZE + packet.len());
+        frame.extend_from_slice(&get_check_sum(size).to_be_bytes());
+        frame.extend_from_slice(&size.to_be_bytes());
+        frame.extend_from_slice(packet);
+        frame
     }
 
     #[tokio::test]

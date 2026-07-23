@@ -511,14 +511,7 @@ pub async fn need_proxy(
 
 #[inline]
 pub async fn get_tcp_stream(host: &str, port: u16, detail: &'static str) -> Result<TcpStream> {
-    let ipaddr = proxy_core::transport::resolve_host(host)
-        .await
-        .context(IoSnafu {
-            uri: Some(host.into()),
-            detail,
-        })?;
-
-    TcpStream::connect((ipaddr, port))
+    proxy_core::transport::connect_tcp_host(host, port)
         .await
         .with_context(|_| IoSnafu {
             uri: Some(format!("TcpStream({}:{})", host, port)),

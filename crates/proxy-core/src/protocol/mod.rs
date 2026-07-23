@@ -70,6 +70,41 @@ pub type DataSize = u32;
 /// length fields. Legitimate proxy traffic should never exceed this.
 pub const MAX_DATA_SIZE: DataSize = 30 * 1024 * 1024;
 
+/// Snapshot the checksum key used by one framed connection.
+///
+/// Long-lived connections must retain this value for their full lifetime.
+/// Runtime configuration can change while a connection is active, but the
+/// peer continues to use the key that authenticated that connection.
+#[inline]
+pub(crate) fn current_checksum_key() -> DataSize {
+    runtime::with_secret_key(|_, hash| hash)
+}
+
+#[inline]
+fn get_check_sum_with_key(data: DataSize, checksum_key: DataSize) -> DataSize {
+    data ^ checksum_key
+}
+
+pub(crate) fn validate_data_size(
+    msg_checksum: DataSize,
+    msg_len: DataSize,
+    checksum_key: DataSize,
+) -> Result<DataSize, ProxyError> {
+    if get_check_sum_with_key(msg_checksum, checksum_key) != msg_len {
+        CheckSumSnafu { size: msg_len }.fail()?;
+    }
+
+    if msg_len > MAX_DATA_SIZE {
+        MaxSizeSnafu {
+            size: msg_len,
+            max: MAX_DATA_SIZE,
+        }
+        .fail()?;
+    }
+
+    Ok(msg_len)
+}
+
 /// Proxy connection header.
 ///
 /// Contains the destination address and optional encryption key for
@@ -133,7 +168,7 @@ impl Display for ProxyHeader {
 /// The actual data integrity is ensured by AES-GCM authentication.
 #[inline]
 pub fn get_check_sum(data: DataSize) -> DataSize {
-    runtime::with_secret_key(|_, hash| data ^ hash)
+    get_check_sum_with_key(data, current_checksum_key())
 }
 
 /// Reads and validates the data size from a framed message.
@@ -160,21 +195,7 @@ pub async fn get_data_size<T: crate::MyAsyncReadExt + Unpin>(
         detail: "read length",
     })?;
 
-    // Verify checksum
-    if get_check_sum(msg_checksum) != msg_len {
-        CheckSumSnafu { size: msg_len }.fail()?;
-    }
-
-    // Verify size limit
-    if msg_len > MAX_DATA_SIZE {
-        MaxSizeSnafu {
-            size: msg_len,
-            max: MAX_DATA_SIZE,
-        }
-        .fail()?;
-    }
-
-    Ok(msg_len)
+    validate_data_size(msg_checksum, msg_len, current_checksum_key())
 }
 
 /// Writes the data size with checksum to a framed message.
@@ -191,8 +212,16 @@ pub async fn set_data_size<T: crate::MyAsyncWriteExt + Unpin>(
     writer: &mut T,
     data_size: DataSize,
 ) -> Result<(), ProxyError> {
+    set_data_size_with_key(writer, data_size, current_checksum_key()).await
+}
+
+pub(crate) async fn set_data_size_with_key<T: crate::MyAsyncWriteExt + Unpin>(
+    writer: &mut T,
+    data_size: DataSize,
+    checksum_key: DataSize,
+) -> Result<(), ProxyError> {
     writer
-        .write_u32(get_check_sum(data_size))
+        .write_u32(get_check_sum_with_key(data_size, checksum_key))
         .await
         .context(ProtocolIoSnafu {
             detail: "write checksum",
