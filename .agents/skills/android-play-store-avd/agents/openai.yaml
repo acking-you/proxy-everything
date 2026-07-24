@@ -1,0 +1,4 @@
+interface:
+  display_name: "Android Play Store AVD"
+  short_description: "Start the local Play Store emulator and install apps"
+  default_prompt: "Use $android-play-store-avd to start my local Android emulator and open an app in Google Play."
