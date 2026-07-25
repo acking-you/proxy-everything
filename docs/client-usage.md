@@ -157,6 +157,14 @@ The picker is available before startup and while the proxy is connected.
 Applying a selection updates native routing immediately, reconnects affected
 established sessions, and does not recreate the TUN adapter.
 
+The Flutter listener is loopback-only by default. **Proxy Configuration >
+Allow LAN** explicitly changes the listener to `0.0.0.0:<client-port>` so
+devices on the same network can use its HTTP or SOCKS5 endpoint. This endpoint
+does not authenticate LAN clients; keep the option disabled on untrusted
+networks and use the operating-system firewall to limit access. The UI displays
+the current Wi-Fi address as a copyable `http://<address>:<client-port>` link
+after LAN access is enabled.
+
 The current UI executable appears as a required, disabled selection. This is
 not only a presentation rule: Rust always appends the current executable after
 every configuration or runtime replacement, so malformed imported settings or

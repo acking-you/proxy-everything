@@ -24,7 +24,12 @@ use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
 
 use crate::logging::send_log;
-use crate::types::{ProxyConfig, ProxyConfigV2, ProxyConfigV3, ProxyConfigV4, ProxyResult};
+use crate::types::{
+    ProxyConfig, ProxyConfigV2, ProxyConfigV3, ProxyConfigV4, ProxyConfigV5, ProxyResult,
+};
+
+const LOOPBACK_LISTEN_HOST: &str = "127.0.0.1";
+const LAN_LISTEN_HOST: &str = "0.0.0.0";
 
 /// Opaque handle to the proxy client.
 pub struct ProxyHandle {
@@ -109,7 +114,7 @@ pub unsafe extern "C" fn proxy_start(
     }
 
     let config = unsafe { &*config };
-    proxy_start_inner(handle, config, true, false, true, Vec::new())
+    proxy_start_inner(handle, config, true, false, true, false, Vec::new())
 }
 
 /// Start the proxy with the version 2 configuration.
@@ -148,6 +153,7 @@ pub unsafe extern "C" fn proxy_start_v2(
         config.enable_udp != 0,
         false,
         true,
+        false,
         Vec::new(),
     )
 }
@@ -194,6 +200,7 @@ pub unsafe extern "C" fn proxy_start_v3(
         config.enable_udp != 0,
         config.enable_tun != 0,
         true,
+        false,
         bypass_processes,
     )
 }
@@ -238,6 +245,52 @@ pub unsafe extern "C" fn proxy_start_v4(
         config.enable_udp != 0,
         config.enable_tun != 0,
         config.tun_udp_direct_fallback != 0,
+        false,
+        bypass_processes,
+    )
+}
+
+/// Start the proxy with the version 5 configuration.
+///
+/// V5 allows the local HTTP/SOCKS5 listener to be exposed on all IPv4
+/// interfaces. Older entry points remain loopback-only.
+///
+/// # Safety
+/// - `handle` must be a valid pointer from `proxy_create`
+/// - `config` fields must be valid C strings
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_start_v5(
+    handle: *mut ProxyHandle,
+    config: *const ProxyConfigV5,
+) -> ProxyResult {
+    if handle.is_null() || config.is_null() {
+        return ProxyResult::InvalidParam;
+    }
+
+    let config = unsafe { &*config };
+    let legacy_config = ProxyConfig {
+        server_host: config.server_host,
+        server_port: config.server_port,
+        local_port: config.local_port,
+        session_key: config.session_key,
+        auto_proxy: config.auto_proxy,
+        reverse_geo: config.reverse_geo,
+        cache_dir: config.cache_dir,
+        need_codec_ips: config.need_codec_ips,
+        force_codec: config.force_codec,
+        set_system_proxy: config.set_system_proxy,
+    };
+    let bypass_processes = match parse_process_names(config.tun_bypass_processes) {
+        Ok(names) => names,
+        Err(result) => return result,
+    };
+    proxy_start_inner(
+        handle,
+        &legacy_config,
+        config.enable_udp != 0,
+        config.enable_tun != 0,
+        config.tun_udp_direct_fallback != 0,
+        config.allow_lan != 0,
         bypass_processes,
     )
 }
@@ -272,6 +325,7 @@ fn proxy_start_inner(
     enable_udp: bool,
     enable_tun: bool,
     tun_udp_direct_fallback: bool,
+    allow_lan: bool,
     tun_bypass_processes: Vec<String>,
 ) -> ProxyResult {
     if config.server_host.is_null() {
@@ -348,6 +402,7 @@ fn proxy_start_inner(
     let enable_auto_proxy = config.auto_proxy != 0;
     let force_codec = config.force_codec != 0;
     let set_system_proxy = config.set_system_proxy != 0;
+    let listen_host = local_listen_host(allow_lan);
 
     // Initialize runtime config directly (no env vars needed)
     proxy_core::config::runtime::init_config(
@@ -395,14 +450,15 @@ fn proxy_start_inner(
     // This prevents false-positive "running" state when the port is already in use.
     let listener = match handle
         .runtime
-        .block_on(async { TcpListener::bind(("127.0.0.1", local_port)).await })
+        .block_on(async { TcpListener::bind((listen_host, local_port)).await })
     {
         Ok(listener) => listener,
         Err(e) => {
             send_log(
                 4,
                 &format!(
-                    "Failed to bind listener on 127.0.0.1:{}: {}",
+                    "Failed to bind listener on {}:{}: {}",
+                    listen_host,
                     local_port,
                     error_report(&e)
                 ),
@@ -470,6 +526,8 @@ fn proxy_start_inner(
             enable_udp,
             enable_tun,
             tun_udp_direct_fallback,
+            allow_lan,
+            listen_host,
             force_codec,
             "proxy started"
         );
@@ -507,6 +565,14 @@ fn proxy_start_inner(
     });
 
     ProxyResult::Ok
+}
+
+fn local_listen_host(allow_lan: bool) -> &'static str {
+    if allow_lan {
+        LAN_LISTEN_HOST
+    } else {
+        LOOPBACK_LISTEN_HOST
+    }
 }
 
 /// Atomically replace the remote proxy endpoint without rebinding the local
@@ -1220,6 +1286,12 @@ pub unsafe extern "C" fn proxy_is_running(handle: *const ProxyHandle) -> c_int {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lan_exposure_is_explicit_and_legacy_safe() {
+        assert_eq!(local_listen_host(false), "127.0.0.1");
+        assert_eq!(local_listen_host(true), "0.0.0.0");
+    }
 
     #[test]
     fn process_name_parser_accepts_json_and_legacy_comma_separated_values() {

@@ -99,6 +99,30 @@ pub struct ProxyConfigV4 {
     pub tun_udp_direct_fallback: c_int,
 }
 
+/// Versioned proxy configuration with explicit local listener exposure.
+///
+/// V1-V4 callers remain loopback-only. V5 callers may opt into listening on
+/// all IPv4 interfaces so trusted LAN devices can use the local proxy.
+#[repr(C)]
+pub struct ProxyConfigV5 {
+    pub server_host: *const c_char,
+    pub server_port: u16,
+    pub local_port: u16,
+    pub session_key: *const c_char,
+    pub auto_proxy: c_int,
+    pub reverse_geo: c_int,
+    pub cache_dir: *const c_char,
+    pub need_codec_ips: *const c_char,
+    pub force_codec: c_int,
+    pub set_system_proxy: c_int,
+    pub enable_udp: c_int,
+    pub enable_tun: c_int,
+    pub tun_bypass_processes: *const c_char,
+    pub tun_udp_direct_fallback: c_int,
+    /// 0 listens on 127.0.0.1; non-zero listens on 0.0.0.0.
+    pub allow_lan: c_int,
+}
+
 /// Result of latency test.
 #[repr(C)]
 pub struct LatencyResult {
@@ -198,5 +222,20 @@ mod tests {
         assert_same_offset!(ProxyConfigV3, ProxyConfigV4, enable_udp);
         assert_same_offset!(ProxyConfigV3, ProxyConfigV4, enable_tun);
         assert_same_offset!(ProxyConfigV3, ProxyConfigV4, tun_bypass_processes);
+
+        assert_same_offset!(ProxyConfigV4, ProxyConfigV5, server_host);
+        assert_same_offset!(ProxyConfigV4, ProxyConfigV5, server_port);
+        assert_same_offset!(ProxyConfigV4, ProxyConfigV5, local_port);
+        assert_same_offset!(ProxyConfigV4, ProxyConfigV5, session_key);
+        assert_same_offset!(ProxyConfigV4, ProxyConfigV5, auto_proxy);
+        assert_same_offset!(ProxyConfigV4, ProxyConfigV5, reverse_geo);
+        assert_same_offset!(ProxyConfigV4, ProxyConfigV5, cache_dir);
+        assert_same_offset!(ProxyConfigV4, ProxyConfigV5, need_codec_ips);
+        assert_same_offset!(ProxyConfigV4, ProxyConfigV5, force_codec);
+        assert_same_offset!(ProxyConfigV4, ProxyConfigV5, set_system_proxy);
+        assert_same_offset!(ProxyConfigV4, ProxyConfigV5, enable_udp);
+        assert_same_offset!(ProxyConfigV4, ProxyConfigV5, enable_tun);
+        assert_same_offset!(ProxyConfigV4, ProxyConfigV5, tun_bypass_processes);
+        assert_same_offset!(ProxyConfigV4, ProxyConfigV5, tun_udp_direct_fallback);
     }
 }

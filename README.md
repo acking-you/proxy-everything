@@ -51,6 +51,12 @@ Download `http-proxy-cli` from [releases](https://github.com/acking-you/proxy-ev
 
 The `--set-system-proxy` flag auto-configures your OS proxy settings. Without it, configure system proxy to `127.0.0.1:7890` manually.
 
+The Flutter UI keeps its HTTP/SOCKS5 listener on `127.0.0.1` by default. Enable
+**Allow LAN** in Proxy Configuration to bind `0.0.0.0` instead. The local
+listener has no client authentication, so enable this only on trusted networks
+and restrict the port with the host firewall. When enabled, the UI shows a
+copyable `http://<Wi-Fi-IP>:<port>` link for other devices on the same network.
+
 [Full client usage guide →](docs/client-usage.md)
 
 #### SOCKS5 UDP
