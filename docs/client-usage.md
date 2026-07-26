@@ -203,13 +203,19 @@ On Windows, setup preserves the existing physical, WSL, and VPN default routes.
 It captures IPv4 with two more-specific `/1` routes plus a session-owned
 `0.0.0.0/0` compatibility row so forwarding consumers such as WSL HNS NAT
 select Wintun even when they initialize after TUN startup. The IP Helper
-transaction records only rows owned by the current TUN session and restores
-those exact rows together with the previous TUN DNS setting. Startup failures
-roll back the same transaction instead of deleting every `0.0.0.0/0` route or
-guessing which physical default gateway should be recreated.
+transaction also snapshots and enables IPv4 forwarding on Wintun and WSL HNS
+`vEthernet` interfaces. Wintun temporarily uses weak-host send/receive so
+NAT-translated packets whose addresses belong to another interface can traverse
+the TUN. A monitor applies the policy to WSL interfaces created or replaced
+after TUN startup. Teardown restores only interface fields and route rows
+changed by the current session, together with the previous TUN DNS setting.
+Startup failures roll back the same transaction instead of deleting every
+`0.0.0.0/0` route or guessing which physical default gateway should be
+recreated.
 
 Normal cancellation first cancels and drains the TUN TCP, UDP, UdpGW, and
-socket-transfer tasks, then restores routes and DNS through the setup guard.
+socket-transfer tasks, then restores routes, interface settings, and DNS
+through the setup guard.
 This prevents old relays from surviving a node hot switch while network state
 is already being replaced. A hard process termination or machine crash can
 still prevent user-space cleanup; after such an event, inspect and remove only
