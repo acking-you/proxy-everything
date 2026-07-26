@@ -200,19 +200,22 @@ terminal is created. The original process releases the local port and the new
 process retries the listener handoff before it creates Wintun.
 
 On Windows, setup preserves the existing physical, WSL, and VPN default routes.
-It captures IPv4 with two more-specific `/1` routes created through the IP
-Helper API, records only rows owned by the current TUN session, and restores
+It captures IPv4 with two more-specific `/1` routes plus a session-owned
+`0.0.0.0/0` compatibility row so forwarding consumers such as WSL HNS NAT
+select Wintun even when they initialize after TUN startup. The IP Helper
+transaction records only rows owned by the current TUN session and restores
 those exact rows together with the previous TUN DNS setting. Startup failures
-roll back the same transaction instead of deleting every `0.0.0.0/0` route and
-guessing which default gateway should be recreated.
+roll back the same transaction instead of deleting every `0.0.0.0/0` route or
+guessing which physical default gateway should be recreated.
 
 Normal cancellation first cancels and drains the TUN TCP, UDP, UdpGW, and
 socket-transfer tasks, then restores routes and DNS through the setup guard.
 This prevents old relays from surviving a node hot switch while network state
 is already being replaced. A hard process termination or machine crash can
 still prevent user-space cleanup; after such an event, inspect and remove only
-the two `/1` rows owned by the proxy-everything Wintun adapter rather than using
-an unqualified default-route deletion.
+the two `/1` rows and the `0.0.0.0/0` row whose interface and next hop identify
+the proxy-everything Wintun adapter. Never use an unqualified default-route
+deletion.
 
 Only one application should own the fixed proxy-everything Wintun adapter and
 its capture routes. If another VPN/TUN application or another proxy-everything
