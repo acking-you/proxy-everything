@@ -131,6 +131,23 @@ pub struct LatencyResult {
     pub error: *mut c_char,
 }
 
+/// What a node's traffic actually looks like from the outside.
+///
+/// The catalogue reports where a node is registered, which is not necessarily
+/// where its traffic leaves from. This carries the egress address observed by
+/// asking an echo service through the node itself.
+#[repr(C)]
+pub struct NodeProbeResult {
+    pub success: c_int,
+    /// ISO 3166-1 alpha-2, empty when the probe failed.
+    pub country_code: *mut c_char,
+    /// The address the echo service saw, empty when the probe failed.
+    pub egress_ip: *mut c_char,
+    /// Round trip through the node, including the echo request.
+    pub latency_ms: u64,
+    pub error: *mut c_char,
+}
+
 /// Node info with geo location.
 #[repr(C)]
 pub struct NodeInfoWithGeo {
