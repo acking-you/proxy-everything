@@ -8,6 +8,7 @@ mod handle;
 mod latency;
 mod logging;
 mod nodes;
+mod runtime;
 mod types;
 
 pub(crate) fn init_allocator() {

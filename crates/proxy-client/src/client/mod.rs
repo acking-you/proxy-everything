@@ -343,7 +343,7 @@ pub async fn resolve_server_connection(
     use proxy_core::config::runtime;
 
     if let Some(upstream_proxy) = upstream_proxy {
-        tracing::info!(
+        tracing::debug!(
             host,
             port,
             upstream_proxy = %upstream_proxy.display_url(),
@@ -556,12 +556,12 @@ impl Forwarder for TcpForwardImpl {
             msg_key,
         } = context;
 
-        tracing::info!(host, port, need_proxy, ?msg_key);
+        tracing::debug!(host, port, need_proxy, ?msg_key);
 
         // start to forward
         match (need_proxy, msg_key) {
             (true, Some(key)) => {
-                tracing::info!(?key, info = "start with codec forward");
+                tracing::debug!(?key, info = "start with codec forward");
                 client_proxy_with_cryptor_codec(
                     &host,
                     &key,
@@ -576,7 +576,7 @@ impl Forwarder for TcpForwardImpl {
                 })
             }
             _ => {
-                tracing::info!(info = "start norlmal forward");
+                tracing::debug!(info = "start norlmal forward");
                 proxy_with_norlmal_codec(
                     &host,
                     client_reader,
@@ -608,7 +608,7 @@ fn get_provider<T: ProxierProviderType>(header: HeaderContext<'_>) -> Option<T::
     let result = T::Provider::try_new(header);
     match result {
         Ok(o) => {
-            tracing::info!(protocol = T::PROXY_TYPE, "protocol matched");
+            tracing::debug!(protocol = T::PROXY_TYPE, "protocol matched");
             Some(o)
         }
         Err(e) => {

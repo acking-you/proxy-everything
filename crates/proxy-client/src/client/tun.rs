@@ -26,6 +26,13 @@ use tun2proxy::{ArgDns, ArgProxy, ArgUdpStrategy, Args, ProcessBypass};
 // giving the embedded client enough headroom for a full-device workload.
 const EMBEDDED_TUN_MAX_SESSIONS: usize = 1024;
 
+// Halved from ipstack's 16 KiB default. Every admitted session holds one for
+// its whole life, and `tcp_timeout` deliberately keeps idle sessions around for
+// ten minutes, so this buffer multiplies by the concurrent session count rather
+// than by the active one. A relay hands data straight to the upstream socket,
+// so it does not need a large receive window of its own.
+const EMBEDDED_TUN_TCP_READ_BUFFER: usize = 8 * 1024;
+
 #[cfg(target_os = "android")]
 const ANDROID_VIRTUAL_DNS_PORTAL: IpAddr = IpAddr::V4(Ipv4Addr::new(172, 19, 0, 2));
 
@@ -478,6 +485,7 @@ async fn run_with_ready_inner(
         ipv6_enabled: config.ipv6_enabled,
         mtu: config.mtu,
         max_sessions: EMBEDDED_TUN_MAX_SESSIONS,
+        tcp_read_buffer_size: EMBEDDED_TUN_TCP_READ_BUFFER,
         bypass_process: config.bypass.effective_processes(),
         ..Args::default()
     };

@@ -8,7 +8,6 @@ use proxy_core::config::DEFAULT_SECRET_KEY;
 use proxy_core::control::ControlClient;
 use proxy_core::geo::query_geo_batch;
 use proxy_core::util::error_report;
-use tokio::runtime::Runtime;
 
 use crate::latency::DEFAULT_TIMEOUT_MS;
 use crate::types::{NodeInfoWithGeo, NodesResult};
@@ -68,23 +67,16 @@ pub unsafe extern "C" fn proxy_get_server_nodes(
         timeout_ms
     } as u64);
 
-    // Create a temporary runtime for this operation
-    let runtime = match Runtime::new() {
-        Ok(rt) => rt,
-        Err(e) => {
-            tracing::error!(
-                "proxy_get_server_nodes: failed to create runtime: {}",
-                error_report(&e)
-            );
-            return NodesResult {
-                success: 0,
-                nodes: ptr::null_mut(),
-                count: 0,
-                error: CString::new(format!("Failed to create runtime: {}", error_report(&e)))
-                    .unwrap()
-                    .into_raw(),
-            };
-        }
+    // Shared with the other control-plane queries. Building one per call spun up
+    // and tore down a worker thread per core on every node refresh.
+    let Some(runtime) = crate::runtime::control() else {
+        tracing::error!("proxy_get_server_nodes: control runtime unavailable");
+        return NodesResult {
+            success: 0,
+            nodes: ptr::null_mut(),
+            count: 0,
+            error: CString::new("Failed to create runtime").unwrap().into_raw(),
+        };
     };
 
     runtime.block_on(async {

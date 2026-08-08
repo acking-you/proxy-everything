@@ -70,7 +70,7 @@ struct TunLifecycle {
 #[unsafe(no_mangle)]
 pub extern "C" fn proxy_create() -> *mut ProxyHandle {
     crate::init_allocator();
-    let runtime = match Runtime::new() {
+    let runtime = match crate::runtime::build() {
         Ok(rt) => rt,
         Err(e) => {
             send_log(4, &format!("Failed to create runtime: {}", e));
