@@ -1051,6 +1051,32 @@ pub extern "C" fn proxy_is_elevated() -> c_int {
     }
 }
 
+/// Put back a system proxy that a previous run took over but never released.
+///
+/// `Drop` handles ordinary shutdown, but nothing runs when the process is
+/// killed from Task Manager, crashes, or is cut short by a logoff, and the
+/// machine is then left pointing at a listener that no longer exists. Call this
+/// once at startup, and from a Windows session-end handler where the UI thread
+/// may never be scheduled again.
+///
+/// Returns 1 when leftover settings were restored, 0 otherwise. Safe to call
+/// repeatedly and when nothing was left behind.
+#[unsafe(no_mangle)]
+pub extern "C" fn proxy_restore_system_proxy() -> c_int {
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    {
+        let restored = proxy_client::cli_config::restore_orphaned_system_proxy();
+        if restored {
+            send_log(3, "Restored a system proxy left behind by a previous run");
+        }
+        i32::from(restored)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        0
+    }
+}
+
 /// Relaunch the current Windows GUI with `--enable-tun` through ShellExecute's
 /// `runas` verb. The new process is a GUI process, so no terminal window is
 /// created. The caller remains alive when UAC is cancelled.

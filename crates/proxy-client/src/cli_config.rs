@@ -108,13 +108,129 @@ pub fn get_default_config_path() -> Result<PathBuf> {
     Ok(data_dir.join(CONFIG_FILE_NAME))
 }
 
+/// Settings to put back once the proxy stops owning the system proxy.
+///
+/// Written to disk so that a process which never gets to run `Drop` — killed
+/// from Task Manager, crashed, or cut short by a logoff — does not leave the
+/// machine pointing at a listener that no longer exists.
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct SystemProxyRestorePoint {
+    enable: bool,
+    host: String,
+    port: u16,
+    bypass: String,
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+impl SystemProxyRestorePoint {
+    fn path() -> PathBuf {
+        proxy_core::config::default_state_dir().join("system-proxy-restore.json")
+    }
+
+    fn capture(original: &Sysproxy) -> Self {
+        Self {
+            enable: original.enable,
+            host: original.host.clone(),
+            port: original.port,
+            bypass: original.bypass.clone(),
+        }
+    }
+
+    fn apply(&self) -> Result<(), sysproxy::Error> {
+        Sysproxy {
+            enable: self.enable,
+            host: self.host.clone(),
+            port: self.port,
+            bypass: self.bypass.clone(),
+        }
+        .set_system_proxy()
+    }
+
+    fn store(&self) {
+        let path = Self::path();
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            tracing::warn!(
+                "Failed to create the system proxy state dir: {}",
+                error_report(&e)
+            );
+            return;
+        }
+        match serde_json::to_string(self) {
+            Ok(contents) => {
+                if let Err(e) = std::fs::write(&path, contents) {
+                    tracing::warn!(
+                        "Failed to record the system proxy restore point: {}",
+                        error_report(&e)
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(
+                "Failed to encode the system proxy restore point: {}",
+                error_report(&e)
+            ),
+        }
+    }
+
+    fn take() -> Option<Self> {
+        let path = Self::path();
+        let contents = std::fs::read_to_string(&path).ok()?;
+        // Drop the record first: a restore point that cannot be applied must
+        // not be retried on every launch.
+        let _ = std::fs::remove_file(&path);
+        match serde_json::from_str(&contents) {
+            Ok(record) => Some(record),
+            Err(e) => {
+                tracing::warn!(
+                    "Ignoring a damaged system proxy restore point: {}",
+                    error_report(&e)
+                );
+                None
+            }
+        }
+    }
+
+    fn discard() {
+        let _ = std::fs::remove_file(Self::path());
+    }
+}
+
+/// Put back a system proxy that a previous run took over but never released.
+///
+/// Returns `true` when leftover settings were found and restored. Safe to call
+/// when nothing was left behind, and safe to call more than once.
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+pub fn restore_orphaned_system_proxy() -> bool {
+    let Some(record) = SystemProxyRestorePoint::take() else {
+        return false;
+    };
+    if !Sysproxy::is_support() {
+        return false;
+    }
+    match record.apply() {
+        Ok(()) => {
+            tracing::info!("Restored a system proxy left behind by a previous run");
+            true
+        }
+        Err(e) => {
+            tracing::error!(
+                "Failed to restore the orphaned system proxy: {}",
+                error_report(&e)
+            );
+            false
+        }
+    }
+}
+
 /// RAII guard for system proxy settings.
 ///
-/// Sets system proxy on creation, disables it on drop.
+/// Sets system proxy on creation, restores the previous settings on drop.
 /// This ensures proxy is always cleaned up, even on panic or signal.
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub struct SystemProxyGuard {
-    original: Sysproxy,
+    original: SystemProxyRestorePoint,
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
@@ -134,6 +250,11 @@ impl SystemProxyGuard {
                 return None;
             }
         };
+        let restore_point = SystemProxyRestorePoint::capture(&original);
+        // Record before switching. A crash between the two leaves a redundant
+        // restore point, which is harmless; the other order would lose it.
+        restore_point.store();
+
         let new_proxy = Sysproxy {
             enable: true,
             host: "127.0.0.1".into(),
@@ -142,26 +263,26 @@ impl SystemProxyGuard {
         };
         if let Err(e) = new_proxy.set_system_proxy() {
             tracing::error!("Failed to set system proxy: {}", error_report(&e));
+            SystemProxyRestorePoint::discard();
             return None;
         }
         tracing::info!("System proxy set to 127.0.0.1:{port}");
-        Some(Self { original })
+        Some(Self {
+            original: restore_point,
+        })
     }
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 impl Drop for SystemProxyGuard {
     fn drop(&mut self) {
-        let disabled = Sysproxy {
-            enable: false,
-            host: self.original.host.clone(),
-            port: self.original.port,
-            bypass: self.original.bypass.clone(),
-        };
-        if let Err(e) = disabled.set_system_proxy() {
-            tracing::error!("Failed to disable system proxy: {}", error_report(&e));
+        // Restore exactly what was configured before, rather than only turning
+        // the proxy off: users who already had one deserve it back.
+        if let Err(e) = self.original.apply() {
+            tracing::error!("Failed to restore the system proxy: {}", error_report(&e));
         } else {
-            tracing::info!("System proxy disabled");
+            tracing::info!("System proxy restored");
         }
+        SystemProxyRestorePoint::discard();
     }
 }
