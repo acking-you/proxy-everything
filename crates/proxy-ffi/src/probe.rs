@@ -226,6 +226,19 @@ async fn probe(host: &str, port: u16, force_codec: bool) -> Result<(String, Stri
                 "the node returned more than an echo answer can be",
             ));
         }
+        // Stop at a complete answer instead of waiting for the peer to close.
+        // `Connection: close` makes the close arrive promptly over a direct
+        // socket, but through a tunnel the FIN has to traverse the node, the
+        // relay and the user-space stack, and waiting for it turned an answer
+        // that had already arrived into a timeout.
+        //
+        // The trailing newline is what makes the last line safe to read: without
+        // it a split segment could present a truncated address as a whole one.
+        if response.ends_with(b"\n")
+            && let Ok(answer) = parse_echo(&response)
+        {
+            return Ok(answer);
+        }
     }
 
     if response.is_empty() {
@@ -320,6 +333,17 @@ mod tests {
     fn rejects_a_response_without_headers() {
         let error = expect_error(b"success\nJP\n203.0.113.7\n");
         assert_eq!(error.stage, ProbeStage::Decode);
+    }
+
+    #[test]
+    fn a_partial_body_is_not_mistaken_for_an_answer() {
+        // The read loop parses as bytes arrive so it never waits for a close
+        // that a tunnel may not deliver. A body split mid-address must not
+        // satisfy it, or the probe would report a truncated egress address.
+        assert!(parse_echo(b"HTTP/1.1 200 OK\r\n\r\nsuccess\n").is_err());
+        let (_, ip) = parse_echo(b"HTTP/1.1 200 OK\r\n\r\nsuccess\nJP\n203.0.113.7\n")
+            .expect("a whole body parses");
+        assert_eq!(ip, "203.0.113.7");
     }
 
     #[test]
