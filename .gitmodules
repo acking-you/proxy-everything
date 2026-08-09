@@ -19,3 +19,6 @@
 [submodule "deps/tun2proxy"]
 	path = deps/tun2proxy
 	url = git@github.com:acking-you/tun2proxy.git
+[submodule "deps/ipstack"]
+	path = deps/ipstack
+	url = git@github.com:acking-you/ipstack.git
