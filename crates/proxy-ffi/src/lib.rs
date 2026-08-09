@@ -35,6 +35,6 @@ pub use nodes::{proxy_free_nodes_result, proxy_get_server_nodes};
 pub use probe::{proxy_free_node_probe_result, proxy_probe_node};
 pub use types::{
     GroupsResult, LatencyResult, LogCallback, NodeGroupInfo, NodeInfoWithGeo, NodeProbeResult,
-    NodesResult,
-    ProxyConfig, ProxyConfigV2, ProxyConfigV3, ProxyConfigV4, ProxyConfigV5, ProxyResult,
+    NodesResult, ProxyConfig, ProxyConfigV2, ProxyConfigV3, ProxyConfigV4, ProxyConfigV5,
+    ProxyResult,
 };
