@@ -7,7 +7,13 @@ members = [
     "crates/proxy-tui",
     "crates/proxy-ffi",
 ]
-exclude = ["deps/kanal", "deps/uni-stream", "deps/sysproxy-rs", "deps/tun2proxy"]
+exclude = [
+    "deps/kanal",
+    "deps/uni-stream",
+    "deps/sysproxy-rs",
+    "deps/tun2proxy",
+    "deps/ipstack",
+]
 
 [workspace.package]
 version = "0.4.23"
@@ -98,3 +104,10 @@ kanal = { path = "deps/kanal" }
 sysproxy = { path = "deps/sysproxy-rs" }
 smallvec = { path = "deps/rust-smallvec", features = ["std"] }
 tun2proxy = { path = "deps/tun2proxy", default-features = false }
+
+# `ipstack` reaches the build through `tun2proxy` rather than directly, so the
+# fork is applied to the whole graph here instead of as a workspace dependency.
+# It carries a fix for an active half-close that never completes when data is
+# still in flight, which stalls any peer that frames its response by closing.
+[patch.crates-io]
+ipstack = { path = "deps/ipstack" }
