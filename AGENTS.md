@@ -99,6 +99,39 @@ remote upload.
 - Verify every APK certificate with `apksigner verify --print-certs`. Compare
   its certificate digest with the previous release when one is available.
 
+### Mobile Packages Are Built Locally, Never by CI
+
+Every mobile package published to GitHub — Android APK and iOS IPA alike —
+must be built on the maintainer's machine and uploaded to the release by hand.
+CI may compile them as a check; its output must never be distributed.
+
+The reason is the signing key. `android/app/build.gradle.kts` signs release
+builds with the debug config, and a CI runner generates a fresh debug keystore
+on every run, so each build carries a different certificate. Measured on the
+three published releases:
+
+| Release | Certificate (SHA-256, truncated) |
+|---------|----------------------------------|
+| v1.2.7  | `08fb5536…3354` |
+| v1.2.8  | `6852dc3d…51b5` |
+| v1.2.9  | `d99b01d4…f987` |
+| local `~/.android/debug.keystore` | `5ac9aa7c…305c` |
+
+Android refuses to update an installed app whose certificate does not match, so
+those releases could never upgrade one another — a phone had to uninstall first
+and lose its data. A local build carries the stable key in the table's last row
+and upgrades cleanly.
+
+Consequently:
+
+- The release workflow collects desktop artifacts only. Do not add `*.apk` or
+  `*.ipa` back to its file list.
+- Build mobile packages locally, verify them as described above, and attach them
+  to the release that CI created.
+- Uploading the local keystore to CI as a secret would also work, but it puts a
+  signing key on GitHub. That is the maintainer's decision to make, not an
+  agent's, and it must not be done on an agent's initiative.
+
 ### Android Release Build
 
 - Android releases are split per ABI by default; do not distribute a universal
