@@ -210,6 +210,35 @@ Options:
   -V, --version                         Print version
 ```
 
+## Working Agreements
+
+### Don't reach for `gh` on your own
+
+The `gh` CLI is for steps the user asked for, not for background research.
+Triggering a workflow, opening or merging a PR, creating a release, pushing a
+tag, editing an issue — do these only on an explicit request, and only for the
+repository the request names.
+
+Read-only calls (`gh run list`, `gh pr view`, `gh api`) are cheap individually
+and still not free: they are network round trips against the user's account,
+they show up in their audit log, and a loop of them is slow and noisy. Prefer
+what is already on disk — `git log`, `git show`, the working tree, the local
+submodules — and reach for `gh` only when the answer genuinely lives on GitHub
+and the user needs it now.
+
+Never poll a workflow run in a tight loop. If a run has to be watched, say so
+and let the user decide, or check once at an interval matched to how long the
+job actually takes.
+
+### Other standing rules
+
+- **Nothing is pushed unless asked.** Commit locally; `git push` and tag
+  creation are the user's call.
+- **Run `make clippy` and `make fmt` before every commit** (see
+  [Pre-commit Requirement](#pre-commit-requirement)).
+- **Prefer a package or a platform API over hand-rolled native code.** A fix
+  that only works on Windows is not a fix for a cross-platform app.
+
 ## Workspace Structure
 
 | Crate | Description | Binary |
@@ -453,6 +482,10 @@ This triggers `.github/workflows/build-deploy.yaml` to build:
 - **FFI libs**: `libhttp_proxy-{VERSION}-{TARGET}.tar.gz` (contains `.so`/`.dylib`/`.dll`/`.a`)
 
 ### 2. Trigger Flutter UI Build
+
+This fires a build in another repository and can cut a public release, so run
+it only when the user asks for it by name — see
+[Working Agreements](#dont-reach-for-gh-on-your-own).
 
 ```bash
 # Use gh CLI to trigger Flutter UI build
