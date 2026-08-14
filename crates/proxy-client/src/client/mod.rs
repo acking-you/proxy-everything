@@ -49,6 +49,8 @@
 #[cfg(feature = "auto-proxy")]
 pub mod auto_proxy;
 pub mod http;
+#[cfg(target_os = "macos")]
+pub mod macos_tun;
 pub mod socks;
 pub mod tun;
 mod udp;

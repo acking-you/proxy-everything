@@ -272,6 +272,20 @@ async fn main() -> Result<()> {
         std::process::exit(exit_code as i32);
     }
 
+    // Creating a utun device on macOS requires root, and it fails with a bare
+    // "Operation not permitted" well before anything explains why. Say so up
+    // front instead. The GUI reaches for an authorization prompt here; a
+    // terminal tool should not, so this asks the user to re-run under sudo.
+    // Linux deliberately has no equivalent check: CAP_NET_ADMIN is enough there,
+    // and rejecting a non-root euid would break that setup.
+    #[cfg(target_os = "macos")]
+    if enable_tun && !proxy_client::client::macos_tun::is_root() {
+        return Err(anyhow!(
+            "TUN mode needs root on macOS to create the utun device and install routes. Re-run \
+             this command with sudo."
+        ));
+    }
+
     // SAFETY: Environment variables are set before any async code runs.
     // The tokio runtime hasn't started yet, so there are no other threads
     // that could race with these set_var calls.

@@ -145,6 +145,10 @@ pub struct TunConfig {
     pub udp_direct_fallback: bool,
     /// Remote proxy endpoint whose resolved addresses must never enter TUN.
     pub remote_endpoint: Option<(String, u16)>,
+    /// Directory for virtual-DNS persistence. Only used when the TUN session
+    /// runs outside this process and therefore cannot inherit
+    /// `virtual_dns_state`.
+    pub cache_dir: Option<std::path::PathBuf>,
 }
 
 impl TunConfig {
@@ -157,6 +161,7 @@ impl TunConfig {
             udp_enabled: true,
             udp_direct_fallback: true,
             remote_endpoint: None,
+            cache_dir: None,
         })
     }
 
@@ -198,6 +203,12 @@ impl TunConfig {
     /// Override the TUN MTU supplied by the platform interface owner.
     pub fn with_mtu(mut self, mtu: u16) -> Self {
         self.mtu = mtu;
+        self
+    }
+
+    /// Directory an out-of-process TUN session persists its fake-IP mappings in.
+    pub fn with_cache_dir(mut self, directory: impl Into<std::path::PathBuf>) -> Self {
+        self.cache_dir = Some(directory.into());
         self
     }
 }
@@ -460,6 +471,29 @@ async fn run_with_ready_inner(
     tun_fd: PlatformTunFd,
 ) -> io::Result<usize> {
     install_tun_log_bridge();
+    if cfg!(target_os = "macos") && !config.udp_enabled && config.udp_direct_fallback {
+        tracing::warn!(
+            "captured non-DNS UDP will be blocked rather than relayed directly: a direct relay on \
+             macOS cannot be bound to the physical interface and would be recaptured by the TUN \
+             routes"
+        );
+    }
+    if cfg!(target_os = "macos")
+        && let Some((host, port)) = &config.remote_endpoint
+        && host.parse::<IpAddr>().is_err()
+    {
+        // Only the addresses resolved before setup receive a physical route.
+        // Windows additionally keeps this process out of the tunnel by matching
+        // its executable name, but that matcher is not built for macOS, so a
+        // later lookup of the same name resolves to a virtual-DNS address and
+        // the upstream connection loops back into the local listener.
+        tracing::warn!(
+            remote_host = %host,
+            remote_port = port,
+            "macOS TUN mode expects the remote proxy endpoint to be an IP address; a \
+             hostname is only protected for the addresses it resolves to right now"
+        );
+    }
     if config.udp_enabled
         && let Err(error) = validate_local_socks5_udp(local_port).await
     {
@@ -558,14 +592,22 @@ async fn run_with_ready_inner(
     }
 }
 
+/// Choose the UDP policy for a TUN session.
+///
+/// macOS never selects `Direct`. A direct relay must leave through the physical
+/// interface, which `tun2proxy` arranges by binding the relay socket to it, and
+/// that binding is only implemented for Windows and Linux. On macOS the relay
+/// socket stays unbound, so the TUN catch-all route captures it again and the
+/// datagram loops back into the tunnel. Blocking captured non-DNS UDP drops
+/// that traffic instead, which is the lesser failure.
 fn tun_udp_strategy(udp_enabled: bool, udp_direct_fallback: bool) -> ArgUdpStrategy {
     if udp_enabled {
-        ArgUdpStrategy::Proxy
-    } else if udp_direct_fallback {
-        ArgUdpStrategy::Direct
-    } else {
-        ArgUdpStrategy::Block
+        return ArgUdpStrategy::Proxy;
     }
+    if udp_direct_fallback && !cfg!(target_os = "macos") {
+        return ArgUdpStrategy::Direct;
+    }
+    ArgUdpStrategy::Block
 }
 
 /// Verify the complete TUN UDP path before Wintun changes the default route.
@@ -683,8 +725,16 @@ mod tests {
     fn tun_udp_policy_selects_proxy_direct_or_block() {
         assert_eq!(tun_udp_strategy(true, true), ArgUdpStrategy::Proxy);
         assert_eq!(tun_udp_strategy(true, false), ArgUdpStrategy::Proxy);
-        assert_eq!(tun_udp_strategy(false, true), ArgUdpStrategy::Direct);
         assert_eq!(tun_udp_strategy(false, false), ArgUdpStrategy::Block);
+
+        // macOS has no interface-bound direct relay, so the fallback must not
+        // silently loop captured UDP back through the tunnel.
+        let expected = if cfg!(target_os = "macos") {
+            ArgUdpStrategy::Block
+        } else {
+            ArgUdpStrategy::Direct
+        };
+        assert_eq!(tun_udp_strategy(false, true), expected);
     }
 
     #[test]

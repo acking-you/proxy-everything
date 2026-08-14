@@ -244,7 +244,7 @@ job actually takes.
 | Crate | Description | Binary |
 |-------|-------------|--------|
 | `proxy-core` | Core library (crypto, codec, config, protocol) | - |
-| `proxy-client` | Client implementation | `http-proxy-cli` |
+| `proxy-client` | Client implementation | `http-proxy-cli`, `http-proxy-tun-helper` |
 | `proxy-server` | Server implementation | `http-proxy-server` |
 | `proxy-tui` | TUI monitoring interface | `proxy-tui` |
 | `proxy-ffi` | FFI interface for Flutter | `libhttp_proxy.so/dylib/dll` |
@@ -664,6 +664,64 @@ git submodule status
 **4. System Proxy Setup Failure**
 - Ensure `sysproxy-rs` submodule is initialized
 - Check for admin privileges (Windows/macOS)
+
+**5. TUN Mode Fails With "Operation not permitted"**
+- macOS and Linux both need privileges to create the interface at all. See
+  [TUN Privileges by Platform](#tun-privileges-by-platform).
+- macOS: the privileged helper is missing from the bundle, or authorization was
+  declined. Confirm `Contents/MacOS/http-proxy-tun-helper` exists.
+- Linux: run with root or grant `CAP_NET_ADMIN`.
+
+## TUN Privileges by Platform
+
+Creating a TUN interface is privileged on every desktop platform, and each one
+grants that privilege differently.
+
+| Platform | Mechanism | Notes |
+|----------|-----------|-------|
+| Windows | UAC relaunch of the same GUI | `relaunch_elevated_for_tun` restarts with `--enable-tun` |
+| macOS | `http-proxy-tun-helper` started via `osascript` | Administrator prompt on each enable |
+| Linux | Run as root or with `CAP_NET_ADMIN` | No elevation is attempted |
+| Android/iOS | Platform VPN API owns the interface | The descriptor is handed to native code |
+
+### macOS
+
+Creating a utun device requires root — `connect` on the
+`PF_SYSTEM`/`UTUN_CONTROL_NAME` control socket returns `EPERM` otherwise, before
+any route change is attempted — and macOS cannot elevate a process that is
+already running. The GUI therefore stays unprivileged and keeps serving the
+local SOCKS5 listener, while `http-proxy-tun-helper` runs the TUN session with
+administrator rights.
+
+A single Unix socket carries the configuration (keeping the proxy endpoint out
+of the world-readable `ps` output), the readiness result, and the stop request.
+Shutdown must be cooperative because an unprivileged process cannot signal a
+root one, and the socket reaching EOF is how the helper learns the GUI died and
+that it has to restore the routes itself.
+
+Build and stage both artifacts with:
+
+```bash
+bash scripts/macos/stage-ui-native.sh --configuration Release
+```
+
+Known limitations:
+
+- **Use an IP address for the remote endpoint.** Only addresses resolved before
+  setup get a physical route. Windows additionally keeps its own process out of
+  the tunnel by matching the executable name, but that matcher is not built for
+  macOS, so re-resolving a hostname while TUN is active returns a fake IP and
+  the upstream connection loops back into the local listener.
+- **`kill -9` on the helper can leave the routes behind.** EOF cleanup covers a
+  crashed GUI, but not a hard-killed helper. Recover with
+  `sudo route delete default && sudo route add default <original-gateway>`.
+- **Captured non-DNS UDP is blocked, not relayed directly, when SOCKS5 UDP is
+  off.** A direct relay must be bound to the physical interface, and that
+  binding only exists for Windows and Linux.
+- **The helper runs as root from a user-writable bundle.** Anyone who already
+  has code execution as this user can therefore escalate. This is inherent to
+  ad-hoc signing plus `osascript` elevation; avoiding it needs a Developer ID
+  and `SMAppService`.
 
 ## References
 

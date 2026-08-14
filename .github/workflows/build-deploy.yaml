@@ -251,6 +251,17 @@ jobs:
           command: build
           args: -p proxy-ffi --verbose --release --target ${{ matrix.target }}
 
+      # macOS refuses to create a utun device without root and cannot elevate a
+      # running GUI, so the desktop app ships a helper it starts through an
+      # administrator prompt. It travels in the same archive as the FFI library
+      # because the Flutter build stages both from one download.
+      - name: Build privileged TUN helper
+        if: contains(matrix.target, 'apple-darwin')
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: -p proxy-client --bin http-proxy-tun-helper --verbose --release --target ${{ matrix.target }}
+
       - name: Archive FFI library
         shell: bash
         run: |
@@ -268,6 +279,14 @@ jobs:
             cp "target/${{ matrix.target }}/release/libhttp_proxy.so" "$dirname/" 2>/dev/null || true
             cp "target/${{ matrix.target }}/release/libhttp_proxy.dylib" "$dirname/" 2>/dev/null || true
           fi
+
+          # Fail loudly rather than shipping a macOS archive whose TUN switch
+          # can only ever report a missing helper.
+          case "${{ matrix.target }}" in
+            *apple-darwin)
+              cp "target/${{ matrix.target }}/release/http-proxy-tun-helper" "$dirname/"
+              ;;
+          esac
 
           # Create archive
           if [ "${{ matrix.os }}" = "windows-latest" ]; then

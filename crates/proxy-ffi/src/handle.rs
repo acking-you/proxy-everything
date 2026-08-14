@@ -31,6 +31,18 @@ use crate::types::{
 const LOOPBACK_LISTEN_HOST: &str = "127.0.0.1";
 const LAN_LISTEN_HOST: &str = "0.0.0.0";
 
+/// How long to wait for adapter and route setup that needs no user interaction.
+const TUN_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// How long to wait when setup is gated on an authorization prompt.
+///
+/// The macOS helper cannot report readiness until the user has answered the
+/// administrator dialog, so the unattended bound would expire while that dialog
+/// is still on screen. Callers run this off the UI thread, so the switch simply
+/// stays pending until the user responds.
+#[cfg(target_os = "macos")]
+const PRIVILEGED_TUN_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Opaque handle to the proxy client.
 pub struct ProxyHandle {
     pub(crate) runtime: Runtime,
@@ -48,6 +60,9 @@ pub struct ProxyHandle {
     last_error: Arc<Mutex<Option<String>>>,
     udp_enabled: AtomicBool,
     tun_udp_direct_fallback: AtomicBool,
+    /// Retained so an out-of-process TUN session can persist its own fake-IP
+    /// mappings; the in-process state is loaded from here at startup.
+    cache_dir: Mutex<Option<PathBuf>>,
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     system_proxy_guard: Arc<Mutex<Option<SystemProxyGuard>>>,
 }
@@ -94,6 +109,7 @@ pub extern "C" fn proxy_create() -> *mut ProxyHandle {
         last_error: Arc::new(Mutex::new(None)),
         udp_enabled: AtomicBool::new(true),
         tun_udp_direct_fallback: AtomicBool::new(true),
+        cache_dir: Mutex::new(None),
         #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
         system_proxy_guard: Arc::new(Mutex::new(None)),
     }))
@@ -384,6 +400,10 @@ fn proxy_start_inner(
                 "TUN virtual DNS mappings will not survive a process restart"
             ),
         }
+    }
+
+    if let Ok(mut stored) = handle.cache_dir.lock() {
+        *stored = cache_dir.clone();
     }
 
     // need_codec_ips: null or empty = empty list (no codec IPs), otherwise comma-separated
@@ -725,18 +745,48 @@ pub unsafe extern "C" fn proxy_start_tun(
         }
     };
 
+    let ready_message = format!(
+        "TUN ready: device traffic -> socks5://127.0.0.1:{}; remote endpoint \
+         {remote_host}:{remote_port} bypasses TUN",
+        handle.local_port
+    );
+    // Desktop TUN cannot exclude this process at the OS package boundary, so
+    // direct sockets would be captured and loop into the listener.
+    let outbound_policy = TunOutboundPolicy { force_proxy: true };
+
+    // macOS cannot create a utun device or change routes without root, and it
+    // has no way to elevate a running GUI. An authorized helper process owns the
+    // session instead, so the wait has to cover an interactive password prompt.
+    #[cfg(target_os = "macos")]
+    if proxy_client::client::macos_tun::requires_privileged_helper() {
+        if let Err(error) = proxy_client::client::macos_tun::helper_path() {
+            record_error(handle, &format!("Failed to start TUN mode: {error}"));
+            return ProxyResult::RuntimeError;
+        }
+        let config = match handle.cache_dir.lock() {
+            Ok(cache_dir) => match cache_dir.as_ref() {
+                Some(directory) => config.with_cache_dir(directory.clone()),
+                None => config,
+            },
+            Err(_) => config,
+        };
+        return start_tun_runtime(
+            handle,
+            config,
+            outbound_policy,
+            proxy_client::client::macos_tun::run_with_privileged_helper,
+            PRIVILEGED_TUN_READY_TIMEOUT,
+            ready_message,
+        );
+    }
+
     start_tun_runtime(
         handle,
         config,
-        // Desktop TUN cannot exclude this process at the OS package boundary,
-        // so direct sockets would be captured and loop into the listener.
-        TunOutboundPolicy { force_proxy: true },
+        outbound_policy,
         run_with_ready,
-        format!(
-            "TUN ready: device traffic -> socks5://127.0.0.1:{}; remote endpoint \
-             {remote_host}:{remote_port} bypasses TUN",
-            handle.local_port
-        ),
+        TUN_READY_TIMEOUT,
+        ready_message,
     )
 }
 
@@ -814,6 +864,7 @@ pub unsafe extern "C" fn proxy_start_android_tun(
         move |port, config, shutdown_token, ready| {
             run_with_ready_on_fd(port, config, owned_fd, shutdown_token, ready)
         },
+        TUN_READY_TIMEOUT,
         format!("Android VPN ready: IPv4/IPv6 device traffic -> socks5://127.0.0.1:{local_port}"),
     )
 }
@@ -823,6 +874,7 @@ fn start_tun_runtime<Runner, RunnerFuture>(
     config: TunConfig,
     outbound_policy: TunOutboundPolicy,
     runner: Runner,
+    ready_timeout: std::time::Duration,
     ready_message: String,
 ) -> ProxyResult
 where
@@ -939,9 +991,9 @@ where
         let _ = stopped_sender.send(());
     });
 
-    let readiness = handle.runtime.block_on(async {
-        tokio::time::timeout(std::time::Duration::from_secs(20), caller_receiver).await
-    });
+    let readiness = handle
+        .runtime
+        .block_on(async { tokio::time::timeout(ready_timeout, caller_receiver).await });
     match readiness {
         Ok(Ok(Ok(()))) => {
             send_log(2, &ready_message);
@@ -950,6 +1002,41 @@ where
         Ok(Ok(Err(error))) => fail_tun_start(handle, &error),
         Ok(Err(_)) => fail_tun_start(handle, "TUN readiness channel closed unexpectedly"),
         Err(_) => fail_tun_start(handle, "Timed out waiting for TUN adapter and route setup"),
+    }
+}
+
+/// Explain a bare permission error from TUN setup.
+///
+/// The operating system reports only "Operation not permitted" when a process
+/// may not create the interface, which says nothing about what to do next. The
+/// message is not rewritten, only extended, so the original detail survives.
+fn explain_tun_permission_error(error: &str) -> Option<String> {
+    let looks_like_permission_error = error.contains("Operation not permitted")
+        || error.contains("os error 1")
+        || error.contains("permission denied")
+        || error.contains("Permission denied");
+    if !looks_like_permission_error {
+        return None;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        Some(format!(
+            "{error}. Creating the TUN interface and changing routes needs root or the \
+             CAP_NET_ADMIN capability; run this application with the required privileges."
+        ))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Some(format!(
+            "{error}. Creating the utun interface and changing routes needs root; the privileged \
+             helper must be authorized for TUN mode to start."
+        ))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = error;
+        None
     }
 }
 
@@ -965,7 +1052,8 @@ fn fail_tun_start(handle: &ProxyHandle, error: &str) -> ProxyResult {
     if let Ok(mut bypass) = handle.tun_bypass.lock() {
         *bypass = None;
     }
-    record_error(handle, &format!("Failed to start TUN mode: {error}"));
+    let detail = explain_tun_permission_error(error).unwrap_or_else(|| error.to_string());
+    record_error(handle, &format!("Failed to start TUN mode: {detail}"));
     ProxyResult::RuntimeError
 }
 
@@ -1317,6 +1405,22 @@ mod tests {
     fn lan_exposure_is_explicit_and_legacy_safe() {
         assert_eq!(local_listen_host(false), "127.0.0.1");
         assert_eq!(local_listen_host(true), "0.0.0.0");
+    }
+
+    #[test]
+    fn unrelated_tun_errors_are_reported_verbatim() {
+        assert!(explain_tun_permission_error("remote proxy endpoint is unavailable").is_none());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_bare_permission_error_gains_the_missing_next_step() {
+        // This is the exact wording the operating system produces, and on its
+        // own it tells the user nothing about what to do.
+        let explained =
+            explain_tun_permission_error("Operation not permitted (os error 1)").unwrap();
+        assert!(explained.contains("Operation not permitted (os error 1)"));
+        assert!(explained.contains("root"));
     }
 
     #[test]

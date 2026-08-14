@@ -2872,6 +2872,7 @@ dependencies = [
  "futures",
  "hashbrown 0.16.1",
  "kanal",
+ "libc",
  "log",
  "png",
  "proxy-core",

@@ -32,6 +32,9 @@ kanal = { workspace = true, optional = true }
 async-broadcast = { workspace = true, optional = true }
 dashmap = { workspace = true, optional = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 png = "0.18"
 sysinfo = { workspace = true }
@@ -57,6 +60,12 @@ auto-proxy = ["proxy-core/auto-proxy", "dep:hashbrown", "dep:kanal", "dep:async-
 [[bin]]
 name = "http-proxy-cli"
 path = "src/bin/main.rs"
+
+# Privileged macOS TUN helper. Built on every platform so a cross-platform
+# `cargo build` stays uniform; elsewhere it only reports that it is unsupported.
+[[bin]]
+name = "http-proxy-tun-helper"
+path = "src/bin/tun_helper.rs"
 
 [dev-dependencies]
 proxy-server = { path = "../proxy-server" }
