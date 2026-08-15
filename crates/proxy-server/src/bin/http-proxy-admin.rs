@@ -258,7 +258,29 @@ fn add_relay_target(args: AddRelayTargetArgs) -> Result<UpstreamTarget> {
     Err(anyhow!("missing relay target"))
 }
 
+/// Reject a host that cannot be one, instead of dialing it and timing out.
+///
+/// A quoted or variable-expanded invocation collapses several arguments into
+/// one, so `-H "$HOST_AND_PORT"` arrives as a single host like
+/// `10.0.0.1 -p 1081`. Connecting to that name fails after the full connect
+/// timeout with nothing but "Connection timeout", which reads as a network or
+/// server problem and sends the reader looking in the wrong place entirely.
+fn validate_server_host(host: &str) -> Result<()> {
+    if host.trim().is_empty() {
+        bail!("--server-host is empty");
+    }
+    if let Some(embedded) = host.split_whitespace().nth(1) {
+        bail!(
+            "--server-host contains whitespace: {host:?}. This usually means several arguments \
+             were passed as one, for example `-H \"$H\"` where H holds `host -p port`. Pass each \
+             flag separately: -H <host> -p <port> (saw {embedded:?} inside the host)"
+        );
+    }
+    Ok(())
+}
+
 async fn run(cli: Cli) -> Result<ControlResponse> {
+    validate_server_host(&cli.server_host)?;
     let session_key = resolve_session_key(&cli);
     let mut client =
         ControlClient::connect(&cli.server_host, cli.server_port, Some(session_key)).await?;
@@ -389,5 +411,32 @@ async fn main() -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_hosts_and_addresses_are_accepted() {
+        assert!(validate_server_host("127.0.0.1").is_ok());
+        assert!(validate_server_host("lb7666.top").is_ok());
+    }
+
+    #[test]
+    fn a_host_holding_extra_arguments_is_rejected_before_dialing() {
+        // The shape produced by `-H "$VAR"` when VAR holds host and port. Left
+        // unchecked this only surfaces as a connect timeout, which looks like a
+        // server or network fault rather than a quoting mistake.
+        let error = validate_server_host("43.161.216.219 -p 1081").unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("passed as one"));
+        assert!(message.contains("-H <host> -p <port>"));
+    }
+
+    #[test]
+    fn an_empty_host_is_rejected() {
+        assert!(validate_server_host("   ").is_err());
     }
 }

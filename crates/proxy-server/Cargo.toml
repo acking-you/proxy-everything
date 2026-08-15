@@ -31,3 +31,9 @@ tokio = { workspace = true, features = [
 [[bin]]
 name = "http-proxy-server"
 path = "src/bin/main.rs"
+
+# Control-plane CLI for nodes, groups, relay configuration, and metrics. The
+# source predates this entry, so it was never actually built.
+[[bin]]
+name = "http-proxy-admin"
+path = "src/bin/http-proxy-admin.rs"
