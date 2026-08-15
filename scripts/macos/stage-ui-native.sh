@@ -64,11 +64,15 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
-    cargo_args=(build -p proxy-ffi -p proxy-client --bin http-proxy-tun-helper)
+    profile_args=()
     if [[ "$CONFIGURATION" == "Release" ]]; then
-        cargo_args+=(--release)
+        profile_args+=(--release)
     fi
-    cargo "${cargo_args[@]}"
+    # Two invocations on purpose. `--bin` is a target filter applied across the
+    # whole package selection, so asking for the helper in the same command
+    # silently drops proxy-ffi's library target and leaves a stale dylib staged.
+    cargo build -p proxy-ffi "${profile_args[@]}"
+    cargo build -p proxy-client --bin http-proxy-tun-helper "${profile_args[@]}"
 fi
 
 SOURCE_DIR="$REPO_ROOT/target/$CARGO_PROFILE"
