@@ -1,0 +1,15 @@
+{
+  "name": "proxy-everything (Rust workspace)",
+  "user": "ubuntu",
+  "install": "bash .cursor/install.sh",
+  "repositoryDependencies": [
+    "github.com/acking-you/kanal",
+    "github.com/acking-you/uni-stream",
+    "github.com/acking-you/better_mimalloc_rs",
+    "github.com/acking-you/mimalloc",
+    "github.com/acking-you/rust-smallvec",
+    "github.com/acking-you/tun2proxy",
+    "github.com/acking-you/ipstack",
+    "github.com/zzzgydi/sysproxy-rs"
+  ]
+}
