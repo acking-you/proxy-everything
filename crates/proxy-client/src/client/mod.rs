@@ -220,6 +220,10 @@ pub struct ProxyContext<'a> {
     force_proxy: bool,
     /// Optional external upstream proxy used instead of the encrypted proxy server.
     upstream_proxy: Option<&'a ExternalProxyTarget>,
+    /// Honour [`proxy_core::config::FORCED_DIRECT_HOSTS`]. Disabled only while a
+    /// TUN session owns the routes, where a direct socket from this process
+    /// would be captured back into the local listener.
+    honor_forced_direct: bool,
     /// Whether the local listener accepts SOCKS5 UDP ASSOCIATE requests.
     enable_udp: bool,
     /// TODO: let this stream abstract
@@ -341,8 +345,19 @@ pub async fn resolve_server_connection(
     sender: Option<&SenderChan>,
     msg_key: Option<Cow<'static, str>>,
     upstream_proxy: Option<&ExternalProxyTarget>,
+    honor_forced_direct: bool,
 ) -> Result<ServerConnection> {
     use proxy_core::config::runtime;
+
+    // Ahead of the upstream proxy and of every keyword or geo rule: these hosts
+    // are compiled in as direct, so no configuration can route them elsewhere.
+    if honor_forced_direct && proxy_core::config::is_forced_direct_host(host) {
+        return Ok(ServerConnection {
+            stream: get_tcp_stream(host, port, "[NOPROXY-FORCED] compiled-in direct host").await?,
+            need_proxy: false,
+            msg_key,
+        });
+    }
 
     if let Some(upstream_proxy) = upstream_proxy {
         tracing::debug!(
@@ -602,6 +617,7 @@ pub struct ClientProxyContext {
     sender: Option<SenderChan>,
     force_proxy: bool,
     upstream_proxy: Option<ExternalProxyTarget>,
+    honor_forced_direct: bool,
     enable_udp: bool,
 }
 
@@ -651,6 +667,7 @@ pub async fn handle_client(mut context: ClientProxyContext) -> Result<()> {
         sender: context.sender.as_ref(),
         force_proxy: context.force_proxy,
         upstream_proxy: context.upstream_proxy.as_ref(),
+        honor_forced_direct: context.honor_forced_direct,
         enable_udp: context.enable_udp,
         stream: context.stream,
     };
@@ -737,7 +754,8 @@ pub async fn run_client_with_listener_runtime_config<const NEED_CODEC: bool>(
     // An integrated TUN must never create direct sockets from this process.
     // Independent FFI-managed TUN mode applies the same invariant dynamically
     // through `force_proxy_controller` below.
-    let enable_auto_proxy = enable_auto_proxy && upstream_proxy.is_none() && tun_config.is_none();
+    let tun_active = tun_config.is_some();
+    let enable_auto_proxy = enable_auto_proxy && upstream_proxy.is_none() && !tun_active;
     let force_proxy = !enable_auto_proxy;
     let cache_dir = config.as_ref().and_then(|c| c.client.cache_dir.clone());
     let upstream_proxy_display = upstream_proxy.as_ref().map(|proxy| proxy.display_url());
@@ -821,10 +839,11 @@ pub async fn run_client_with_listener_runtime_config<const NEED_CODEC: bool>(
                 } else {
                     sender.clone()
                 };
-                let force_proxy = force_proxy
+                let tun_owns_routes = tun_active
                     || force_proxy_controller
                         .as_ref()
                         .is_some_and(|controller| controller.load(Ordering::Acquire));
+                let force_proxy = force_proxy || tun_owns_routes;
                 let task = client_proxy_background_task::<NEED_CODEC>(ClientProxyContext {
                     stream,
                     msg_key: if NEED_CODEC { Some(gen_random_key()) } else { None },
@@ -832,6 +851,10 @@ pub async fn run_client_with_listener_runtime_config<const NEED_CODEC: bool>(
                     sender,
                     force_proxy,
                     upstream_proxy: upstream_proxy.clone(),
+                    // A direct socket opened while TUN owns the routes is
+                    // captured back into this listener, so the compiled-in
+                    // direct list cannot be honoured there.
+                    honor_forced_direct: !tun_owns_routes,
                     enable_udp,
                 });
                 let wrapped_task = async move {

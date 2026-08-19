@@ -392,6 +392,29 @@ pub static DEFAULT_KEY: Lazy<(Vec<u8>, u32)> = Lazy::new(|| {
 
 const DEFAULT_WORD: &str = "%DEFAULT%";
 
+/// Hosts that always connect directly, whatever the runtime configuration says.
+///
+/// Compiled in rather than left to the keyword lists: these endpoints must keep
+/// working even when a config file, an env var, a geo lookup or an upstream
+/// relay would otherwise route them through the proxy.
+pub const FORCED_DIRECT_HOSTS: &[&str] = &["invite.linuxdo.org"];
+
+/// Match `host` against [`FORCED_DIRECT_HOSTS`], including subdomains.
+pub fn is_forced_direct_host(host: &str) -> bool {
+    // Accept the trailing-dot form of an FQDN as the same host.
+    let host = host.trim_end_matches('.');
+    FORCED_DIRECT_HOSTS.iter().any(|entry| {
+        if host.eq_ignore_ascii_case(entry) {
+            return true;
+        }
+        // Only a label boundary counts: `a.invite.linuxdo.org` matches,
+        // `notinvite.linuxdo.org` does not.
+        host.len() > entry.len()
+            && host.as_bytes()[host.len() - entry.len() - 1] == b'.'
+            && host[host.len() - entry.len()..].eq_ignore_ascii_case(entry)
+    })
+}
+
 /// Get user-configured keywords from environment variable (excluding %DEFAULT% placeholder).
 /// This is used to check what keywords the user explicitly configured,
 /// so we can remove conflicting keywords from the opposite list.
@@ -647,6 +670,21 @@ mod tests {
                 unsafe { std::env::remove_var(self.key) };
             }
         }
+    }
+
+    #[test]
+    fn forced_direct_hosts_match_on_label_boundaries() {
+        use crate::config::is_forced_direct_host;
+
+        assert!(is_forced_direct_host("invite.linuxdo.org"));
+        assert!(is_forced_direct_host("INVITE.LinuxDo.ORG"));
+        assert!(is_forced_direct_host("invite.linuxdo.org."));
+        assert!(is_forced_direct_host("a.invite.linuxdo.org"));
+
+        assert!(!is_forced_direct_host("notinvite.linuxdo.org"));
+        assert!(!is_forced_direct_host("linuxdo.org"));
+        assert!(!is_forced_direct_host("invite.linuxdo.org.evil.com"));
+        assert!(!is_forced_direct_host("example.com"));
     }
 
     #[test]

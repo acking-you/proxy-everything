@@ -126,6 +126,7 @@ impl ForwarderProvider for SocksProxierProvider {
                     proxy_context.sender,
                     self.msg_key,
                     proxy_context.upstream_proxy,
+                    proxy_context.honor_forced_direct,
                 )
                 .await?;
                 response(&mut proxy_context.stream)

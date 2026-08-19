@@ -214,6 +214,28 @@ impl HttpProxierProvider {
     ) -> super::Result<(TcpStream, bool, Option<Cow<'static, str>>)> {
         // if we don't have ssl,only use proxy when host is part of `PROXY_KEYWORDS`
         if !self.has_ssl {
+            // Compiled-in direct hosts win over the upstream proxy and over
+            // `force_proxy`; see `proxy_core::config::FORCED_DIRECT_HOSTS`.
+            if context.honor_forced_direct
+                && proxy_core::config::is_forced_direct_host(self.host.as_str())
+            {
+                let mut server_stream = get_tcp_stream(
+                    &self.host,
+                    self.port,
+                    "[NOPROXY-FORCED] compiled-in direct host",
+                )
+                .await?;
+                server_stream
+                    .write_all(context.buffer)
+                    .await
+                    .with_context(|_| IoSnafu {
+                        uri: Some(self.get_uri()),
+                        detail: "http forced-direct first write error",
+                    })
+                    .context(HttpProxySnafu)?;
+                return Ok((server_stream, false, self.msg_key.clone()));
+            }
+
             if let Some(upstream_proxy) = context.upstream_proxy {
                 tracing::info!(
                     host = %self.host,
@@ -347,6 +369,7 @@ impl HttpProxierProvider {
                 context.sender,
                 self.msg_key.clone(),
                 context.upstream_proxy,
+                context.honor_forced_direct,
             )
             .await?;
 
