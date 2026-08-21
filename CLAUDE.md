@@ -707,21 +707,41 @@ bash scripts/macos/stage-ui-native.sh --configuration Release
 
 Known limitations:
 
-- **Use an IP address for the remote endpoint.** Only addresses resolved before
-  setup get a physical route. Windows additionally keeps its own process out of
-  the tunnel by matching the executable name, but that matcher is not built for
-  macOS, so re-resolving a hostname while TUN is active returns a fake IP and
-  the upstream connection loops back into the local listener.
 - **`kill -9` on the helper can leave the routes behind.** EOF cleanup covers a
   crashed GUI, but not a hard-killed helper. Recover with
   `sudo route delete default && sudo route add default <original-gateway>`.
-- **Captured non-DNS UDP is blocked, not relayed directly, when SOCKS5 UDP is
-  off.** A direct relay must be bound to the physical interface, and that
-  binding only exists for Windows and Linux.
 - **The helper runs as root from a user-writable bundle.** Anyone who already
   has code execution as this user can therefore escalate. This is inherent to
   ad-hoc signing plus `osascript` elevation; avoiding it needs a Developer ID
   and `SMAppService`.
+
+### Process bypass on macOS
+
+Selecting applications to keep out of the tunnel works the same way it does on
+Windows, and for the same reason: a captured session is mapped back to its owning
+process and, when that process is selected, relayed straight to its destination
+through the physical interface.
+
+The platform pieces differ:
+
+| Concern | Windows | macOS |
+|---------|---------|-------|
+| Socket → PID | `netstat2` | `netstat2` (works unprivileged) |
+| PID → name | ToolHelp snapshot | `proc_pidpath` |
+| Ancestor walk | ToolHelp parent PID | `proc_pidinfo(PROC_PIDTBSDINFO)` |
+| Physical bind | `IP_UNICAST_IF` | `IP_BOUND_IF` / `IPV6_BOUND_IF` |
+| Picker list | live + installed apps, with icons | live processes of the current user |
+
+Two consequences follow from the helper architecture:
+
+- **The matcher runs in the helper, not the GUI.** The bypass list therefore
+  travels over the control socket: `HelperConfig::bypass_processes` for the
+  initial handoff and `HelperRequest::SetBypassProcesses` for runtime updates.
+  Changing the list in the GUI alone would have no effect.
+- **The picker only lists this user's processes.** `proc_pidpath` needs root for
+  another user's process, and the GUI stays unprivileged. There are no icons or
+  dormant installed applications either: macOS keeps icons inside `.app` bundles
+  rather than in the executable.
 
 ## References
 

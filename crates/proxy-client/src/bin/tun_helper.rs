@@ -124,6 +124,13 @@ mod macos {
         let shutdown_token = CancellationToken::new();
         install_signal_handlers(shutdown_token.clone());
 
+        let tun_config = build_tun_config(&config).await?;
+
+        // Share the live policy with the reader task so updates apply to the
+        // running session instead of requiring a restart. tun2proxy closes only
+        // the established sessions whose decision actually changed.
+        let bypass = tun_config.bypass.clone();
+
         // A stop request and a closed socket mean the same thing here: the peer
         // no longer wants the tunnel, and the routes must be restored.
         let socket_token = shutdown_token.clone();
@@ -136,15 +143,28 @@ mod macos {
                         log::info!("the control socket closed; restoring network settings");
                         break;
                     }
-                    Ok(_) => {
-                        if matches!(
-                            serde_json::from_str::<HelperRequest>(line.trim()),
-                            Ok(HelperRequest::Stop)
-                        ) {
+                    Ok(_) => match serde_json::from_str::<HelperRequest>(line.trim()) {
+                        Ok(HelperRequest::Stop) => {
                             log::info!("received a stop request; restoring network settings");
                             break;
                         }
-                    }
+                        Ok(HelperRequest::SetBypassProcesses { names }) => {
+                            // The application already appended its own
+                            // executable, and the controller enforces this
+                            // process's name on top of whatever arrives.
+                            bypass.set_user_processes(names);
+                            log::info!(
+                                "applied a bypass policy update: {:?}",
+                                bypass.effective_processes()
+                            );
+                        }
+                        Err(error) => {
+                            log::warn!(
+                                "ignoring an unrecognized control request ({error}): {}",
+                                line.trim()
+                            );
+                        }
+                    },
                     Err(error) => {
                         log::warn!("the control socket failed: {error}");
                         break;
@@ -154,7 +174,6 @@ mod macos {
             socket_token.cancel();
         });
 
-        let tun_config = build_tun_config(&config).await?;
         let (ready_sender, ready_receiver) = tokio::sync::oneshot::channel();
 
         // Forward readiness as soon as it is known so the application can settle
@@ -213,10 +232,11 @@ mod macos {
             }
         }
 
-        // The application already enforces its own executable in the bypass
-        // list, but process matching is not built for macOS at all, so the
-        // helper relies purely on the route-level bypass below.
-        let mut tun_config = TunConfig::new(Vec::<String>::new())?
+        // The list arrives already normalized and already carrying the
+        // application's own executable name. `TunConfig` additionally enforces
+        // this helper's name, so neither process can be captured by its own
+        // tunnel. The route-level bypass below remains as a second barrier.
+        let mut tun_config = TunConfig::new(config.bypass_processes.clone())?
             .with_udp_enabled(config.udp_enabled)
             .with_udp_direct_fallback(config.udp_direct_fallback)
             .with_ipv6_enabled(config.ipv6_enabled)

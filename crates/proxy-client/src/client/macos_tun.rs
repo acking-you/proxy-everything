@@ -55,6 +55,13 @@ pub struct HelperConfig {
     pub udp_direct_fallback: bool,
     /// Directory for the helper's own virtual-DNS persistence.
     pub cache_dir: Option<String>,
+    /// Process names whose traffic bypasses the proxy, already normalized and
+    /// including the application's own executable.
+    ///
+    /// Defaulted so a helper from an older build still decodes a configuration
+    /// that omits it, and vice versa.
+    #[serde(default)]
+    pub bypass_processes: Vec<String>,
 }
 
 /// Messages the helper sends back over the socket.
@@ -75,6 +82,12 @@ pub enum HelperEvent {
 pub enum HelperRequest {
     /// Tear down the TUN session and restore the previous network settings.
     Stop,
+    /// Replace the process bypass list of the running session.
+    ///
+    /// The device and system routes stay in place; only the routing decision for
+    /// new sessions changes, and established sessions whose decision flips are
+    /// closed so the application reconnects on the newly selected path.
+    SetBypassProcesses { names: Vec<String> },
 }
 
 /// Whether this process can create a utun device without the helper.
@@ -322,6 +335,21 @@ async fn drive_helper_session(
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
+    // Runtime policy updates originate on whichever thread calls the FFI, while
+    // the write half is owned by the loop below. An unbounded channel bridges
+    // them: updates are small, rare, and must not block a UI thread.
+    //
+    // Attach before reading the list for the handoff, so an update arriving in
+    // between is either captured by the read below or queued here.
+    let (updates_tx, mut updates_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
+    config.bypass.attach_sink(std::sync::Arc::new(move |names| {
+        // A closed channel means the session already ended; the helper is gone
+        // and the next session sends a fresh list in its configuration.
+        if updates_tx.send(names).is_err() {
+            tracing::debug!("the TUN helper session ended before a bypass update was delivered");
+        }
+    }));
+
     let helper_config = HelperConfig {
         local_port,
         remote_host: config
@@ -337,6 +365,7 @@ async fn drive_helper_session(
             .cache_dir
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned()),
+        bypass_processes: config.bypass.effective_processes(),
     };
     let mut encoded = serde_json::to_vec(&helper_config).map_err(io::Error::other)?;
     encoded.push(b'\n');
@@ -352,6 +381,10 @@ async fn drive_helper_session(
         line.clear();
         let read = tokio::select! {
             read = reader.read_line(&mut line) => read?,
+            Some(names) = updates_rx.recv() => {
+                send_bypass_update(&mut writer, names).await;
+                continue;
+            }
             _ = shutdown_token.cancelled() => {
                 request_helper_stop(&mut writer).await;
                 stop_requested = true;
@@ -408,6 +441,30 @@ async fn drive_helper_session(
             .to_string()));
     }
     Ok(0)
+}
+
+/// Push a new bypass list to the running helper.
+///
+/// A delivery failure is not fatal: the routes and the device are unaffected, so
+/// the session keeps running under the policy the helper already has.
+async fn send_bypass_update(writer: &mut tokio::net::unix::OwnedWriteHalf, names: Vec<String>) {
+    let request = HelperRequest::SetBypassProcesses {
+        names: names.clone(),
+    };
+    let mut encoded = match serde_json::to_vec(&request) {
+        Ok(encoded) => encoded,
+        Err(error) => {
+            tracing::warn!(%error, "could not encode a TUN helper bypass update");
+            return;
+        }
+    };
+    encoded.push(b'\n');
+    if let Err(error) = writer.write_all(&encoded).await {
+        tracing::warn!(%error, "could not send a TUN helper bypass update");
+        return;
+    }
+    let _ = writer.flush().await;
+    tracing::info!(bypass_processes = ?names, "sent a bypass policy update to the TUN helper");
 }
 
 /// Ask the helper to tear down, ignoring a socket it has already closed.
@@ -545,6 +602,68 @@ mod tests {
         assert_eq!(config.mtu, 1400);
         // Readiness must reach the caller, not just be logged.
         assert!(matches!(ready_receiver.await, Ok(Ok(()))));
+    }
+
+    /// The whole reason the helper protocol carries a bypass update: on macOS the
+    /// matcher lives in the helper, so changing the policy in this process has to
+    /// travel over the socket to take effect.
+    #[tokio::test]
+    async fn bypass_updates_reach_the_helper_without_restarting_the_session() {
+        let (ours, helper) = stub_helper_pair().await;
+        let (ready_sender, ready_receiver) = tokio::sync::oneshot::channel();
+        let token = CancellationToken::new();
+        let config = test_config();
+        let bypass = config.bypass.clone();
+
+        let helper_task = tokio::spawn(async move {
+            let (reader, mut writer) = helper.into_split();
+            let mut reader = BufReader::new(reader);
+
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let initial: HelperConfig = serde_json::from_str(line.trim()).unwrap();
+
+            // Readiness first: an update only makes sense against a live session.
+            writer.write_all(b"{\"event\":\"ready\"}\n").await.unwrap();
+
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            let update: HelperRequest = serde_json::from_str(line.trim()).unwrap();
+
+            writer
+                .write_all(b"{\"event\":\"stopped\"}\n")
+                .await
+                .unwrap();
+            (initial, update)
+        });
+
+        let mut ready = Some(ready_sender);
+        let session = tokio::spawn(async move {
+            drive_helper_session(ours, 1080, config, token, &mut ready).await
+        });
+
+        // Only push the update once the helper has acknowledged readiness, so the
+        // ordering under test is the real one.
+        ready_receiver.await.unwrap().unwrap();
+        bypass.set_user_processes(["Curl.EXE".to_string()]);
+
+        let (initial, update) = helper_task.await.unwrap();
+        session.await.unwrap().unwrap();
+
+        let self_process = crate::client::tun::current_process_name().unwrap();
+        assert!(
+            initial.bypass_processes.contains(&self_process),
+            "the handoff must already protect this process: {:?}",
+            initial.bypass_processes
+        );
+
+        let HelperRequest::SetBypassProcesses { names } = update else {
+            panic!("expected a bypass update, got {update:?}");
+        };
+        // Normalized on the way out, and the mandatory self entry survives a
+        // caller that did not include it.
+        assert!(names.contains(&"curl".to_string()), "got {names:?}");
+        assert!(names.contains(&self_process), "got {names:?}");
     }
 
     #[tokio::test]

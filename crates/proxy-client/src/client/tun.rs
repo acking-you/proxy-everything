@@ -7,7 +7,7 @@
 //! best-effort socket-to-process lookup alone is not a sufficient loop barrier.
 
 use std::collections::BTreeSet as IpSet;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::net::IpAddr;
@@ -76,16 +76,47 @@ fn install_tun_log_bridge() {
     }
 }
 
+/// Receives effective bypass lists for a TUN session running in another process.
+///
+/// Only macOS needs this. Its TUN session lives in the root helper because a
+/// utun device requires privileges the GUI does not have, so updating the shared
+/// [`ProcessBypass`] in this process would change nothing on its own.
+#[cfg(target_os = "macos")]
+pub type BypassSink = std::sync::Arc<dyn Fn(Vec<String>) + Send + Sync>;
+
 /// Runtime controller for the process-bypass policy of an active TUN session.
 ///
 /// Clones share the same underlying list. Updating one clone changes the
 /// routing decision for new TCP and UDP sessions without restarting the TUN
 /// device. Established sessions whose decision changes are closed by
 /// `tun2proxy`, causing the application to reconnect on the selected route.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct TunBypassController {
     processes: ProcessBypass,
     self_process: String,
+    /// Forwards each update to an out-of-process TUN session, when there is one.
+    ///
+    /// Shared across clones like `processes` is. The FFI keeps its own clone of
+    /// this controller while the helper session holds another, and a sink visible
+    /// to only one of them would silently drop every UI-driven update.
+    #[cfg(target_os = "macos")]
+    sink: std::sync::Arc<std::sync::Mutex<Option<BypassSink>>>,
+}
+
+// `BypassSink` holds a closure, which has no useful `Debug`, so derive is out.
+impl std::fmt::Debug for TunBypassController {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = f.debug_struct("TunBypassController");
+        debug
+            .field("processes", &self.processes)
+            .field("self_process", &self.self_process);
+        #[cfg(target_os = "macos")]
+        debug.field(
+            "has_sink",
+            &self.sink.lock().map(|sink| sink.is_some()).unwrap_or(false),
+        );
+        debug.finish()
+    }
 }
 
 impl TunBypassController {
@@ -96,9 +127,29 @@ impl TunBypassController {
         let controller = Self {
             processes: ProcessBypass::default(),
             self_process,
+            #[cfg(target_os = "macos")]
+            sink: std::sync::Arc::new(std::sync::Mutex::new(None)),
         };
         controller.set_user_processes(user_processes);
         Ok(controller)
+    }
+
+    /// Route future updates to a TUN session owned by another process.
+    ///
+    /// Attach this before reading [`Self::effective_processes`] for the initial
+    /// handoff. Doing so in that order means an update racing the handoff is
+    /// either already included in the list that is sent, or queued by the sink
+    /// and delivered right after it — never dropped.
+    ///
+    /// Takes `&self` because the sink is shared by every clone: the caller that
+    /// starts the session and the FFI clone the UI later updates are different
+    /// values, and both must see it.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn attach_sink(&self, sink: BypassSink) {
+        match self.sink.lock() {
+            Ok(mut current) => *current = Some(sink),
+            Err(poisoned) => *poisoned.into_inner() = Some(sink),
+        }
     }
 
     /// Replace the user-controlled part of the bypass list.
@@ -109,11 +160,26 @@ impl TunBypassController {
         let mut effective = user_processes.into_iter().collect::<Vec<_>>();
         effective.push(self.self_process.clone());
         self.processes.set_names(effective);
+        let names = self.processes.names();
         tracing::info!(
             self_process = %self.self_process,
-            bypass_processes = ?self.processes.names(),
+            bypass_processes = ?names,
             "TUN process bypass policy updated"
         );
+        // The in-process list stays authoritative for the CLI and for the
+        // readiness path; the sink mirrors it into a helper when one is running.
+        // Clone the sink out before calling it so the lock is not held across a
+        // caller-supplied closure.
+        #[cfg(target_os = "macos")]
+        {
+            let sink = match self.sink.lock() {
+                Ok(sink) => sink.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            };
+            if let Some(sink) = sink {
+                sink(names);
+            }
+        }
     }
 
     /// Normalized process names currently used by the TUN matcher, including
@@ -270,11 +336,15 @@ pub struct RunningProcessInstance {
     pub executable_path: Option<String>,
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 #[derive(Default)]
 struct RunningProcessGroup {
     display_name: String,
+    /// Alternate names and registration state come from Windows app
+    /// registration, which has no macOS equivalent.
+    #[cfg(target_os = "windows")]
     aliases: BTreeSet<String>,
+    #[cfg(target_os = "windows")]
     installed: bool,
     pids: BTreeSet<u32>,
     executable_paths: BTreeSet<String>,
@@ -392,17 +462,157 @@ fn process_display_name(name: &str) -> String {
         .to_string()
 }
 
-#[cfg(not(target_os = "windows"))]
+/// List live executables owned by the current user for the macOS picker.
+///
+/// Only this user's processes are offered. `proc_pidpath` needs root to read
+/// another user's process, and the GUI deliberately stays unprivileged, so
+/// including system-owned rows would produce entries with no resolvable name.
+/// Those processes are also not the ones a user wants to route around.
+///
+/// There are no icons or installed-application rows here. macOS keeps its icons
+/// inside `.app` bundles rather than in the executable, and a dormant app has no
+/// pid to enumerate, so the list is live processes only.
+#[cfg(target_os = "macos")]
+pub fn running_processes() -> Vec<RunningProcessInfo> {
+    let current_uid = unsafe { libc::getuid() };
+    let mut grouped = BTreeMap::<String, RunningProcessGroup>::new();
+
+    for pid in live_pids() {
+        // Skip other users' processes before the more expensive path lookup.
+        let Some(info) = process_bsdinfo(pid) else {
+            continue;
+        };
+        if info.pbi_uid != current_uid {
+            continue;
+        }
+        let Some(executable_path) = executable_path(pid) else {
+            continue;
+        };
+        let Some(raw_name) = std::path::Path::new(&executable_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+        else {
+            continue;
+        };
+        let name = tun2proxy::normalize_process_name(raw_name);
+        if name.is_empty() {
+            continue;
+        }
+
+        let group = grouped.entry(name).or_insert_with(|| RunningProcessGroup {
+            display_name: raw_name.to_string(),
+            ..RunningProcessGroup::default()
+        });
+        group.pids.insert(pid);
+        group.executable_paths.insert(executable_path.clone());
+        group.instances.push(RunningProcessInstance {
+            pid,
+            // Present so the UI can render the same launcher/child trees it does
+            // on Windows; selecting a parent covers its descendants because the
+            // matcher walks the ancestor chain.
+            parent_pid: (info.pbi_ppid != 0).then_some(info.pbi_ppid),
+            executable_path: Some(executable_path),
+        });
+    }
+
+    grouped
+        .into_iter()
+        .map(|(name, mut group)| {
+            group.instances.sort_by_key(|instance| instance.pid);
+            RunningProcessInfo {
+                name,
+                display_name: group.display_name,
+                aliases: Vec::new(),
+                installed: false,
+                pids: group.pids.into_iter().collect(),
+                executable_paths: group.executable_paths.into_iter().collect(),
+                instances: group.instances,
+                icon_png_base64: None,
+            }
+        })
+        .collect()
+}
+
+/// Every PID currently visible to this process.
+#[cfg(target_os = "macos")]
+fn live_pids() -> Vec<u32> {
+    // SAFETY: a null buffer asks only for the required size, which is the
+    // documented way to size the real call.
+    let needed = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if needed <= 0 {
+        return Vec::new();
+    }
+    // Processes can start between sizing and reading, so ask for headroom rather
+    // than truncating the table on a busy system.
+    let capacity = needed as usize * 2;
+    let mut pids = vec![0i32; capacity];
+    let size = (capacity * std::mem::size_of::<i32>()) as libc::c_int;
+    // SAFETY: the buffer is valid for `size` bytes and the call writes at most
+    // that many, returning the byte count actually used.
+    let written = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), size) };
+    if written <= 0 {
+        return Vec::new();
+    }
+    pids.truncate(written as usize);
+    pids.into_iter()
+        .filter(|pid| *pid > 0)
+        .map(|pid| pid as u32)
+        .collect()
+}
+
+/// Read the BSD info block of `pid`, carrying its owning uid and parent.
+#[cfg(target_os = "macos")]
+fn process_bsdinfo(pid: u32) -> Option<libc::proc_bsdinfo> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: the destination is a correctly sized, writable `proc_bsdinfo` and
+    // the flavor matches it. A short write is rejected below.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if written != size {
+        return None;
+    }
+    // SAFETY: the call reported a complete write of the struct.
+    Some(unsafe { info.assume_init() })
+}
+
+/// Resolve the full executable path of `pid`.
+#[cfg(target_os = "macos")]
+fn executable_path(pid: u32) -> Option<String> {
+    let mut buffer = vec![0u8; 4 * libc::PATH_MAX as usize];
+    // SAFETY: the buffer is valid for `buffer.len()` bytes and the call writes at
+    // most that many, returning the count used.
+    let length = unsafe {
+        libc::proc_pidpath(
+            pid as libc::c_int,
+            buffer.as_mut_ptr().cast(),
+            buffer.len() as u32,
+        )
+    };
+    if length <= 0 {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&buffer[..length as usize]).into_owned())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn running_processes() -> Vec<RunningProcessInfo> {
     Vec::new()
 }
 
-/// List unique live and registered executable names for Windows process bypass.
+/// List unique live and registered executable names for the process picker.
 ///
-/// Other platforms return an empty list because the UI currently exposes the
-/// picker only on Windows. Manually configured process names remain valid on
-/// Linux, where `tun2proxy` also supports process matching.
-#[cfg(target_os = "windows")]
+/// Implemented on Windows and macOS. Linux returns an empty list even though
+/// `tun2proxy` matches processes there: manually configured names still work, but
+/// no enumeration is wired up for it.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn running_process_names() -> Vec<String> {
     running_processes()
         .into_iter()
@@ -410,7 +620,7 @@ pub fn running_process_names() -> Vec<String> {
         .collect()
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn running_process_names() -> Vec<String> {
     Vec::new()
 }
@@ -471,29 +681,6 @@ async fn run_with_ready_inner(
     tun_fd: PlatformTunFd,
 ) -> io::Result<usize> {
     install_tun_log_bridge();
-    if cfg!(target_os = "macos") && !config.udp_enabled && config.udp_direct_fallback {
-        tracing::warn!(
-            "captured non-DNS UDP will be blocked rather than relayed directly: a direct relay on \
-             macOS cannot be bound to the physical interface and would be recaptured by the TUN \
-             routes"
-        );
-    }
-    if cfg!(target_os = "macos")
-        && let Some((host, port)) = &config.remote_endpoint
-        && host.parse::<IpAddr>().is_err()
-    {
-        // Only the addresses resolved before setup receive a physical route.
-        // Windows additionally keeps this process out of the tunnel by matching
-        // its executable name, but that matcher is not built for macOS, so a
-        // later lookup of the same name resolves to a virtual-DNS address and
-        // the upstream connection loops back into the local listener.
-        tracing::warn!(
-            remote_host = %host,
-            remote_port = port,
-            "macOS TUN mode expects the remote proxy endpoint to be an IP address; a \
-             hostname is only protected for the addresses it resolves to right now"
-        );
-    }
     if config.udp_enabled
         && let Err(error) = validate_local_socks5_udp(local_port).await
     {
@@ -594,17 +781,16 @@ async fn run_with_ready_inner(
 
 /// Choose the UDP policy for a TUN session.
 ///
-/// macOS never selects `Direct`. A direct relay must leave through the physical
-/// interface, which `tun2proxy` arranges by binding the relay socket to it, and
-/// that binding is only implemented for Windows and Linux. On macOS the relay
-/// socket stays unbound, so the TUN catch-all route captures it again and the
-/// datagram loops back into the tunnel. Blocking captured non-DNS UDP drops
-/// that traffic instead, which is the lesser failure.
+/// A direct relay must leave through the physical interface, or the TUN catch-all
+/// route captures it again and the datagram loops back into the tunnel.
+/// `tun2proxy` arranges that by binding the relay socket, which is implemented on
+/// every desktop platform, so `Direct` is available wherever the caller asks for
+/// it.
 fn tun_udp_strategy(udp_enabled: bool, udp_direct_fallback: bool) -> ArgUdpStrategy {
     if udp_enabled {
         return ArgUdpStrategy::Proxy;
     }
-    if udp_direct_fallback && !cfg!(target_os = "macos") {
+    if udp_direct_fallback {
         return ArgUdpStrategy::Direct;
     }
     ArgUdpStrategy::Block
@@ -708,6 +894,43 @@ async fn resolve_remote_addresses(endpoint: Option<&(String, u16)>) -> io::Resul
 mod tests {
     use super::*;
 
+    /// The picker is only useful if it can actually see this user's applications
+    /// without privileges, and if every row it offers is a name the TUN policy
+    /// would accept.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_picker_lists_this_users_processes_with_usable_names() {
+        let processes = running_processes();
+        assert!(
+            !processes.is_empty(),
+            "the picker must find live processes for the current user"
+        );
+
+        for process in &processes {
+            assert_eq!(
+                process.name,
+                tun2proxy::normalize_process_name(&process.name),
+                "picker rows must already be normalized so a selection matches"
+            );
+            assert!(
+                !process.pids.is_empty(),
+                "a listed row must have a live pid"
+            );
+            assert_eq!(
+                process.pids.len(),
+                process.instances.len(),
+                "every pid needs an instance row for the process tree"
+            );
+        }
+
+        // The test binary itself is running, so it must appear.
+        let current = current_process_name().unwrap();
+        assert!(
+            processes.iter().any(|process| process.name == current),
+            "`{current}` is running but was not listed"
+        );
+    }
+
     #[test]
     fn current_process_cannot_be_removed_from_bypass_policy() {
         let controller = TunBypassController::new(["browser.exe".to_string()]).unwrap();
@@ -727,14 +950,9 @@ mod tests {
         assert_eq!(tun_udp_strategy(true, false), ArgUdpStrategy::Proxy);
         assert_eq!(tun_udp_strategy(false, false), ArgUdpStrategy::Block);
 
-        // macOS has no interface-bound direct relay, so the fallback must not
-        // silently loop captured UDP back through the tunnel.
-        let expected = if cfg!(target_os = "macos") {
-            ArgUdpStrategy::Block
-        } else {
-            ArgUdpStrategy::Direct
-        };
-        assert_eq!(tun_udp_strategy(false, true), expected);
+        // Every desktop platform can bind the direct relay to the physical
+        // interface, so the fallback is honoured rather than downgraded.
+        assert_eq!(tun_udp_strategy(false, true), ArgUdpStrategy::Direct);
     }
 
     #[test]
