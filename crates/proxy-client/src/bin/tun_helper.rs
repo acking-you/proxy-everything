@@ -41,6 +41,7 @@ mod macos {
     use std::io;
     use std::path::PathBuf;
 
+    use proxy_client::client::macos_dns_restore::{DnsRestorePoint, restore_orphaned_dns};
     use proxy_client::client::macos_tun::{HelperConfig, HelperEvent, HelperRequest};
     use proxy_client::client::tun::{TunConfig, TunVirtualDnsState, run_with_ready};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -124,6 +125,13 @@ mod macos {
         let shutdown_token = CancellationToken::new();
         install_signal_handlers(shutdown_token.clone());
 
+        // Repair a previous helper that was killed before it could restore DNS.
+        // This runs before setup changes anything, so the record it consumes
+        // still describes the user's own settings rather than ours.
+        if let Some(directory) = helper_state_dir(&config) {
+            restore_orphaned_dns(&directory);
+        }
+
         let tun_config = build_tun_config(&config).await?;
 
         // Share the live policy with the reader task so updates apply to the
@@ -174,6 +182,23 @@ mod macos {
             socket_token.cancel();
         });
 
+        // Record the DNS settings before the TUN session repoints them, so a
+        // helper that is killed without unwinding can still be recovered from.
+        // Teardown discards this; only an abnormal exit leaves it behind.
+        let dns_state_dir = helper_state_dir(&config);
+        let dns_restore_point = dns_state_dir.as_deref().and_then(|directory| {
+            let record = DnsRestorePoint::capture()?;
+            match record.store(directory) {
+                Ok(()) => Some(record),
+                Err(error) => {
+                    log::warn!(
+                        "DNS settings will not be recoverable after an abnormal exit: {error}"
+                    );
+                    None
+                }
+            }
+        });
+
         let (ready_sender, ready_receiver) = tokio::sync::oneshot::channel();
 
         // Forward readiness as soon as it is known so the application can settle
@@ -203,6 +228,21 @@ mod macos {
             Err(error) => log::error!("TUN forwarding failed: {error}"),
         }
 
+        // Teardown has run, so the recorded settings are back and the record is
+        // only a liability. Apply it first if teardown left DNS pointing at the
+        // tunnel anyway — a failed restore is exactly what this record is for.
+        if let (Some(directory), Some(record)) =
+            (dns_state_dir.as_deref(), dns_restore_point.as_ref())
+        {
+            if record.differs_from_current() {
+                log::warn!("DNS was not restored by teardown; applying the recorded settings");
+                if let Err(error) = record.apply() {
+                    log::error!("could not restore the recorded DNS settings: {error}");
+                }
+            }
+            DnsRestorePoint::discard(directory);
+        }
+
         // Routes and DNS are already restored by the time `run_with_ready`
         // returns, so this tells the application it is safe to start again.
         send_event(&writer, HelperEvent::Stopped).await;
@@ -212,24 +252,33 @@ mod macos {
         result.map(|_| ())
     }
 
-    async fn build_tun_config(config: &HelperConfig) -> io::Result<TunConfig> {
-        let virtual_dns = TunVirtualDnsState::default();
-        if let Some(cache_dir) = &config.cache_dir {
-            let directory = PathBuf::from(cache_dir).join(HELPER_STATE_SUBDIR);
-            match std::fs::create_dir_all(&directory) {
-                Ok(()) => {
-                    if let Err(error) = virtual_dns.enable_persistence_in(&directory).await {
-                        log::warn!(
-                            "fake-IP mappings will not survive a restart ({}): {error}",
-                            directory.display()
-                        );
-                    }
-                }
-                Err(error) => log::warn!(
+    /// Directory this helper keeps its own state in, when the application named
+    /// a cache directory. Both the fake-IP journal and the DNS restore point
+    /// live here, and root owns both.
+    fn helper_state_dir(config: &HelperConfig) -> Option<PathBuf> {
+        let cache_dir = config.cache_dir.as_ref()?;
+        let directory = PathBuf::from(cache_dir).join(HELPER_STATE_SUBDIR);
+        match std::fs::create_dir_all(&directory) {
+            Ok(()) => Some(directory),
+            Err(error) => {
+                log::warn!(
                     "could not create the helper state directory {}: {error}",
                     directory.display()
-                ),
+                );
+                None
             }
+        }
+    }
+
+    async fn build_tun_config(config: &HelperConfig) -> io::Result<TunConfig> {
+        let virtual_dns = TunVirtualDnsState::default();
+        if let Some(directory) = helper_state_dir(config)
+            && let Err(error) = virtual_dns.enable_persistence_in(&directory).await
+        {
+            log::warn!(
+                "fake-IP mappings will not survive a restart ({}): {error}",
+                directory.display()
+            );
         }
 
         // The list arrives already normalized and already carrying the

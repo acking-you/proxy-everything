@@ -1186,7 +1186,36 @@ pub extern "C" fn proxy_relaunch_elevated_for_tun() -> ProxyResult {
     }
 }
 
+/// Wait for a cancelled TUN session to finish restoring routes and DNS.
+///
+/// Teardown is what puts the system resolver and default route back. Returning
+/// before it completes lets the caller exit the process while a privileged helper
+/// is still mid-restore, which leaves the machine pointing at the tunnel's DNS.
+/// The timeout matches `proxy_stop_tun`, which has always waited here.
+fn await_tun_teardown(
+    handle: &ProxyHandle,
+    stopped: Option<tokio::sync::oneshot::Receiver<()>>,
+) -> bool {
+    let Some(stopped) = stopped else {
+        return true;
+    };
+    let finished = handle
+        .runtime
+        .block_on(async { tokio::time::timeout(std::time::Duration::from_secs(5), stopped).await })
+        .is_ok();
+    if !finished {
+        send_log(
+            3,
+            "Timed out waiting for TUN route and DNS cleanup to finish",
+        );
+    }
+    finished
+}
+
 /// Stop the proxy.
+///
+/// Blocks until a running TUN session has restored the system routes and DNS, so
+/// a caller that exits immediately afterwards cannot cut the restore short.
 ///
 /// # Safety
 /// `handle` must be a valid pointer from `proxy_create`.
@@ -1199,26 +1228,38 @@ pub unsafe extern "C" fn proxy_stop(handle: *mut ProxyHandle) -> ProxyResult {
     let handle = unsafe { &mut *handle };
 
     if !handle.running.load(Ordering::SeqCst) {
-        if let Ok(mut lifecycle) = handle.tun_lifecycle.lock() {
-            if let Some(tun_token) = lifecycle.cancel_token.take() {
-                tun_token.cancel();
+        // The listener is already down, but TUN may not be: cancel it and still
+        // wait, so this path also restores routes and DNS before returning.
+        let stopped = match handle.tun_lifecycle.lock() {
+            Ok(mut lifecycle) => {
+                if let Some(tun_token) = lifecycle.cancel_token.take() {
+                    tun_token.cancel();
+                }
+                lifecycle.stopped.take()
             }
-            lifecycle.stopped = None;
-        }
+            Err(_) => None,
+        };
         handle.tun_generation.fetch_add(1, Ordering::AcqRel);
+        await_tun_teardown(handle, stopped);
         handle.tun_running.store(false, Ordering::Release);
         handle.force_proxy.store(false, Ordering::Release);
         return ProxyResult::NotRunning;
     }
 
     if let Some(token) = handle.cancel_token.take() {
-        if let Ok(mut lifecycle) = handle.tun_lifecycle.lock() {
-            if let Some(tun_token) = lifecycle.cancel_token.take() {
-                tun_token.cancel();
+        let stopped = match handle.tun_lifecycle.lock() {
+            Ok(mut lifecycle) => {
+                if let Some(tun_token) = lifecycle.cancel_token.take() {
+                    tun_token.cancel();
+                }
+                lifecycle.stopped.take()
             }
-            lifecycle.stopped = None;
-        }
+            Err(_) => None,
+        };
         handle.tun_generation.fetch_add(1, Ordering::AcqRel);
+        // Cancel TUN first and let it finish: it owns the system routes and DNS,
+        // and its relays forward into the listener cancelled just below.
+        await_tun_teardown(handle, stopped);
         token.cancel();
         handle.running.store(false, Ordering::SeqCst);
         handle.tun_running.store(false, Ordering::Release);
