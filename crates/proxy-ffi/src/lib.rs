@@ -12,8 +12,16 @@ mod probe;
 mod runtime;
 mod types;
 
-pub(crate) fn init_allocator() {
+/// Apply the process-wide startup policy shared by every FFI entry point.
+///
+/// A Flutter host reaches this library without going through one of our `main`
+/// functions, so the descriptor limit has to be raised here too. It matters most
+/// on macOS, where a `.app` inherits launchd's low `maxfiles` instead of the
+/// shell's, which is what exhausted descriptors under load in the UI while the
+/// CLI was unaffected.
+pub(crate) fn init_process_policy() {
     proxy_core::allocator::initialize();
+    proxy_core::rlimit::raise_file_descriptor_limit();
 }
 
 // Re-export all public FFI functions and types

@@ -66,6 +66,10 @@ hashbrown = { workspace = true, optional = true }
 kanal = { workspace = true, optional = true }
 async-broadcast = { workspace = true, optional = true }
 
+# Descriptor-limit policy (see src/rlimit.rs)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 default = ["tokio", "auto-proxy"]
 tokio = ["dep:tokio", "dep:tokio-util"]

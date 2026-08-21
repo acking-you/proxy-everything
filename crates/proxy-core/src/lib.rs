@@ -25,6 +25,7 @@ pub mod metrics;
 pub mod nodes;
 pub mod protocol;
 pub mod relay;
+pub mod rlimit;
 pub mod transport;
 pub mod util;
 

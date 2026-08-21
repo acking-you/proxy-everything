@@ -20,6 +20,26 @@ pub fn init_tracing() {
             ),
     );
     tracing::subscriber::set_global_default(subcriber).expect("setting tracing default failed");
+
+    // Raise the descriptor limit only after tracing is live, so the outcome is
+    // visible. Every binary already calls this during startup, which makes it
+    // the one hook shared by the client, server, TUI, and TUN helper.
+    if let Some(limit) = crate::rlimit::raise_file_descriptor_limit() {
+        if limit.raised() {
+            tracing::info!(
+                previous = limit.previous_soft,
+                current = limit.current_soft,
+                hard = limit.hard,
+                "raised the open file descriptor limit"
+            );
+        } else {
+            tracing::debug!(
+                current = limit.current_soft,
+                hard = limit.hard,
+                "kept the inherited open file descriptor limit"
+            );
+        }
+    }
 }
 
 pub fn gen_random_key() -> String {

@@ -2909,6 +2909,7 @@ dependencies = [
  "indexmap",
  "indicatif",
  "kanal",
+ "libc",
  "lru 0.16.4",
  "maxminddb",
  "moka",

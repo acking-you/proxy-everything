@@ -75,6 +75,18 @@ mod macos {
             ));
         }
 
+        // This process terminates every captured flow on the device, so it is
+        // the most descriptor-hungry part of TUN mode. It uses the `log` facade
+        // rather than `init_tracing`, so the limit is raised explicitly here.
+        if let Some(limit) = proxy_core::rlimit::raise_file_descriptor_limit() {
+            log::info!(
+                "open file descriptor limit: {} (was {}, hard {})",
+                limit.current_soft,
+                limit.previous_soft,
+                limit.hard
+            );
+        }
+
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;

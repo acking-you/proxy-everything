@@ -84,7 +84,7 @@ struct TunLifecycle {
 /// Returns a pointer to ProxyHandle that must be freed with `proxy_destroy`.
 #[unsafe(no_mangle)]
 pub extern "C" fn proxy_create() -> *mut ProxyHandle {
-    crate::init_allocator();
+    crate::init_process_policy();
     let runtime = match crate::runtime::build() {
         Ok(rt) => rt,
         Err(e) => {
@@ -1289,7 +1289,7 @@ pub unsafe extern "C" fn proxy_set_tun_bypass_processes(
 /// The caller must release the returned pointer with `proxy_free_string`.
 #[unsafe(no_mangle)]
 pub extern "C" fn proxy_list_tun_processes() -> *mut c_char {
-    crate::init_allocator();
+    crate::init_process_policy();
     let json = match serde_json::to_string(&running_process_names()) {
         Ok(json) => json,
         Err(error) => {
@@ -1310,7 +1310,7 @@ pub extern "C" fn proxy_list_tun_processes() -> *mut c_char {
 /// returned pointer with `proxy_free_string`.
 #[unsafe(no_mangle)]
 pub extern "C" fn proxy_list_tun_processes_v2() -> *mut c_char {
-    crate::init_allocator();
+    crate::init_process_policy();
     let json = match serde_json::to_string(&running_processes()) {
         Ok(json) => json,
         Err(error) => {
@@ -1329,7 +1329,7 @@ pub extern "C" fn proxy_list_tun_processes_v2() -> *mut c_char {
 /// The caller must release the returned pointer with `proxy_free_string`.
 #[unsafe(no_mangle)]
 pub extern "C" fn proxy_get_tun_self_process() -> *mut c_char {
-    crate::init_allocator();
+    crate::init_process_policy();
     current_process_name()
         .ok()
         .and_then(|name| CString::new(name).ok())
@@ -1346,7 +1346,7 @@ pub extern "C" fn proxy_get_tun_self_process() -> *mut c_char {
 /// `handle` must be null or a valid pointer returned by `proxy_create`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn proxy_get_last_error(handle: *const ProxyHandle) -> *mut c_char {
-    crate::init_allocator();
+    crate::init_process_policy();
     if handle.is_null() {
         return ptr::null_mut();
     }
