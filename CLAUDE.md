@@ -660,6 +660,14 @@ git submodule status
 - Check `auto-proxy` feature is enabled
 - View cache file: `~/http-proxy-cli-config/proxy-cache.txt`
 - Check ip-api.com accessibility
+- An upstream proxy (`--upstream-proxy`) disables it: every connection is
+  forwarded to a third party, so there is no direct decision to make
+- With `USE_LOCAL_GEOIP=true` **and** TUN active, every host is classified as
+  needing the proxy. See [Auto Proxy Under TUN](#auto-proxy-under-tun).
+- A host being proxied when it should be direct is often just its **first**
+  connection: the decision has a short deadline and falls back to the proxy. The
+  lookup completes in the background, so the next connection is correct. See
+  [Geo Lookup Budget](#geo-lookup-budget).
 
 **4. System Proxy Setup Failure**
 - Ensure `sysproxy-rs` submodule is initialized
@@ -742,6 +750,88 @@ Two consequences follow from the helper architecture:
   another user's process, and the GUI stays unprivileged. There are no icons or
   dormant installed applications either: macOS keeps icons inside `.app` bundles
   rather than in the executable.
+
+## Auto Proxy Under TUN
+
+Auto-proxy works with TUN enabled and follows the user's own setting. It used to
+be force-disabled whenever TUN was on, because a direct socket this process
+opened would be captured by the tunnel and loop back into the local listener.
+Process bypass removed that: the current executable is always in the bypass list
+(`TunBypassController::set_user_processes`), so its sockets are relayed out
+through the physical interface instead.
+
+Two mechanisms make a *direct* decision work under a tunnel, and both live in
+`tun2proxy`:
+
+| Concern | Mechanism |
+|---------|-----------|
+| Direct socket must leave the tunnel | Bypassed session relayed via `NoProxyManager` on an interface-bound socket (`direct::connect_tcp_bound`) |
+| Destination is a fake virtual-DNS IP | `restore_bypass_destination` maps it back to the domain and re-resolves it off-tunnel |
+
+Geo classification needed a separate fix. With `ArgDns::Virtual`, the system
+resolver answers from the `198.18.0.0/15` fake-IP pool, so resolving a host
+locally and geo-locating the result described the placeholder rather than the
+host. `query_geo_api` now sends the **hostname** to ip-api, which resolves it
+server-side.
+
+Known limitations:
+
+- **`USE_LOCAL_GEOIP=true` misclassifies under TUN.** The local database needs a
+  real address, and the system resolver cannot supply one behind fake-IP DNS. The
+  lookup fails and `check_proxy` falls back to using the proxy, so it degrades to
+  the old always-proxy behaviour rather than leaking traffic. A proper fix needs a
+  tunnel-bypassing resolver; `direct::resolve_domain_bound` is one, but it is
+  `pub(crate)` inside `tun2proxy`.
+- **The compiled-in direct host list stays off under TUN**
+  (`honor_forced_direct`). It should work for the same reason auto-proxy's direct
+  path does, but enabling it is a separate behaviour change.
+- **iOS keeps forcing the proxy.** `tun2proxy`'s `process` module is not compiled
+  there, so nothing keeps this process's sockets out of the tunnel. Android is
+  fine because `VpnService` excludes the package before routing.
+
+## Geo Lookup Budget
+
+Auto-proxy queries ip-api once per previously unseen host. The free tier allows
+45 requests per minute, and a cold start on a resource-heavy page produces dozens
+of distinct hosts at once — the per-host dedupe in `check_proxy` collapses repeats
+of the *same* host, not a burst of different ones. Three rules keep that safe.
+
+**Local addresses are never queried.** A LAN peer, a loopback address, the TUN
+gateway, or a virtual-DNS fake IP has no country. `is_local_network_host`
+(`geo/query.rs`) routes them directly before any backend is consulted. This is
+decided outside `apply_reverse`, because sending local traffic to a remote proxy is
+wrong under either polarity — a country code would be inverted by reverse-geo. A
+live cache was found holding `10.0.0.1` and `192.168.1.10` recorded as "needs
+proxy", which is what this prevents.
+
+**Nothing user-facing waits for a lookup.** A connection waits
+`AUTO_PROXY_DECISION_TIMEOUT` (800ms, `client/mod.rs`) and then proceeds through
+the proxy. Sized from measured round-trips of 170-680ms, so a healthy lookup keeps
+its accurate decision. Expiring is safe and self-correcting: the query finishes in
+the background and records the answer, so the next connection to that host is
+decided immediately.
+
+**Requests are shaped, not spent freely.** `geo::limiter` applies a token bucket
+(40/min, burst 15) and a concurrency cap (8). The budget is under the advertised
+45 deliberately: the endpoint starts answering `fail` a few requests *before* the
+counter reaches zero, and a 429 carries `X-Ttl: 60` — a full minute of rejections.
+An observed 429 parks new requests for the window the server asks for. A request
+that cannot get a token within 30s is abandoned rather than queued indefinitely.
+
+**Only a resolved answer is cached.** `check_proxy` distinguishes a real country
+from a fallback and calls `CacheManager::update` only for the former. This matters
+because cache entries are never revisited: persisting a fallback turned one
+rate-limited minute into a permanent misclassification, recoverable only by
+deleting `~/http-proxy-cli-config/*-cache.txt`.
+
+A consequence worth knowing: during a large cold-start burst, hosts queued behind
+the token bucket get the proxy default on first contact and are classified
+correctly from their second connection onward. Steady state is unaffected — the
+cache absorbs almost everything.
+
+The `/batch` endpoint would collapse 100 lookups into one quota unit, but it
+returns no country for hostnames, only for IP addresses. Using it would require
+resolving names locally first, which fake-IP DNS makes impossible under TUN.
 
 ## References
 

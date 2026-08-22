@@ -66,6 +66,15 @@ hashbrown = { workspace = true, optional = true }
 kanal = { workspace = true, optional = true }
 async-broadcast = { workspace = true, optional = true }
 
+# `test-util` provides the paused clock the geo rate-limiter tests need, so they
+# assert timing without sleeping in real time.
+[dev-dependencies]
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+    "macros",
+    "test-util",
+] }
+
 # Descriptor-limit policy (see src/rlimit.rs)
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

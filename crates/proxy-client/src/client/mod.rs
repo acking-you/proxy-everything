@@ -449,6 +449,21 @@ pub enum ProxyStatus {
     NeedSpecialProxy(String),
 }
 
+/// How long a connection waits for a first-time geo decision before proceeding
+/// through the proxy.
+///
+/// Sized from measured ip-api round-trips (170-680ms from the development
+/// machine), so a healthy lookup still answers within it and keeps its accurate
+/// decision. A shorter bound would discard good answers in the common case; a
+/// longer one would be felt as a stall. Expiring is safe and self-correcting: the
+/// connection uses the proxy, and the lookup finishes in the background and
+/// records the answer for the next connection to that host.
+///
+/// The geo HTTP client has its own 2s timeout, so this is what actually bounds the
+/// front end.
+#[cfg(feature = "auto-proxy")]
+const AUTO_PROXY_DECISION_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(800);
+
 /// we will not proxy if option is some
 #[cfg(feature = "auto-proxy")]
 pub async fn need_proxy(
@@ -501,9 +516,28 @@ pub async fn need_proxy(
                 .map_err(|_| ClientError::SendAutoProxy {
                     uri: get_uri(host.as_ref(), port),
                 })?;
-            match rx.recv().await.map_err(|_| ClientError::ReciveAutoProxy {
-                uri: get_uri(host.as_ref(), port),
-            }) {
+            // Bounded so a slow or throttled lookup cannot hold up the
+            // connection. Giving up does not waste the query: it finishes in the
+            // background and records the answer, so the next connection to this
+            // host is decided immediately and accurately.
+            let received = match tokio::time::timeout(AUTO_PROXY_DECISION_TIMEOUT, rx.recv()).await
+            {
+                Ok(result) => result.map_err(|_| ClientError::ReciveAutoProxy {
+                    uri: get_uri(host.as_ref(), port),
+                }),
+                Err(_) => {
+                    tracing::debug!(
+                        host = host.as_ref(),
+                        port,
+                        timeout = ?AUTO_PROXY_DECISION_TIMEOUT,
+                        "geo lookup did not answer in time; using the proxy for this connection"
+                    );
+                    // Same direction as a failed lookup: never leak a connection
+                    // that should have been proxied.
+                    return Ok(ProxyStatus::NorlmalProxy);
+                }
+            };
+            match received {
                 Ok(v) => {
                     if v {
                         Ok(ProxyStatus::NorlmalProxy)
@@ -739,6 +773,22 @@ pub async fn run_client_with_listener<const NEED_CODEC: bool>(
     .await
 }
 
+/// Whether per-host auto-proxy decisions apply to this listener.
+///
+/// TUN mode deliberately does *not* appear here. A direct socket opened by this
+/// process is captured by the tunnel, recognised as belonging to a bypassed
+/// process — the current executable is always in the bypass list — and relayed
+/// out through the physical interface rather than back into this listener. The
+/// same relay maps the fake virtual-DNS destination back to the real address, so
+/// a direct decision can actually connect. TUN mode used to force everything
+/// through the proxy because neither of those existed yet.
+///
+/// An upstream proxy does rule auto-proxy out: every connection is forwarded to a
+/// third party, so there is no direct decision left to make.
+fn auto_proxy_applies(enable_auto_proxy: bool, has_upstream_proxy: bool) -> bool {
+    enable_auto_proxy && !has_upstream_proxy
+}
+
 pub async fn run_client_with_listener_runtime_config<const NEED_CODEC: bool>(
     listener: TcpListener,
     cancel_token: CancellationToken,
@@ -753,11 +803,8 @@ pub async fn run_client_with_listener_runtime_config<const NEED_CODEC: bool>(
     let tun_config = config.as_ref().and_then(|c| c.tun.clone());
     let force_proxy_controller = config.as_ref().and_then(|c| c.force_proxy.clone());
     let enable_udp = config.as_ref().map(|c| c.client.enable_udp).unwrap_or(true);
-    // An integrated TUN must never create direct sockets from this process.
-    // Independent FFI-managed TUN mode applies the same invariant dynamically
-    // through `force_proxy_controller` below.
     let tun_active = tun_config.is_some();
-    let enable_auto_proxy = enable_auto_proxy && upstream_proxy.is_none() && !tun_active;
+    let enable_auto_proxy = auto_proxy_applies(enable_auto_proxy, upstream_proxy.is_some());
     let force_proxy = !enable_auto_proxy;
     let cache_dir = config.as_ref().and_then(|c| c.client.cache_dir.clone());
     let upstream_proxy_display = upstream_proxy.as_ref().map(|proxy| proxy.display_url());
@@ -845,7 +892,14 @@ pub async fn run_client_with_listener_runtime_config<const NEED_CODEC: bool>(
                     || force_proxy_controller
                         .as_ref()
                         .is_some_and(|controller| controller.load(Ordering::Acquire));
-                let force_proxy = force_proxy || tun_owns_routes;
+                // `force_proxy` now comes from the auto-proxy setting and the
+                // dynamic controller alone. TUN owning the routes no longer
+                // implies it: process bypass keeps this listener's own direct
+                // sockets out of the tunnel.
+                let force_proxy = force_proxy
+                    || force_proxy_controller
+                        .as_ref()
+                        .is_some_and(|controller| controller.load(Ordering::Acquire));
                 let task = client_proxy_background_task::<NEED_CODEC>(ClientProxyContext {
                     stream,
                     msg_key: if NEED_CODEC { Some(gen_random_key()) } else { None },
@@ -853,9 +907,12 @@ pub async fn run_client_with_listener_runtime_config<const NEED_CODEC: bool>(
                     sender,
                     force_proxy,
                     upstream_proxy: upstream_proxy.clone(),
-                    // A direct socket opened while TUN owns the routes is
-                    // captured back into this listener, so the compiled-in
-                    // direct list cannot be honoured there.
+                    // Left as-is under TUN. This path calls the same
+                    // `get_tcp_stream` as auto-proxy's direct decision, so the
+                    // bypass relay would repair its destination too and enabling
+                    // it should work — but that is a separate behaviour change to
+                    // a compiled-in list, so it stays off until asked for.
+                    // See `proxy_core::config::FORCED_DIRECT_HOSTS`.
                     honor_forced_direct: !tun_owns_routes,
                     enable_udp,
                 });
@@ -940,6 +997,68 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+
+    /// A geo lookup must not hold up the connection. When the background task is
+    /// slow, the decision falls back to the proxy rather than waiting.
+    #[tokio::test]
+    async fn a_slow_geo_lookup_does_not_block_the_connection() {
+        let host = format!("slow-{}.example", std::process::id());
+        let (sender, receiver) = kanal::bounded_async::<auto_proxy::SendItem>(1);
+
+        // A responder that answers far too late to be useful.
+        let stub = tokio::spawn(async move {
+            let (_host, notifier) = receiver.recv().await.unwrap();
+            tokio::time::sleep(AUTO_PROXY_DECISION_TIMEOUT * 4).await;
+            // The waiter is gone by now; the send failing is the expected path.
+            let _ = notifier.send(false).await;
+        });
+
+        let started = std::time::Instant::now();
+        let status = need_proxy(&host, 443, &sender).await.unwrap();
+        let waited = started.elapsed();
+
+        assert!(
+            matches!(status, ProxyStatus::NorlmalProxy),
+            "an undecided host must use the proxy, never a direct connection"
+        );
+        assert!(
+            waited < AUTO_PROXY_DECISION_TIMEOUT * 2,
+            "waited {waited:?}, which means the deadline did not apply"
+        );
+        stub.await.unwrap();
+    }
+
+    /// A lookup that answers promptly keeps its accurate decision, so the deadline
+    /// does not cost correctness in the common case.
+    #[tokio::test]
+    async fn a_prompt_geo_lookup_still_decides_the_connection() {
+        let host = format!("prompt-{}.example", std::process::id());
+        let (sender, receiver) = kanal::bounded_async::<auto_proxy::SendItem>(1);
+
+        let stub = tokio::spawn(async move {
+            let (_host, notifier) = receiver.recv().await.unwrap();
+            // `false` = no proxy needed, i.e. a CN host in normal mode.
+            notifier.send(false).await.unwrap();
+        });
+
+        let status = need_proxy(&host, 443, &sender).await.unwrap();
+        assert!(
+            matches!(status, ProxyStatus::NoProxy(_)),
+            "a resolved direct decision must be honoured"
+        );
+        stub.await.unwrap();
+    }
+
+    /// TUN must no longer be a reason to disable auto-proxy, and the user's own
+    /// setting must remain the switch.
+    #[test]
+    fn auto_proxy_follows_the_user_setting_not_tun() {
+        assert!(auto_proxy_applies(true, false));
+        assert!(!auto_proxy_applies(false, false));
+        // An upstream proxy leaves no direct decision to make.
+        assert!(!auto_proxy_applies(true, true));
+        assert!(!auto_proxy_applies(false, true));
+    }
 
     async fn start_client_for_test(
         upstream_proxy: ExternalProxyTarget,

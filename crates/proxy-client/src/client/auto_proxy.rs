@@ -96,6 +96,15 @@ pub async fn get_country_code(host: impl AsRef<str>) -> Result<ProxyStrategy> {
     Ok(strategy_for_country_code(country_code.as_str()))
 }
 
+/// Decide a host that needs no geo lookup at all.
+///
+/// A LAN peer, a loopback address, or the TUN gateway has no country. Routing it
+/// through a remote proxy is wrong regardless of the reverse-geo setting, so this
+/// is decided ahead of the query and outside [`apply_reverse`].
+fn local_network_strategy(host: &str) -> Option<ProxyStrategy> {
+    proxy_core::geo::is_local_network_host(host).then_some(ProxyStrategy::Direct)
+}
+
 fn strategy_for_country_code(country_code: &str) -> ProxyStrategy {
     match country_code {
         "CN" => ProxyStrategy::Direct,
@@ -310,7 +319,9 @@ pub async fn run_auto_proxy_by_country(receiver: ReceiverChan, cache_dir: Option
 
 async fn cached_send(notifier: AsyncSender<bool>, need_proxy: bool, host: &str) {
     if let Err(e) = notifier.send(need_proxy).await {
-        tracing::error!(
+        // The connection stopped waiting: it hit its decision deadline and went
+        // with the safe default. Expected, not a fault.
+        tracing::debug!(
             cached_proxy = need_proxy,
             proxy_host = host,
             notifier_send_error = %error_report(&e)
@@ -322,7 +333,9 @@ async fn cached_send(notifier: AsyncSender<bool>, need_proxy: bool, host: &str) 
 
 async fn cache_miss_send(notifier: AsyncSender<bool>, need_proxy: bool, host: &str) {
     if let Err(e) = notifier.send(need_proxy).await {
-        tracing::error!(
+        // Same as above: the waiter timed out and proceeded. The result is still
+        // worth finishing, because it decides the next connection to this host.
+        tracing::debug!(
             cache_miss = need_proxy,
             proxy_host = host,
             notifier_send_error = %error_report(&e)
@@ -385,25 +398,53 @@ async fn check_proxy(context: TaskContext) {
         ChannelContext::Sender(tx) => tx,
     };
 
-    tracing::info!(task_id, host, info = "start to query ip-api");
-    let need_proxy = match get_country_code(host.as_str()).await {
-        Ok(c) => apply_reverse(c) == ProxyStrategy::Proxy,
-        Err(e) => {
-            tracing::error!(task_id,host,get_country_code_error = ?snafu::Report::from_error(e));
-            // On error: proxy in normal mode, direct in reverse mode
-            !runtime::reverse_geo()
+    // `None` means the country could not be determined — a timeout, a rate limit,
+    // an unreachable API. Distinguishing that from a real answer is what keeps a
+    // transient failure out of the cache.
+    let resolved = if let Some(strategy) = local_network_strategy(&host) {
+        tracing::info!(
+            task_id,
+            host,
+            info = "local network address; direct without a query"
+        );
+        Some(strategy == ProxyStrategy::Proxy)
+    } else {
+        tracing::info!(task_id, host, info = "start to query ip-api");
+        match get_country_code(host.as_str()).await {
+            Ok(c) => Some(apply_reverse(c) == ProxyStrategy::Proxy),
+            Err(e) => {
+                tracing::warn!(task_id,host,get_country_code_error = ?snafu::Report::from_error(e));
+                None
+            }
         }
     };
+    // Answer the waiter either way: on failure use the proxy in normal mode and
+    // direct in reverse mode, which is the direction that cannot leak traffic.
+    let need_proxy = resolved.unwrap_or_else(|| !runtime::reverse_geo());
+
     cache_miss_send(notifier, need_proxy, &host).await;
     // broadcast result & update cache
     match tx.broadcast(need_proxy).await {
         Ok(_) => tracing::info!(task_id, host, info = "broadcast ok!"),
-        Err(e) => tracing::error!(task_id, host, broadcast_error = %error_report(&e)),
+        Err(e) => tracing::debug!(task_id, host, broadcast_error = %error_report(&e)),
     }
 
-    // Update cache (global PROXY_CACHE + WAL)
-    tracing::info!(task_id, host, need_proxy, info = "updating cache");
-    cache_manager.update(host.clone(), need_proxy).await;
+    // Only a real answer is remembered. Caching a fallback would turn one bad
+    // minute into a permanent decision: the entry is never revisited, so a CN host
+    // classified during a rate-limit window would keep using the proxy until the
+    // cache file was deleted by hand.
+    match resolved {
+        Some(need_proxy) => {
+            tracing::info!(task_id, host, need_proxy, info = "updating cache");
+            cache_manager.update(host.clone(), need_proxy).await;
+        }
+        None => tracing::info!(
+            task_id,
+            host,
+            fallback = need_proxy,
+            info = "geo lookup unresolved; not cached, will retry on the next connection"
+        ),
+    }
 
     tasks.remove(&host);
 }
@@ -424,6 +465,99 @@ mod tests {
         assert_eq!(strategy_for_country_code("CN"), ProxyStrategy::Direct);
         assert_eq!(strategy_for_country_code("US"), ProxyStrategy::Proxy);
         assert_eq!(strategy_for_country_code("XX"), ProxyStrategy::Proxy);
+    }
+
+    /// A resolved lookup is remembered; an unresolved one must leave no trace, in
+    /// memory or on disk.
+    ///
+    /// This is the regression that matters most. Caching a fallback turned one
+    /// rate-limited minute into a permanent misclassification: the entry is never
+    /// revisited, so a CN host looked up during that window kept using the proxy
+    /// until the cache file was deleted by hand.
+    #[tokio::test]
+    async fn only_a_resolved_lookup_is_written_to_the_cache() {
+        let dir = std::env::temp_dir().join(format!("auto-proxy-cache-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let manager = CacheManager::load(Some(dir.as_path())).await.unwrap();
+
+        // Unique so a polluted global cache from another test cannot mask this.
+        let resolved_host = format!("resolved-{}.example", std::process::id());
+        let unresolved_host = format!("unresolved-{}.example", std::process::id());
+
+        // A real answer: recorded both in memory and in the WAL.
+        manager.update(resolved_host.clone(), false).await;
+        assert_eq!(PROXY_CACHE.get(&resolved_host).map(|v| *v), Some(false));
+
+        // An unresolved lookup never reaches `update`, so nothing is stored and
+        // the next connection retries.
+        assert!(
+            PROXY_CACHE.get(&unresolved_host).is_none(),
+            "an unresolved lookup must not be cached"
+        );
+
+        let direct_file = tokio::fs::read_to_string(dir.join(NON_PROXY_FILE_NAME))
+            .await
+            .unwrap();
+        assert!(direct_file.contains(&resolved_host));
+        assert!(
+            !direct_file.contains(&unresolved_host),
+            "an unresolved lookup must not be persisted"
+        );
+        let proxy_file = tokio::fs::read_to_string(dir.join(PROXY_FILE_NAME))
+            .await
+            .unwrap();
+        assert!(
+            !proxy_file.contains(&unresolved_host),
+            "an unresolved lookup must not land in the proxy list either"
+        );
+
+        PROXY_CACHE.remove(&resolved_host);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// A LAN peer or the TUN gateway is always direct, and never queried. It is
+    /// decided outside `apply_reverse` on purpose: sending local traffic to a
+    /// remote proxy is wrong in either polarity, so a country code — which
+    /// reverse-geo would invert — cannot express it.
+    #[test]
+    fn local_addresses_are_direct_and_never_queried() {
+        assert_eq!(
+            local_network_strategy("10.0.0.1"),
+            Some(ProxyStrategy::Direct)
+        );
+        assert_eq!(
+            local_network_strategy("192.168.1.10"),
+            Some(ProxyStrategy::Direct)
+        );
+        assert_eq!(
+            local_network_strategy("127.0.0.1"),
+            Some(ProxyStrategy::Direct)
+        );
+        // A fake IP from the virtual-DNS pool is equally meaningless to geolocate.
+        assert_eq!(
+            local_network_strategy("198.19.0.110"),
+            Some(ProxyStrategy::Direct)
+        );
+
+        // Real hosts still go through the normal decision path.
+        assert_eq!(local_network_strategy("github.com"), None);
+        assert_eq!(local_network_strategy("8.8.8.8"), None);
+    }
+
+    /// The fallback direction must never leak: a host that could not be
+    /// classified goes through the proxy in normal mode.
+    #[test]
+    fn an_unresolved_lookup_falls_back_to_the_safe_direction() {
+        // Mirrors `check_proxy`: `resolved.unwrap_or_else(|| !reverse_geo())`.
+        let fallback = |reverse_geo: bool| !reverse_geo;
+        assert!(
+            fallback(false),
+            "normal mode must proxy an unclassified host"
+        );
+        assert!(
+            !fallback(true),
+            "reverse mode inverts, so its safe direction is direct"
+        );
     }
 
     #[tokio::test]

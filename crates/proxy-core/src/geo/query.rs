@@ -9,6 +9,7 @@ use std::io::Read;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -38,6 +39,13 @@ pub enum GeoError {
     Http { source: reqwest::Error },
     #[snafu(display("ip-api.com returned error: {detail}"))]
     ApiError { detail: String },
+    /// The endpoint refused the request, or this process declined to send it
+    /// because doing so would have. Distinct from [`GeoError::ApiError`] so a
+    /// caller can tell "we are over budget" from "that host does not resolve":
+    /// the first is temporary and must not be cached, the second is about the
+    /// host itself.
+    #[snafu(display("ip-api.com rate limit reached; retry after {retry_after:?}"))]
+    RateLimited { retry_after: Option<Duration> },
     #[snafu(display("DNS resolution failed for {host}"))]
     DnsResolve {
         source: std::io::Error,
@@ -70,27 +78,128 @@ type Result<T> = std::result::Result<T, GeoError>;
 // API Mode (ip-api.com)
 // ============================================================================
 
+/// Whether `host` is safe to interpolate into the query URL path.
+///
+/// Hosts arrive from client requests (a `ProxyHeader` or a SOCKS5 address), so a
+/// value containing `/`, `?` or `#` would rewrite the request rather than name a
+/// lookup target. Accepts the characters a hostname or an IP literal can contain
+/// and nothing else.
+fn is_queryable_host(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 255
+        && host.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b':' | b'[' | b']' | b'%')
+        })
+}
+
+/// Whether `host` is an address whose location is knowable without asking.
+///
+/// A LAN peer, a loopback address, or the TUN gateway has no meaningful country,
+/// and ip-api answers such a query by echoing the address back. Sending them
+/// spends quota that a real host needs, and the fallback then records them as
+/// "needs proxy" — observed in a live cache, which held `10.0.0.1`,
+/// `192.168.1.10` and friends alongside genuine hosts.
+///
+/// Reported as local rather than proxied: traffic to your own network must not be
+/// sent through a remote proxy.
+fn is_local_address(host: &str) -> bool {
+    let Ok(address) = host.parse::<IpAddr>() else {
+        return false;
+    };
+    match address {
+        IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                // Shared address space (CGNAT) and the TUN's own pool.
+                || v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1])
+                // Benchmarking range, which is where virtual DNS allocates from.
+                || v4.octets()[0] == 198 && (18..20).contains(&v4.octets()[1])
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                // Unique-local and link-local.
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+/// Build the ip-api line-API URL for `host`.
+///
+/// The host is sent as-is rather than pre-resolved. ip-api resolves names
+/// server-side, and resolving here would be actively wrong under TUN mode: the
+/// system resolver returns a fake IP from the virtual-DNS pool, and geo-locating
+/// that placeholder yields a meaningless country for every host.
+fn geo_api_url(host: &str) -> String {
+    format!("http://ip-api.com/line/{host}")
+}
+
+/// Shared admission control for every request to the API.
+fn rate_limiter() -> &'static crate::geo::limiter::GeoRateLimiter {
+    static LIMITER: OnceLock<crate::geo::limiter::GeoRateLimiter> = OnceLock::new();
+    LIMITER.get_or_init(crate::geo::limiter::GeoRateLimiter::new)
+}
+
+/// `Retry-After`, or ip-api's own `X-Ttl`, as a duration.
+fn retry_after_of(response: &reqwest::Response) -> Option<Duration> {
+    let header = |name: &str| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok())
+    };
+    header("retry-after")
+        .or_else(|| header("x-ttl"))
+        .map(Duration::from_secs)
+}
+
 /// Query geo info for a single IP/host using ip-api.com line API.
 async fn query_geo_api(host: &str) -> Result<String> {
-    let ipaddr = crate::transport::resolve_host(host)
-        .await
-        .with_context(|_| DnsResolveSnafu {
-            host: host.to_string(),
-        })?;
+    if !is_queryable_host(host) {
+        return Err(GeoError::ApiError {
+            detail: format!("host `{host}` is not a queryable hostname or address"),
+        });
+    }
 
-    let url = format!("http://ip-api.com/line/{}", ipaddr);
-    let text = http_client()
-        .get(&url)
-        .send()
+    // Shape the request rate before spending it. Nothing user-facing waits on
+    // this: the caller takes a safe default after a short deadline and this fills
+    // the cache for the next connection.
+    let limiter = rate_limiter();
+    let _permit = limiter
+        .acquire()
         .await
-        .context(HttpSnafu)?
-        .text()
-        .await
-        .context(HttpSnafu)?;
+        .ok_or(GeoError::RateLimited { retry_after: None })?;
+
+    let url = geo_api_url(host);
+    let response = http_client().get(&url).send().await.context(HttpSnafu)?;
+
+    // A 429 costs a full minute of rejections, so record it and stop sending
+    // rather than discovering it again on the next request.
+    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let retry_after = retry_after_of(&response);
+        limiter.note_rate_limited(retry_after).await;
+        return Err(GeoError::RateLimited { retry_after });
+    }
+
+    let text = response.text().await.context(HttpSnafu)?;
 
     // Parse response: first line is "success" or "fail", second line is country code
     let mut lines = text.lines();
     if !lines.any(|line| line == "success") {
+        // The endpoint starts answering `fail` slightly before the quota is
+        // exhausted, so a failure with no budget left is throttling rather than a
+        // statement about this host.
+        if text.contains("rate limit") || text.contains("too many requests") {
+            limiter.note_rate_limited(None).await;
+            return Err(GeoError::RateLimited { retry_after: None });
+        }
         return Err(GeoError::ApiError { detail: text });
     }
 
@@ -350,6 +459,20 @@ async fn query_geo_batch_local(hosts: &[impl AsRef<str>]) -> Result<HashMap<Stri
 // Public API (auto-selects mode based on USE_LOCAL_GEOIP)
 // ============================================================================
 
+/// Whether `host` names an address on the local network or the TUN's own pool.
+///
+/// Callers should route these directly without consulting a geo backend: they have
+/// no meaningful country, ip-api just echoes the address back, and each query
+/// spends budget a real host needs. A live cache was observed holding `10.0.0.1`
+/// and `192.168.1.10` recorded as "needs proxy" for exactly this reason.
+///
+/// Exposed rather than applied inside [`query_geo_single`] because the decision
+/// must not pass through the reverse-geo inversion — sending LAN traffic to a
+/// remote proxy is wrong in either polarity.
+pub fn is_local_network_host(host: &str) -> bool {
+    is_local_address(host)
+}
+
 /// Query geo info for a single host.
 /// Returns the country code (e.g., "CN", "US").
 pub async fn query_geo_single(host: &str) -> Result<String> {
@@ -376,11 +499,131 @@ pub async fn query_geo_batch<T: AsRef<str> + Serialize>(
 mod tests {
     use super::*;
 
+    /// The lookup target must be the host itself. Resolving it first would break
+    /// under TUN mode, where the system resolver answers with a fake IP from the
+    /// virtual-DNS pool and the geo answer would describe that placeholder.
+    #[test]
+    fn the_query_names_the_host_rather_than_a_resolved_address() {
+        assert_eq!(
+            geo_api_url("github.com"),
+            "http://ip-api.com/line/github.com"
+        );
+        assert_eq!(geo_api_url("8.8.8.8"), "http://ip-api.com/line/8.8.8.8");
+        // A fake-IP address must never appear in a query; passing the name
+        // through is what prevents it.
+        assert!(!geo_api_url("github.com").contains("198.1"));
+    }
+
+    /// Addresses on the local network must never reach the API. Each one spends
+    /// budget a real host needs, and ip-api answers by echoing the address back —
+    /// which the fallback then records as "needs proxy". A live cache was found
+    /// holding `10.0.0.1` and `192.168.1.10` for exactly this reason.
+    #[test]
+    fn local_addresses_are_recognised_without_a_query() {
+        // Private ranges.
+        assert!(is_local_network_host("192.168.1.10"));
+        assert!(is_local_network_host("10.0.0.1"), "the TUN gateway");
+        assert!(is_local_network_host("172.16.4.9"));
+        // Loopback, link-local, unspecified, multicast.
+        assert!(is_local_network_host("127.0.0.1"));
+        assert!(is_local_network_host("169.254.1.1"));
+        assert!(is_local_network_host("0.0.0.0"));
+        assert!(is_local_network_host("224.0.0.251"));
+        // CGNAT and the virtual-DNS fake-IP pool.
+        assert!(is_local_network_host("100.64.0.1"));
+        assert!(
+            is_local_network_host("198.19.0.110"),
+            "a virtual-DNS fake IP"
+        );
+        // IPv6 loopback and unique/link-local.
+        assert!(is_local_network_host("::1"));
+        assert!(is_local_network_host("fd00::1"));
+        assert!(is_local_network_host("fe80::1"));
+
+        // Real routable addresses and hostnames are not local.
+        assert!(!is_local_network_host("8.8.8.8"));
+        assert!(!is_local_network_host("1.1.1.1"));
+        assert!(
+            !is_local_network_host("100.128.0.1"),
+            "outside the CGNAT range"
+        );
+        assert!(
+            !is_local_network_host("198.20.0.1"),
+            "outside the benchmark range"
+        );
+        assert!(!is_local_network_host("github.com"));
+        assert!(!is_local_network_host("2606:4700::1111"));
+    }
+
+    /// Hosts come from client requests, so a path separator would rewrite the
+    /// request rather than name a target.
+    #[test]
+    fn only_plausible_hosts_are_queried() {
+        assert!(is_queryable_host("github.com"));
+        assert!(is_queryable_host("sub.domain.example"));
+        assert!(is_queryable_host("8.8.8.8"));
+        assert!(is_queryable_host("[2001:db8::1]"));
+        assert!(is_queryable_host("xn--fiqs8s.example"));
+
+        assert!(!is_queryable_host(""));
+        assert!(!is_queryable_host("evil/../json"));
+        assert!(!is_queryable_host("host?fields=all"));
+        assert!(!is_queryable_host("host#frag"));
+        assert!(!is_queryable_host("has space"));
+        assert!(!is_queryable_host("new\nline"));
+        assert!(!is_queryable_host(&"a".repeat(256)));
+    }
+
     #[tokio::test]
-    async fn test_query_geo_api() {
-        let result = query_geo_api("8.8.8.8").await;
-        println!("API Result: {:?}", result);
-        let result = query_geo_batch_api(&["8.8.8.8"]).await;
-        println!("API Result: {:?}", result);
+    async fn an_unqueryable_host_fails_without_a_request() {
+        let error = query_geo_api("evil/../json").await.unwrap_err();
+        assert!(
+            error.to_string().contains("not a queryable"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// Proves the fix end to end, so it is kept even though CI cannot run it.
+    /// `cargo test -p proxy-core --lib -- --ignored geo_api_classifies`
+    #[tokio::test]
+    #[ignore = "requires network access to ip-api.com"]
+    async fn geo_api_classifies_hosts_by_name() {
+        assert_eq!(query_geo_api("baidu.com").await.unwrap(), "CN");
+        assert_ne!(query_geo_api("github.com").await.unwrap(), "CN");
+        // An address still works, unchanged.
+        assert_eq!(query_geo_api("8.8.8.8").await.unwrap(), "US");
+    }
+
+    /// A burst larger than the per-minute budget must be shaped rather than
+    /// rejected. Before the limiter this produced HTTP 429s and a minute-long
+    /// penalty window.
+    ///
+    /// `cargo test -p proxy-core --lib -- --ignored --nocapture a_burst_is_shaped`
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires network access to ip-api.com and takes ~30s"]
+    async fn a_burst_is_shaped_instead_of_hitting_the_rate_limit() {
+        // More hosts than the burst allowance, so the token bucket has to throttle.
+        let hosts: Vec<String> = (0..25).map(|i| format!("example{i}.com")).collect();
+
+        let results = futures::future::join_all(hosts.iter().map(|host| query_geo_api(host))).await;
+
+        let rate_limited = results
+            .iter()
+            .filter(|r| matches!(r, Err(GeoError::RateLimited { .. })))
+            .count();
+        let resolved = results.iter().filter(|r| r.is_ok()).count();
+        println!(
+            "resolved={resolved} rate_limited={rate_limited} of {}",
+            hosts.len()
+        );
+
+        assert_eq!(
+            rate_limited, 0,
+            "the limiter must shape the burst rather than let it be refused"
+        );
+        assert!(
+            resolved > 0,
+            "expected at least some hosts to be classified"
+        );
     }
 }
