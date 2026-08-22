@@ -666,11 +666,15 @@ pub unsafe extern "C" fn proxy_switch_upstream(
 /// Start TUN capture after the local HTTP/SOCKS5 listener is confirmed active.
 ///
 /// Captured packets are always forwarded to `socks5://127.0.0.1:<local_port>`.
-/// The remote proxy endpoint is installed as an explicit route bypass, the
-/// current executable remains in the process bypass list, and auto-proxy direct
-/// connections are suppressed while desktop TUN is active. Together these
-/// invariants prevent client-owned outbound connections from returning to the
-/// local listener.
+/// Two invariants keep client-owned outbound connections from returning to the
+/// local listener: the remote proxy endpoint gets an explicit route bypass, and
+/// the current executable stays in the process bypass list, which relays its
+/// direct sockets out through the physical interface.
+///
+/// Auto-proxy is left to the user's setting. It used to be suppressed here
+/// because desktop TUN could not exclude this process; process bypass now does
+/// exactly that, and it also restores the real destination behind a fake
+/// virtual-DNS address so a direct decision can connect.
 ///
 /// # Safety
 /// - `handle` must be a valid pointer from `proxy_create`
@@ -750,8 +754,18 @@ pub unsafe extern "C" fn proxy_start_tun(
          {remote_host}:{remote_port} bypasses TUN",
         handle.local_port
     );
-    // Desktop TUN cannot exclude this process at the OS package boundary, so
-    // direct sockets would be captured and loop into the listener.
+    // Desktop TUN keeps the user's auto-proxy setting. This process is always in
+    // the TUN bypass list, so a direct socket it opens is relayed out through the
+    // physical interface rather than looping back into this listener, and the
+    // relay restores the real destination behind the fake virtual-DNS address.
+    // Turning auto-proxy off still forces everything through the proxy.
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    let outbound_policy = TunOutboundPolicy { force_proxy: false };
+    // Elsewhere there is no source-process matcher (`tun2proxy`'s `process`
+    // module is not compiled), so nothing keeps this process's direct sockets out
+    // of the tunnel and they would loop. Android does not reach here — it has its
+    // own entry point, and `VpnService` excludes the package before routing.
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     let outbound_policy = TunOutboundPolicy { force_proxy: true };
 
     // macOS cannot create a utun device or change routes without root, and it
