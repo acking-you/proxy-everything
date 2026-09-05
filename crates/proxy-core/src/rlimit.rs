@@ -67,6 +67,8 @@ pub fn raise_file_descriptor_limit() -> Option<FileDescriptorLimit> {
 /// Separated from the `OnceLock` wrapper so tests can exercise the clamping logic
 /// against the real limits without consuming the process-wide latch.
 #[cfg(unix)]
+// rlim_t is u32 on 32-bit Android and u64 on other supported Unix targets.
+#[allow(clippy::unnecessary_cast)]
 fn apply_file_descriptor_limit(desired: libc::rlim_t) -> Option<FileDescriptorLimit> {
     let mut limits = std::mem::MaybeUninit::<libc::rlimit>::uninit();
     // SAFETY: `getrlimit` writes a complete `rlimit` for a valid resource id.
@@ -88,9 +90,9 @@ fn apply_file_descriptor_limit(desired: libc::rlim_t) -> Option<FileDescriptorLi
 
     if target <= previous_soft {
         return Some(FileDescriptorLimit {
-            previous_soft,
-            current_soft: previous_soft,
-            hard,
+            previous_soft: previous_soft as u64,
+            current_soft: previous_soft as u64,
+            hard: hard as u64,
         });
     }
 
@@ -102,16 +104,16 @@ fn apply_file_descriptor_limit(desired: libc::rlim_t) -> Option<FileDescriptorLi
     // not exceed the hard limit just read, which is what `setrlimit` requires.
     if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &requested) } != 0 {
         return Some(FileDescriptorLimit {
-            previous_soft,
-            current_soft: previous_soft,
-            hard,
+            previous_soft: previous_soft as u64,
+            current_soft: previous_soft as u64,
+            hard: hard as u64,
         });
     }
 
     Some(FileDescriptorLimit {
-        previous_soft,
-        current_soft: target,
-        hard,
+        previous_soft: previous_soft as u64,
+        current_soft: target as u64,
+        hard: hard as u64,
     })
 }
 
@@ -132,7 +134,7 @@ mod tests {
                 limit.current_soft >= limit.previous_soft,
                 "the soft limit must never be lowered"
             );
-            if limit.hard != libc::RLIM_INFINITY {
+            if u128::from(limit.hard) != u128::from(libc::RLIM_INFINITY) {
                 assert!(
                     limit.current_soft <= limit.hard,
                     "the soft limit must stay within the hard ceiling"
@@ -156,7 +158,7 @@ mod tests {
     fn the_request_is_clamped_to_the_hard_ceiling() {
         let limit =
             apply_file_descriptor_limit(libc::rlim_t::MAX).expect("descriptor limits are readable");
-        if limit.hard != libc::RLIM_INFINITY {
+        if u128::from(limit.hard) != u128::from(libc::RLIM_INFINITY) {
             assert!(limit.current_soft <= limit.hard);
         }
     }
