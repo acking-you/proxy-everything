@@ -137,10 +137,18 @@ bypasses its live child-process tree. The matcher uses the ToolHelp process
 snapshot, which remains available when a protected game process rejects direct
 process-handle access. If the application already cached a virtual-DNS address,
 the direct route restores the real destination through the physical interface.
-User-selected bypasses apply to new TCP or UDP sessions. When a live policy
-change affects an established session, tun2proxy closes that relay so the
-application reconnects through the new route. The TUN adapter and system routes
-remain in place.
+User-selected bypasses apply to new TCP or UDP sessions. On Windows and macOS,
+Apply evaluates existing sessions against the executable and ancestor identities
+recorded when each session began. Adding an unrelated application leaves existing
+bypasses, including the proxy's own connections, intact; it does not rescan the
+system socket table for every connection. A session whose owner could not be
+identified keeps its original proxied route until it reconnects.
+
+When a live policy change affects an established session, tun2proxy explicitly
+resets that TCP connection so the application can reconnect through the new
+route. This also applies to DNS over TCP. Affected UDP relays are released and
+the next datagram creates a relay under the updated policy. The TUN adapter,
+physical egress binding, fake-IP mappings, and system routes remain in place.
 
 ### Flutter UI
 
