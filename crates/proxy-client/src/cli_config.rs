@@ -21,6 +21,8 @@ pub struct Config {
     pub server_host: Option<String>,
     pub server_port: Option<u16>,
     pub client_port: Option<u16>,
+    /// Address bound by the local client listener. Missing values default to 0.0.0.0.
+    pub listen_host: Option<String>,
     pub upstream_proxy: Option<String>,
     pub secret_key: Option<String>,
     /// Enable auto-proxy (true/false). When disabled, all traffic goes through proxy.

@@ -24,6 +24,9 @@ struct Cli {
     /// [optional] Port number exposed by the local client agent (uses port 1080 by default)
     #[arg(short, long, value_name = "CLIENT_PORT")]
     client_port: Option<u16>,
+    /// [optional] Address bound by the local client listener (defaults to 0.0.0.0)
+    #[arg(long, value_name = "LISTEN_HOST")]
+    listen_host: Option<String>,
     /// [optional] Upstream SOCKS5/HTTP proxy URL, e.g. socks5://user:pass@127.0.0.1:1080
     #[arg(long, value_name = "PROXY_URL")]
     upstream_proxy: Option<String>,
@@ -85,6 +88,7 @@ impl Cli {
             server_host: self.server_host.clone(),
             server_port: self.server_port,
             client_port: self.client_port,
+            listen_host: self.listen_host.clone(),
             upstream_proxy: self.upstream_proxy.clone(),
             secret_key: self.secret_key.clone(),
             auto_proxy: self.auto_proxy,
@@ -125,6 +129,7 @@ impl Cli {
         self.server_host.is_some()
             || self.server_port.is_some()
             || self.client_port.is_some()
+            || self.listen_host.is_some()
             || self.upstream_proxy.is_some()
             || self.secret_key.is_some()
             || self.msg_key
@@ -504,11 +509,17 @@ async fn main() -> Result<()> {
         tun,
         force_proxy: None,
     };
-    let listen_host = if upstream_mode {
-        "127.0.0.1"
-    } else {
-        "0.0.0.0"
-    };
+    let env_listen_host = std::env::var("LISTEN_HOST").ok();
+    let listen_host = cli
+        .listen_host
+        .as_deref()
+        .or(config.listen_host.as_deref())
+        .or(env_listen_host.as_deref())
+        .unwrap_or(if upstream_mode {
+            "127.0.0.1"
+        } else {
+            "0.0.0.0"
+        });
     if msg_key && !upstream_mode {
         start_client_with_runtime_config::<true>(listen_host, client_port, Some(client_config))
             .await
@@ -556,6 +567,15 @@ mod tests {
             config.tun_bypass_processes,
             Some(vec!["browser.exe".to_string(), "downloader".to_string()])
         );
+        assert!(cli.has_args());
+    }
+
+    #[test]
+    fn listen_host_cli_option_is_written_to_config() {
+        let cli = Cli::try_parse_from(["http-proxy-cli", "--listen-host", "127.0.0.1"]).unwrap();
+
+        assert_eq!(cli.listen_host.as_deref(), Some("127.0.0.1"));
+        assert_eq!(cli.to_config().listen_host.as_deref(), Some("127.0.0.1"));
         assert!(cli.has_args());
     }
 }

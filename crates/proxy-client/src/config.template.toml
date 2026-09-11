@@ -9,6 +9,9 @@ server_port = 1081
 # Local client port (default: 7890)
 client_port = 7890
 
+# [Optional] Local listener address (default: 0.0.0.0; use 127.0.0.1 for local-only access)
+# listen_host = "0.0.0.0"
+
 # [Optional] Encryption key (must be exactly 32 bytes)
 # secret_key = ""
 
