@@ -42,7 +42,9 @@ mod macos {
     use std::path::PathBuf;
 
     use proxy_client::client::macos_dns_restore::{DnsRestorePoint, restore_orphaned_dns};
-    use proxy_client::client::macos_tun::{HelperConfig, HelperEvent, HelperRequest};
+    use proxy_client::client::macos_tun::{
+        HelperConfig, HelperEvent, HelperLogLevel, HelperRequest,
+    };
     use proxy_client::client::tun::{TunConfig, TunVirtualDnsState, run_with_ready};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
@@ -57,6 +59,65 @@ mod macos {
     /// the helper keeps a separate file. Only the helper resolves names while
     /// macOS TUN is active, so the application's copy simply stays idle.
     const HELPER_STATE_SUBDIR: &str = "tun-helper";
+
+    struct HelperLogger {
+        events: tokio::sync::mpsc::Sender<HelperEvent>,
+    }
+
+    impl log::Log for HelperLogger {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            metadata.level() <= log::Level::Info
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            let level = match record.level() {
+                log::Level::Error => HelperLogLevel::Error,
+                log::Level::Warn => HelperLogLevel::Warn,
+                log::Level::Info => HelperLogLevel::Info,
+                _ => return,
+            };
+            // Logging must never stall forwarding or readiness when the UI is
+            // slow. Trace/debug packet data is deliberately excluded.
+            let _ = self.events.try_send(HelperEvent::Log {
+                level,
+                target: record.target().chars().take(256).collect(),
+                message: record.args().to_string().chars().take(4096).collect(),
+            });
+        }
+
+        fn flush(&self) {}
+    }
+
+    #[test]
+    fn helper_logging_is_bounded_and_excludes_packet_debug_records() {
+        use log::Log;
+        let (events, mut receiver) = tokio::sync::mpsc::channel(1);
+        let logger = HelperLogger { events };
+        for _ in 0..1000 {
+            logger.log(
+                &log::Record::builder()
+                    .level(log::Level::Info)
+                    .target("tun2proxy")
+                    .args(format_args!("route ready"))
+                    .build(),
+            );
+        }
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(HelperEvent::Log {
+                level: HelperLogLevel::Info,
+                ..
+            })
+        ));
+        assert!(receiver.try_recv().is_err());
+        logger.log(
+            &log::Record::builder()
+                .level(log::Level::Debug)
+                .args(format_args!("packet"))
+                .build(),
+        );
+        assert!(receiver.try_recv().is_err());
+    }
 
     pub fn run() -> io::Result<()> {
         let socket_path = std::env::args_os().nth(1).ok_or_else(|| {
@@ -107,6 +168,17 @@ mod macos {
         let (reader, writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
         let writer = std::sync::Arc::new(Mutex::new(writer));
+
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(256);
+        log::set_logger(Box::leak(Box::new(HelperLogger { events: log_tx })))
+            .map_err(io::Error::other)?;
+        log::set_max_level(log::LevelFilter::Info);
+        let log_writer = std::sync::Arc::clone(&writer);
+        let _logging_task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            while let Some(event) = log_rx.recv().await {
+                send_event(&log_writer, event).await;
+            }
+        }));
 
         let mut line = String::new();
         if reader.read_line(&mut line).await? == 0 {

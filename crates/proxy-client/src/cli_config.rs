@@ -122,6 +122,78 @@ struct SystemProxyRestorePoint {
     host: String,
     port: u16,
     bypass: String,
+    #[cfg(target_os = "macos")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    macos: Option<MacosProxyRestorePoint>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct MacosProxySetting {
+    enable: bool,
+    host: String,
+    port: u16,
+}
+
+#[cfg(target_os = "macos")]
+impl From<Sysproxy> for MacosProxySetting {
+    fn from(value: Sysproxy) -> Self {
+        Self {
+            enable: value.enable,
+            host: value.host,
+            port: value.port,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl MacosProxySetting {
+    fn proxy(&self) -> Sysproxy {
+        Sysproxy {
+            enable: self.enable,
+            host: self.host.clone(),
+            port: self.port,
+            bypass: String::new(),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct MacosProxyRestorePoint {
+    service: String,
+    http: MacosProxySetting,
+    https: MacosProxySetting,
+    socks: MacosProxySetting,
+}
+
+#[cfg(target_os = "macos")]
+impl MacosProxyRestorePoint {
+    fn capture() -> Result<Self, sysproxy::Error> {
+        let service = Sysproxy::network_service()?;
+        Ok(Self {
+            http: Sysproxy::get_http(&service)?.into(),
+            https: Sysproxy::get_https(&service)?.into(),
+            socks: Sysproxy::get_socks(&service)?.into(),
+            service,
+        })
+    }
+
+    fn apply(&self, bypass: &str) -> Result<(), sysproxy::Error> {
+        // Each protocol has independent state. Restore the recorded service,
+        // even if TUN changed the route or the primary interface meanwhile.
+        let results = [
+            self.http.proxy().set_http(&self.service),
+            self.https.proxy().set_https(&self.service),
+            self.socks.proxy().set_socks(&self.service),
+            Sysproxy {
+                bypass: bypass.to_owned(),
+                ..Sysproxy::default()
+            }
+            .set_bypass(&self.service),
+        ];
+        results.into_iter().collect()
+    }
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
@@ -130,16 +202,22 @@ impl SystemProxyRestorePoint {
         proxy_core::config::default_state_dir().join("system-proxy-restore.json")
     }
 
-    fn capture(original: &Sysproxy) -> Self {
-        Self {
+    fn capture(original: &Sysproxy) -> Result<Self, sysproxy::Error> {
+        Ok(Self {
             enable: original.enable,
             host: original.host.clone(),
             port: original.port,
             bypass: original.bypass.clone(),
-        }
+            #[cfg(target_os = "macos")]
+            macos: Some(MacosProxyRestorePoint::capture()?),
+        })
     }
 
     fn apply(&self) -> Result<(), sysproxy::Error> {
+        #[cfg(target_os = "macos")]
+        if let Some(macos) = &self.macos {
+            return macos.apply(&self.bypass);
+        }
         Sysproxy {
             enable: self.enable,
             host: self.host.clone(),
@@ -147,6 +225,17 @@ impl SystemProxyRestorePoint {
             bypass: self.bypass.clone(),
         }
         .set_system_proxy()
+    }
+
+    fn set_proxy(&self, proxy: &Sysproxy) -> Result<(), sysproxy::Error> {
+        #[cfg(target_os = "macos")]
+        if let Some(macos) = &self.macos {
+            proxy.set_http(&macos.service)?;
+            proxy.set_https(&macos.service)?;
+            proxy.set_socks(&macos.service)?;
+            return proxy.set_bypass(&macos.service);
+        }
+        proxy.set_system_proxy()
     }
 
     fn store(&self) {
@@ -221,6 +310,7 @@ pub fn restore_orphaned_system_proxy() -> bool {
                 "Failed to restore the orphaned system proxy: {}",
                 error_report(&e)
             );
+            record.store();
             false
         }
     }
@@ -241,18 +331,22 @@ impl SystemProxyGuard {
     ///
     /// Returns `None` if platform doesn't support system proxy or setting fails.
     pub fn new(port: u16) -> Option<Self> {
-        if !Sysproxy::is_support() {
-            tracing::error!("System proxy is not supported on this platform");
-            return None;
-        }
-        let original = match Sysproxy::get_system_proxy() {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::error!("Failed to get current system proxy: {}", error_report(&e));
-                return None;
+        match Self::try_new(port) {
+            Ok(guard) => Some(guard),
+            Err(error) => {
+                tracing::error!("Failed to configure system proxy: {}", error_report(&error));
+                None
             }
-        };
-        let restore_point = SystemProxyRestorePoint::capture(&original);
+        }
+    }
+
+    /// Set the system proxy, reporting failures to callers that require it.
+    pub fn try_new(port: u16) -> Result<Self, sysproxy::Error> {
+        if !Sysproxy::is_support() {
+            return Err(sysproxy::Error::NotSupport);
+        }
+        let original = Sysproxy::get_system_proxy()?;
+        let restore_point = SystemProxyRestorePoint::capture(&original)?;
         // Record before switching. A crash between the two leaves a redundant
         // restore point, which is harmless; the other order would lose it.
         restore_point.store();
@@ -263,13 +357,18 @@ impl SystemProxyGuard {
             port,
             bypass: original.bypass.clone(),
         };
-        if let Err(e) = new_proxy.set_system_proxy() {
+        if let Err(e) = restore_point.set_proxy(&new_proxy) {
             tracing::error!("Failed to set system proxy: {}", error_report(&e));
-            SystemProxyRestorePoint::discard();
-            return None;
+            match restore_point.apply() {
+                Ok(()) => SystemProxyRestorePoint::discard(),
+                Err(error) => {
+                    tracing::error!("Failed to roll back system proxy: {}", error_report(&error))
+                }
+            }
+            return Err(e);
         }
         tracing::info!("System proxy set to 127.0.0.1:{port}");
-        Some(Self {
+        Ok(Self {
             original: restore_point,
         })
     }
@@ -284,7 +383,37 @@ impl Drop for SystemProxyGuard {
             tracing::error!("Failed to restore the system proxy: {}", error_report(&e));
         } else {
             tracing::info!("System proxy restored");
+            SystemProxyRestorePoint::discard();
         }
-        SystemProxyRestorePoint::discard();
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod system_proxy_restore_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_restore_point_remains_readable() {
+        let point: SystemProxyRestorePoint = serde_json::from_str(
+            r#"{"enable":false,"host":"127.0.0.1","port":1080,"bypass":"localhost"}"#,
+        )
+        .unwrap();
+        assert!(point.macos.is_none());
+        assert!(!point.enable);
+    }
+
+    #[test]
+    fn persisted_restore_keeps_independent_protocols_and_service() {
+        let encoded = r#"{"enable":true,"host":"127.0.0.1","port":8080,"bypass":"localhost","macos":{"service":"Wi-Fi","http":{"enable":true,"host":"127.0.0.1","port":8080},"https":{"enable":false,"host":"127.0.0.2","port":8443},"socks":{"enable":true,"host":"127.0.0.3","port":1080}}}"#;
+        let point: SystemProxyRestorePoint = serde_json::from_str(encoded).unwrap();
+        let saved = serde_json::to_string(&point).unwrap();
+        let restored: SystemProxyRestorePoint = serde_json::from_str(&saved).unwrap();
+        let macos = restored.macos.unwrap();
+        assert_eq!(macos.service, "Wi-Fi");
+        assert!(macos.http.proxy().enable);
+        assert_eq!(macos.http.proxy().port, 8080);
+        assert!(!macos.https.proxy().enable);
+        assert_eq!(macos.https.proxy().host, "127.0.0.2");
+        assert_eq!(macos.socks.proxy().port, 1080);
     }
 }

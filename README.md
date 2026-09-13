@@ -202,6 +202,20 @@ cargo build --release --bin http-proxy-admin
 - [Admin Test Script](docs/admin-test.md) - How to run `http-proxy-admin` control-plane tests
 - [Metrics Monitoring](docs/metrics-monitoring.md) - TUI + admin CLI for management and realtime metrics
 
+## Proxy UI releases
+
+For a UI release with native changes, first dispatch `build-deploy.yaml` on the
+intended source branch with a new `release_version` (for example `0.4.30`).
+Manual runs publish the FFI libraries, including the macOS TUN helper, only
+after every native build succeeds. They skip server binaries and Docker image
+publication. Numeric tag pushes retain the full release workflow.
+
+Then dispatch `ui/flutter/.github/workflows/build.yaml` in
+`Proxy-UI/Proxy-UI-Flutter`, passing that native `lib_version`, a new UI
+`release_tag`, and `create_release=true`. Wait for all desktop jobs and the
+release job to succeed, and inspect the attached macOS, Windows, and Linux
+packages. Mobile application packages must be built and signed locally.
+
 ## Windows Development
 
 Prerequisites:

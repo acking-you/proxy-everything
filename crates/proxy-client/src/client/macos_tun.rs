@@ -74,6 +74,28 @@ pub enum HelperEvent {
     Failed { message: String },
     /// Routes and DNS have been restored.
     Stopped,
+    /// Bounded diagnostic records from the process that owns packet forwarding.
+    Log {
+        level: HelperLogLevel,
+        target: String,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HelperLogLevel {
+    Error,
+    Warn,
+    Info,
+}
+
+fn forward_helper_log(level: HelperLogLevel, target: &str, message: &str) {
+    match level {
+        HelperLogLevel::Error => tracing::error!(helper_target = target, "{message}"),
+        HelperLogLevel::Warn => tracing::warn!(helper_target = target, "{message}"),
+        HelperLogLevel::Info => tracing::info!(helper_target = target, "{message}"),
+    }
 }
 
 /// Requests this process sends to the helper.
@@ -279,6 +301,10 @@ async fn start_helper_session(
     shutdown_token: CancellationToken,
     ready: &mut Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
 ) -> io::Result<usize> {
+    // Fail before the administrator prompt or any DNS restore/setup when an
+    // existing VPN owns capture routes. The helper repeats this check to cover
+    // changes that race authorization.
+    tun2proxy::validate_macos_capture_routes()?;
     let helper = helper_path()?;
     let (listener, socket_path, directory) = bind_control_socket()?;
     let result = run_helper_session(
@@ -406,6 +432,11 @@ async fn drive_helper_session(
         }
 
         match serde_json::from_str::<HelperEvent>(line.trim()) {
+            Ok(HelperEvent::Log {
+                level,
+                target,
+                message,
+            }) => forward_helper_log(level, &target, &message),
             Ok(HelperEvent::Ready) => {
                 tracing::info!("the privileged TUN helper reported adapter and route readiness");
                 if let Some(ready) = ready.take() {
@@ -497,14 +528,15 @@ async fn await_helper_teardown(
             line.clear();
             match reader.read_line(line).await {
                 Ok(0) => return,
-                Ok(_) => {
-                    if matches!(
-                        serde_json::from_str::<HelperEvent>(line.trim()),
-                        Ok(HelperEvent::Stopped)
-                    ) {
-                        return;
-                    }
-                }
+                Ok(_) => match serde_json::from_str::<HelperEvent>(line.trim()) {
+                    Ok(HelperEvent::Stopped) => return,
+                    Ok(HelperEvent::Log {
+                        level,
+                        target,
+                        message,
+                    }) => forward_helper_log(level, &target, &message),
+                    _ => {}
+                },
                 Err(error) => {
                     tracing::debug!(%error, "the TUN helper socket ended during teardown");
                     return;
@@ -775,6 +807,10 @@ mod tests {
         assert!(matches!(
             serde_json::from_str::<HelperEvent>(r#"{"event":"ready"}"#).unwrap(),
             HelperEvent::Ready
+        ));
+        assert!(matches!(
+            serde_json::from_str::<HelperEvent>(r#"{"event":"log","level":"warn","target":"tun2proxy","message":"DNS unavailable"}"#).unwrap(),
+            HelperEvent::Log { level: HelperLogLevel::Warn, message, .. } if message == "DNS unavailable"
         ));
     }
 }

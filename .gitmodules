@@ -1,6 +1,6 @@
 [submodule "deps/sysproxy-rs"]
 	path = deps/sysproxy-rs
-	url = https://github.com/zzzgydi/sysproxy-rs.git
+	url = https://github.com/acking-you/sysproxy-rs.git
 [submodule "ui/flutter"]
 	path = ui/flutter
 	url = https://github.com/Proxy-UI/Proxy-UI-Flutter.git

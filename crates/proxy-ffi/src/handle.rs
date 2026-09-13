@@ -495,7 +495,13 @@ fn proxy_start_inner(
             return ProxyResult::RuntimeError;
         };
         *guard = if set_system_proxy {
-            SystemProxyGuard::new(local_port)
+            match SystemProxyGuard::try_new(local_port) {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    record_error(handle, &format!("Failed to enable system proxy: {error}"));
+                    return ProxyResult::RuntimeError;
+                }
+            }
         } else {
             None
         };
@@ -773,10 +779,8 @@ pub unsafe extern "C" fn proxy_start_tun(
     // session instead, so the wait has to cover an interactive password prompt.
     #[cfg(target_os = "macos")]
     if proxy_client::client::macos_tun::requires_privileged_helper() {
-        if let Err(error) = proxy_client::client::macos_tun::helper_path() {
-            record_error(handle, &format!("Failed to start TUN mode: {error}"));
-            return ProxyResult::RuntimeError;
-        }
+        // The runner checks route conflicts and helper availability together,
+        // returning every setup error through the same readiness/cleanup path.
         let config = match handle.cache_dir.lock() {
             Ok(cache_dir) => match cache_dir.as_ref() {
                 Some(directory) => config.with_cache_dir(directory.clone()),
