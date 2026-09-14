@@ -24,3 +24,6 @@ sysproxy = { workspace = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 libc = "0.2"
+
+[features]
+mac-app-store = ["proxy-client/network-extension", "proxy-core/no-external-geo"]

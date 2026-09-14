@@ -35,6 +35,8 @@ const GEOIP_DB_NAME: &str = "GeoLite2-City.mmdb";
 
 #[derive(Debug, Snafu)]
 pub enum GeoError {
+    #[snafu(display("Geographic lookup is disabled in this distribution"))]
+    ExternalLookupDisabled,
     #[snafu(display("HTTP request failed"))]
     Http { source: reqwest::Error },
     #[snafu(display("ip-api.com returned error: {detail}"))]
@@ -356,6 +358,9 @@ async fn download_db(path: &PathBuf) -> Result<()> {
 
 /// Ensure the GeoIP database exists, downloading if necessary.
 pub async fn ensure_db() -> Result<PathBuf> {
+    if cfg!(feature = "no-external-geo") {
+        return Err(GeoError::ExternalLookupDisabled);
+    }
     let path = get_db_path()?;
     if !path.exists() {
         download_db(&path).await?;
@@ -476,6 +481,9 @@ pub fn is_local_network_host(host: &str) -> bool {
 /// Query geo info for a single host.
 /// Returns the country code (e.g., "CN", "US").
 pub async fn query_geo_single(host: &str) -> Result<String> {
+    if cfg!(feature = "no-external-geo") {
+        return Err(GeoError::ExternalLookupDisabled);
+    }
     if *USE_LOCAL_GEOIP {
         query_geo_local(host).await
     } else {
@@ -488,6 +496,9 @@ pub async fn query_geo_single(host: &str) -> Result<String> {
 pub async fn query_geo_batch<T: AsRef<str> + Serialize>(
     ips: &[T],
 ) -> Result<HashMap<String, String>> {
+    if cfg!(feature = "no-external-geo") {
+        return Err(GeoError::ExternalLookupDisabled);
+    }
     if *USE_LOCAL_GEOIP {
         query_geo_batch_local(ips).await
     } else {
@@ -498,6 +509,23 @@ pub async fn query_geo_batch<T: AsRef<str> + Serialize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "no-external-geo")]
+    #[tokio::test]
+    async fn restricted_distribution_never_resolves_or_downloads_geo_data() {
+        assert!(matches!(
+            query_geo_single("review.example").await,
+            Err(GeoError::ExternalLookupDisabled)
+        ));
+        assert!(matches!(
+            query_geo_batch(&["203.0.113.42"]).await,
+            Err(GeoError::ExternalLookupDisabled)
+        ));
+        assert!(matches!(
+            ensure_db().await,
+            Err(GeoError::ExternalLookupDisabled)
+        ));
+    }
 
     /// The lookup target must be the host itself. Resolving it first would break
     /// under TUN mode, where the system resolver answers with a fake IP from the

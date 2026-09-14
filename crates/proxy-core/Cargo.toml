@@ -80,6 +80,8 @@ tokio = { workspace = true, features = [
 libc = "0.2"
 
 [features]
+# Store builds never disclose lookup targets or download a GeoIP database.
+no-external-geo = []
 default = ["tokio", "auto-proxy"]
 tokio = ["dep:tokio", "dep:tokio-util"]
 auto-proxy = ["dep:hashbrown", "dep:kanal", "dep:async-broadcast"]

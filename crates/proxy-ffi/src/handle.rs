@@ -344,6 +344,11 @@ fn proxy_start_inner(
     allow_lan: bool,
     tun_bypass_processes: Vec<String>,
 ) -> ProxyResult {
+    // The store dylib must fail closed even if an old UI/config reaches FFI.
+    if cfg!(feature = "mac-app-store") && (enable_tun || config.set_system_proxy != 0) {
+        return ProxyResult::InvalidParam;
+    }
+
     if config.server_host.is_null() {
         return ProxyResult::InvalidParam;
     }
@@ -690,6 +695,10 @@ pub unsafe extern "C" fn proxy_start_tun(
     handle: *mut ProxyHandle,
     processes: *const c_char,
 ) -> ProxyResult {
+    if cfg!(feature = "mac-app-store") {
+        return ProxyResult::InvalidParam;
+    }
+
     if handle.is_null() {
         return ProxyResult::InvalidParam;
     }
@@ -1169,6 +1178,10 @@ pub extern "C" fn proxy_is_elevated() -> c_int {
 /// repeatedly and when nothing was left behind.
 #[unsafe(no_mangle)]
 pub extern "C" fn proxy_restore_system_proxy() -> c_int {
+    if cfg!(feature = "mac-app-store") {
+        return 0;
+    }
+
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     {
         let restored = proxy_client::cli_config::restore_orphaned_system_proxy();
@@ -1348,6 +1361,10 @@ pub unsafe extern "C" fn proxy_set_tun_bypass_processes(
 /// The caller must release the returned pointer with `proxy_free_string`.
 #[unsafe(no_mangle)]
 pub extern "C" fn proxy_list_tun_processes() -> *mut c_char {
+    if cfg!(feature = "mac-app-store") {
+        return CString::new("[]").expect("literal").into_raw();
+    }
+
     crate::init_process_policy();
     let json = match serde_json::to_string(&running_process_names()) {
         Ok(json) => json,
@@ -1369,6 +1386,10 @@ pub extern "C" fn proxy_list_tun_processes() -> *mut c_char {
 /// returned pointer with `proxy_free_string`.
 #[unsafe(no_mangle)]
 pub extern "C" fn proxy_list_tun_processes_v2() -> *mut c_char {
+    if cfg!(feature = "mac-app-store") {
+        return CString::new("[]").expect("literal").into_raw();
+    }
+
     crate::init_process_policy();
     let json = match serde_json::to_string(&running_processes()) {
         Ok(json) => json,
@@ -1460,6 +1481,20 @@ pub unsafe extern "C" fn proxy_is_running(handle: *const ProxyHandle) -> c_int {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "mac-app-store")]
+    #[test]
+    fn store_build_rejects_privileged_tun_before_touching_handle_or_system() {
+        assert_eq!(
+            unsafe { proxy_start_tun(ptr::null_mut(), ptr::null()) },
+            ProxyResult::InvalidParam
+        );
+        assert_eq!(proxy_restore_system_proxy(), 0);
+        for value in [proxy_list_tun_processes(), proxy_list_tun_processes_v2()] {
+            assert_eq!(unsafe { CStr::from_ptr(value) }.to_bytes(), b"[]");
+            unsafe { crate::logging::proxy_free_string(value) };
+        }
+    }
+
     #[test]
     fn lan_exposure_is_explicit_and_legacy_safe() {
         assert_eq!(local_listen_host(false), "127.0.0.1");
@@ -1499,6 +1534,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "mac-app-store"))]
     #[test]
     fn tun_cannot_start_before_local_listener() {
         let handle = proxy_create();

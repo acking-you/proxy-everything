@@ -65,7 +65,7 @@ impl log::Log for TunLogBridge {
     fn flush(&self) {}
 }
 
-fn install_tun_log_bridge() {
+pub(crate) fn install_tun_log_bridge() {
     // `tun2proxy` uses the `log` facade while proxy-everything uses tracing.
     // Installing this once preserves its detailed device, routing, session,
     // and error logs in both the CLI console and Flutter's FFI log callback.

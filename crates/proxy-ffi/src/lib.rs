@@ -8,6 +8,8 @@ mod handle;
 mod latency;
 mod logging;
 mod nodes;
+#[cfg(feature = "mac-app-store")]
+mod packet_tunnel;
 mod probe;
 mod runtime;
 mod types;

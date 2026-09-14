@@ -29,7 +29,7 @@ Google CDN destination unresolvable.
 
 Fake-IP allocations are persisted in the application's private support
 directory and restored before the VPN starts. Android services such as Google
-Play can retain DNS answers across a VPN restart or an in-place Proxy Everything
+Play can retain DNS answers across a VPN restart or an in-place CipherRelay
 upgrade; without persistent mappings, a cached `198.18.0.0/15` address could be
 reassigned to another hostname and make an otherwise working TCP or QUIC path
 look offline. The cache is append-only during normal allocation and is compacted
@@ -48,8 +48,8 @@ Open **VPN Applications** on the main Proxy page to choose one of three modes:
 
 | Mode | Android `VpnService.Builder` policy |
 |------|-------------------------------------|
-| **All** | Every eligible application uses the VPN except Proxy Everything |
-| **Bypass** | Selected applications and Proxy Everything bypass the VPN |
+| **All** | Every eligible application uses the VPN except CipherRelay |
+| **Bypass** | Selected applications and CipherRelay bypass the VPN |
 | **Only** | Only selected applications use the VPN |
 
 In **Proxy Configuration**, leave **Direct UDP fallback** enabled to send
@@ -63,7 +63,7 @@ is active drains native TUN sessions, recreates the Android interface, and
 keeps the local proxy listener running. If recreation fails, the previous
 policy is restored.
 
-Proxy Everything is always outside its own VPN. In **All** and **Bypass** it is
+CipherRelay is always outside its own VPN. In **All** and **Bypass** it is
 added to the disallowed list; in **Only** it is omitted from the allowed list.
 This is a loop-prevention invariant, not a user preference: the same process
 owns both the local SOCKS5 listener and the upstream connection.
@@ -243,5 +243,5 @@ Verify APK zip alignment and ELF load-segment alignment before release:
   can own the user's default VPN routes.
 - An empty **Only** selection is rejected. Uninstalled packages in a stored
   policy are ignored when Android rebuilds the interface.
-- Do not remove the Proxy Everything package exclusion in Kotlin. Rust socket
+- Do not remove the CipherRelay package exclusion in Kotlin. Rust socket
   protection cannot replace Android's per-UID loop barrier in this design.

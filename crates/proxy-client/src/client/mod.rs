@@ -53,6 +53,8 @@ pub mod http;
 pub mod macos_dns_restore;
 #[cfg(target_os = "macos")]
 pub mod macos_tun;
+#[cfg(feature = "network-extension")]
+pub mod packet_tunnel;
 pub mod socks;
 pub mod tun;
 mod udp;
@@ -740,13 +742,9 @@ const DEFAULT_CHAN_CAP: usize = 1024;
 
 async fn client_proxy_background_task<const NEED_CODEC: bool>(context: ClientProxyContext) {
     if NEED_CODEC {
-        let random_key = context
-            .msg_key
-            .clone()
-            .expect("must be Some when it `NEED_CODEC` is true");
         if let Err(e) = handle_client(context).await {
             let report = Report::from_error(e).to_string();
-            tracing::error!(random_key, proxy_with_randomkey_handle_error = report);
+            tracing::error!(proxy_with_randomkey_handle_error = report);
         }
     } else if let Err(e) = handle_client(context).await {
         let report = Report::from_error(e).to_string();

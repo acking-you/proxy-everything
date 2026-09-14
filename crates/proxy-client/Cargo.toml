@@ -55,6 +55,7 @@ windows-sys = { version = "0.61", features = [
 
 [features]
 default = ["auto-proxy"]
+network-extension = []
 auto-proxy = ["proxy-core/auto-proxy", "dep:hashbrown", "dep:kanal", "dep:async-broadcast", "dep:dashmap"]
 
 [[bin]]
@@ -68,4 +69,5 @@ name = "http-proxy-tun-helper"
 path = "src/bin/tun_helper.rs"
 
 [dev-dependencies]
+etherparse = "0.20"
 proxy-server = { path = "../proxy-server" }

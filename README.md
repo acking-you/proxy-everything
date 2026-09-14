@@ -1,10 +1,32 @@
-# proxy-everything
+# CipherRelay（密流）
 
-A lightweight encrypted proxy with AES-256-GCM encryption.
+A self-hosted encrypted proxy with AES-256-GCM encryption and a cross-platform client.
+The source repository remains `proxy-everything`; existing protocol, binary and application identifiers remain compatible.
 
 ```
 Client (local) ──► [encrypted] ──► Server (remote) ──► Internet
 ```
+
+## macOS editions
+
+CipherRelay is the new product name for Proxy UI. Both distribution paths remain
+available in the source:
+
+| Edition | App bundle | Build target | Distribution |
+| --- | --- | --- | --- |
+| Direct download | `CipherRelay.app` | `Runner` | Developer ID signed and notarized DMG |
+| Mac App Store | `CipherRelay Store.app` | `appstore` / `RunnerStore` | Sandboxed app with Packet Tunnel extension; App Review required |
+
+The direct edition retains its system proxy, privileged TUN helper, LAN access
+and process bypass features. The store edition has its own bundle ID and data
+container. See [Mac App Store development](docs/mac-app-store.md) for the build
+and capability differences. Store preparation does not mean Apple has approved
+the app.
+
+Existing bundle/package IDs, Dart imports, executable names on Windows/Linux,
+protocols and storage identifiers stay compatible. Repository URLs remain
+unchanged. On macOS, replace the previous direct-download app with
+`CipherRelay.app`; renaming does not migrate data between the two editions.
 
 ## Quick Start
 
@@ -199,10 +221,11 @@ cargo build --release --bin http-proxy-admin
 - [Server Deployment (Docker)](docs/server-deployment.md) - Docker deployment guide
 - [Server Deployment (Systemd)](docs/systemd-deployment.md) - Binary + systemd deployment
 - [Client Usage](docs/client-usage.md) - Windows, Linux, macOS, Android, iOS
+- [Mac App Store development](docs/mac-app-store.md) - Sandboxed app and Packet Tunnel build
 - [Admin Test Script](docs/admin-test.md) - How to run `http-proxy-admin` control-plane tests
 - [Metrics Monitoring](docs/metrics-monitoring.md) - TUI + admin CLI for management and realtime metrics
 
-## Proxy UI releases
+## CipherRelay releases
 
 For a UI release with native changes, first dispatch `build-deploy.yaml` on the
 intended source branch with a new `release_version` (for example `0.4.30`).

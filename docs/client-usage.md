@@ -191,7 +191,7 @@ before showing the list. The refresh button explicitly rebuilds both caches. A
 live policy change recreates the Android VPN interface while keeping the local
 proxy listener active.
 
-The Proxy Everything package is always outside its own VPN so its upstream
+The CipherRelay package is always outside its own VPN so its upstream
 socket cannot be captured and returned to the local listener. Android shows its
 standard one-time VPN consent dialog on first use and a foreground notification
 while capture is active. See [Android VPN Development](android-vpn.md) for the
