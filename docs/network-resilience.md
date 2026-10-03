@@ -78,8 +78,11 @@ tests (two preexisting skips). Windows x64 Release binaries and `http_proxy.dll`
 built successfully. The complete UI build stopped at Visual Studio discovery:
 Flutter reported no suitable toolchain, and the installed `vswhere.exe` failed
 with `0x80070583` / `0x80070008` despite the available Rust MSVC toolchain.
-No complete Windows UI bundle was produced or installed. Repairing the system
-toolchain or restarting the host was not part of this non-disruptive review.
+That first pass produced no complete Windows UI bundle. The 0.4.32 / 1.2.18+44
+follow-up builds the complete app using the explicit installed MSVC path and
+Ninja, without repairing the system toolchain or restarting the host. See the
+optional `-VisualStudioPath` argument in `scripts/windows/build.ps1`. The app is
+packaged separately and has not replaced the running proxy.
 
 Use the complete Windows release directory or ZIP, not an isolated EXE/DLL.
 The native and UI sources must move together. The supported build command is
@@ -87,7 +90,7 @@ The native and UI sources must move together. The supported build command is
 Pub and Flutter's Windows build dependencies are already cached. Cargo uses
 the committed lockfile; Flutter dependency resolution runs once before build.
 
-## Open security issue: legacy AEAD nonce reuse
+## Legacy AEAD nonce reuse and the v2 migration
 
 The old wire protocol initializes the AES-GCM counter to zero in each
 encryptor. Headers reuse a configured long-term key across connections, and
@@ -110,6 +113,22 @@ A complete fix must version the connection preface and update both endpoints:
    switching clients. Legacy acceptance must be explicit and observable, with
    a removal path rather than an indefinite automatic fallback.
 
-This patch preserves existing wire compatibility and does not claim to close
-that issue. Deploying a protocol migration is a separate coordinated change;
-silently changing the cipher here would disconnect existing clients/servers.
+Native 0.4.32 / UI 1.2.18+44 adds the separately selected
+[secure transport v2](secure-transport-v2.md). It uses fresh randomness from both
+peers and separate direction keys for the header and all traffic, including UDP
+and control. Legacy profiles remain compatible and retain the old security
+limitation. Deployment must follow the documented server-first migration; this
+review did not switch running services. The same follow-up also fixes encrypted
+node probes and server forwarding that waited indefinitely for a silent peer
+after the other direction failed.
+
+
+## Follow-up verification (0.4.32 / 1.2.18+44)
+
+The complete workspace passed 225 Linux and 229 Windows tests (six existing
+ignored tests on each), strict first-party Clippy on both platforms, formatting,
+Flutter analysis, and 100 Flutter tests (two existing skips). The Windows x64
+Release bundle built from the same source and contains native 0.4.32 and UI
+1.2.18+44. Native TUN source is unchanged from the preceding 54 Linux / 75 Windows
+test pass. Actual Wi-Fi handover and live TUN recovery remain untested because
+the running proxy and network configuration must remain untouched.

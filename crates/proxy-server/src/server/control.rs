@@ -16,8 +16,8 @@ use super::{ControlSnafu, Result, ServerContext};
 
 pub(super) async fn handle_control_session(
     mut codec: ControlCodec<
-        AsyncReader<tokio::net::tcp::OwnedReadHalf>,
-        AsyncWriter<tokio::net::tcp::OwnedWriteHalf>,
+        AsyncReader<tokio::io::ReadHalf<proxy_core::secure_transport::ProxyStream>>,
+        AsyncWriter<tokio::io::WriteHalf<proxy_core::secure_transport::ProxyStream>>,
     >,
     ctx: Arc<ServerContext>,
 ) -> Result<()> {

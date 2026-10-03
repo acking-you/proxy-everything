@@ -133,6 +133,11 @@ impl ForwarderProvider for SocksProxierProvider {
                     .await
                     .context(SocksProxySnafu)?;
 
+                let msg_key = if server_stream.is_secure() {
+                    None
+                } else {
+                    msg_key
+                };
                 let (client_reader, client_writer) = split_and_wrap(proxy_context.stream);
                 let (server_reader, server_writer) = split_and_wrap(server_stream);
                 Ok(SocksForwarder::Tcp(TcpForwardImpl {

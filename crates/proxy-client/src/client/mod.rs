@@ -74,11 +74,11 @@ use auto_proxy::{SenderChan, run_auto_proxy_by_country};
 use proxy_core::codec::{AsyncReader, AsyncWriter};
 use proxy_core::config::{gen_random_key, runtime};
 use proxy_core::relay::ExternalProxyTarget;
+use proxy_core::secure_transport::ProxyStream;
 use proxy_core::util::{GracefulShutdownManager, GracefulShutdownManagerImpl, error_report};
 use proxy_core::{client_proxy_with_cryptor_codec, proxy_with_norlmal_codec};
 use snafu::{Report, ResultExt, Snafu};
-use tokio::io::AsyncReadExt;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::io::{AsyncReadExt, ReadHalf, WriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -267,8 +267,8 @@ macro_rules! make_provider_type {
 make_provider_type!(HttpProxierProviderType, "HTTP/HTTPS", HttpProxierProvider);
 make_provider_type!(SocksProxierProviderType, "SOCKS5", SocksProxierProvider);
 
-pub type TcpAsyncReader<T = OwnedReadHalf> = AsyncReader<T>;
-pub type TcpAsyncWriter<T = OwnedWriteHalf> = AsyncWriter<T>;
+pub type TcpAsyncReader<T = ReadHalf<ProxyStream>> = AsyncReader<T>;
+pub type TcpAsyncWriter<T = WriteHalf<ProxyStream>> = AsyncWriter<T>;
 
 #[derive(Debug)]
 pub struct ForwardContext {
@@ -306,8 +306,8 @@ pub struct TcpForwardImpl {
 /// This is a convenience function that wraps the stream splitting
 /// and adapter creation into a single call.
 #[inline]
-pub fn split_and_wrap(stream: TcpStream) -> (TcpAsyncReader, TcpAsyncWriter) {
-    let (r, w) = stream.into_split();
+pub fn split_and_wrap(stream: impl Into<ProxyStream>) -> (TcpAsyncReader, TcpAsyncWriter) {
+    let (r, w) = stream.into().into_split();
     (AsyncReader::new(r), AsyncWriter::new(w))
 }
 
@@ -317,7 +317,7 @@ pub fn split_and_wrap(stream: TcpStream) -> (TcpAsyncReader, TcpAsyncWriter) {
 /// including the established stream and routing information.
 pub struct ServerConnection {
     /// The established TCP connection to the server (direct or proxy).
-    pub stream: TcpStream,
+    pub stream: ProxyStream,
     /// Whether the connection goes through the proxy server.
     pub need_proxy: bool,
     /// Optional session encryption key.
@@ -380,7 +380,7 @@ pub async fn resolve_server_connection(
         .await
         .context(ExternalProxySnafu)?;
         return Ok(ServerConnection {
-            stream,
+            stream: stream.into(),
             need_proxy: true,
             msg_key: None,
         });
@@ -567,9 +567,10 @@ pub async fn need_proxy(
 }
 
 #[inline]
-pub async fn get_tcp_stream(host: &str, port: u16, detail: &'static str) -> Result<TcpStream> {
+pub async fn get_tcp_stream(host: &str, port: u16, detail: &'static str) -> Result<ProxyStream> {
     proxy_core::transport::connect_tcp_host(host, port)
         .await
+        .map(Into::into)
         .with_context(|_| IoSnafu {
             uri: Some(format!("TcpStream({}:{})", host, port)),
             detail,
@@ -583,7 +584,7 @@ pub async fn get_tcp_proxy_stream(
     proxy_server_port: u16,
     msg_key: Option<Cow<'static, str>>,
     detail: &'static str,
-) -> Result<TcpStream> {
+) -> Result<ProxyStream> {
     proxy_core::transport::get_tcp_proxy_stream(
         host,
         port,

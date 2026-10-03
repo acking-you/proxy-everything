@@ -36,6 +36,7 @@ async fn setup_test_server() -> (String, CancellationToken, std::path::PathBuf) 
         relay,
         admin_token: None,
         require_control_encryption: false,
+        require_secure_transport: false,
         control_session_key: None,
         self_node_id: Some("test-node".to_string()),
     };

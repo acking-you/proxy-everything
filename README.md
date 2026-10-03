@@ -28,6 +28,15 @@ protocols and storage identifiers stay compatible. Repository URLs remain
 unchanged. On macOS, replace the previous direct-download app with
 `CipherRelay.app`; renaming does not migrate data between the two editions.
 
+## Secure transport migration
+
+Native **0.4.32** and UI **1.2.18+44** add an explicitly selected v2 transport
+with fresh connection material and separate direction keys for TCP, UDP and
+control traffic. Upgrade all relays/servers first, then enable **Secure transport
+v2** or `PROXY_WIRE_PROTOCOL=v2`; after migration, servers can require it with
+`PROXY_REQUIRE_V2=1`. Existing profiles retain legacy compatibility and its
+nonce-reuse limitation. See [the wire format and migration guide](docs/secure-transport-v2.md).
+
 ## Quick Start
 
 ### Server

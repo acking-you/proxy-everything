@@ -14,9 +14,9 @@ use proxy_core::datagram::{
     parse_socks5_udp_packet, udp_association_idle_timeout,
 };
 use proxy_core::relay::ExternalProxyTarget;
+use proxy_core::secure_transport::ProxyStream;
 use snafu::ResultExt;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::time::Instant;
 
@@ -25,7 +25,7 @@ use super::{DatagramSnafu, ExternalProxySnafu, Forwarder, Result};
 const UDP_ASSOCIATION_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 enum UpstreamReader {
-    Proxy(Box<DatagramTunnelReader<AsyncReader<OwnedReadHalf>>>),
+    Proxy(Box<DatagramTunnelReader<AsyncReader<ReadHalf<ProxyStream>>>>),
     Socks5(DatagramRelayReader),
 }
 
@@ -39,7 +39,7 @@ impl UpstreamReader {
 }
 
 enum UpstreamWriter {
-    Proxy(Box<DatagramTunnelWriter<AsyncWriter<OwnedWriteHalf>>>),
+    Proxy(Box<DatagramTunnelWriter<AsyncWriter<WriteHalf<ProxyStream>>>>),
     Socks5(DatagramRelayWriter),
 }
 
@@ -185,14 +185,19 @@ impl UdpAssociation {
                 datagram_encryption = msg_key.is_some(),
                 "remote proxy server confirmed UDP association readiness"
             );
+            let msg_key = if stream.is_secure() {
+                None
+            } else {
+                msg_key.as_deref()
+            };
             let (read_half, write_half) = stream.into_split();
             (
                 UpstreamReader::Proxy(Box::new(
-                    DatagramTunnelReader::new(AsyncReader::new(read_half), msg_key.as_deref())
+                    DatagramTunnelReader::new(AsyncReader::new(read_half), msg_key)
                         .context(DatagramSnafu)?,
                 )),
                 UpstreamWriter::Proxy(Box::new(
-                    DatagramTunnelWriter::new(AsyncWriter::new(write_half), msg_key.as_deref())
+                    DatagramTunnelWriter::new(AsyncWriter::new(write_half), msg_key)
                         .context(DatagramSnafu)?,
                 )),
                 None,

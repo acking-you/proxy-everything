@@ -52,6 +52,7 @@ async fn current_server_accepts_legacy_tcp_header_without_transport() {
         nodes,
         admin_token: None,
         require_control_encryption: false,
+        require_secure_transport: false,
         control_session_key: None,
         self_node_id: None,
     };

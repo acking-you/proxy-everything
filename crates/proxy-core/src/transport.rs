@@ -53,6 +53,7 @@ use crate::codec::AsyncReaderWriterRef;
 use crate::config::runtime;
 use crate::protocol::set_data_size;
 use crate::relay::{ExternalProxyKind, ExternalProxyTarget};
+use crate::secure_transport::{ProxyStream, WireProtocol, connect_v2};
 use crate::{Aes256GcmCryption, MyAsyncWriteExt, ProxyHeader, ProxyTransport};
 
 #[derive(Debug, Snafu)]
@@ -283,7 +284,33 @@ pub async fn get_tcp_proxy_stream(
     proxy_server_port: u16,
     msg_key: Option<Cow<'static, str>>,
     detail: &'static str,
-) -> Result<TcpStream> {
+) -> Result<ProxyStream> {
+    let protocol = WireProtocol::configured().context(IoSnafu {
+        uri: None,
+        detail: "select wire protocol",
+    })?;
+    get_tcp_proxy_stream_with_protocol(
+        host,
+        port,
+        proxy_server,
+        proxy_server_port,
+        msg_key,
+        detail,
+        protocol,
+    )
+    .await
+}
+
+/// Connect with explicit protocol selection without changing process configuration.
+pub async fn get_tcp_proxy_stream_with_protocol(
+    host: &str,
+    port: u16,
+    proxy_server: &str,
+    proxy_server_port: u16,
+    msg_key: Option<Cow<'static, str>>,
+    detail: &'static str,
+    protocol: WireProtocol,
+) -> Result<ProxyStream> {
     let proxy_header = ProxyHeader {
         host: host.into(),
         port,
@@ -296,6 +323,7 @@ pub async fn get_tcp_proxy_stream(
         proxy_server_port,
         detail,
         &get_uri(host, port),
+        protocol,
     )
     .await
 }
@@ -306,7 +334,7 @@ pub async fn get_udp_proxy_stream(
     proxy_server_port: u16,
     msg_key: Option<Cow<'static, str>>,
     detail: &'static str,
-) -> Result<TcpStream> {
+) -> Result<ProxyStream> {
     let proxy_header = ProxyHeader {
         host: String::new(),
         port: 0,
@@ -319,6 +347,10 @@ pub async fn get_udp_proxy_stream(
         proxy_server_port,
         detail,
         "udp-associate",
+        WireProtocol::configured().context(IoSnafu {
+            uri: None,
+            detail: "select wire protocol",
+        })?,
     )
     .await
 }
@@ -329,7 +361,8 @@ async fn get_proxy_stream(
     proxy_server_port: u16,
     detail: &'static str,
     uri: &str,
-) -> Result<TcpStream> {
+    protocol: WireProtocol,
+) -> Result<ProxyStream> {
     // Do not log the session key or the encrypted header. The transport and
     // boolean encryption flag are enough to diagnose protocol negotiation
     // without leaking credentials into debug output.
@@ -342,6 +375,30 @@ async fn get_proxy_stream(
         "opening proxy transport connection"
     );
     let mut proxy_server_stream = get_tcp_stream(proxy_server, proxy_server_port, detail).await?;
+    if protocol == WireProtocol::V2 {
+        let key = runtime::with_secret_key(|key, _| key.to_vec());
+        let control = crate::control::is_control_target(&proxy_header.host, proxy_header.port);
+        let setup = async {
+            let mut stream = connect_v2(proxy_server_stream, &key, control).await?;
+            let header = serde_json::to_vec(&proxy_header).map_err(std::io::Error::other)?;
+            let mut writer = AsyncReaderWriterRef::new(&mut stream);
+            set_data_size(&mut writer, header.len() as u32)
+                .await
+                .map_err(std::io::Error::other)?;
+            writer.write_all(&header).await?;
+            Ok::<_, std::io::Error>(ProxyStream::Secure(Box::new(stream)))
+        };
+        return tokio::time::timeout(Duration::from_secs(10), setup)
+            .await
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "v2 handshake timed out")
+            })
+            .and_then(|r| r)
+            .context(IoSnafu {
+                uri: None,
+                detail: "v2 handshake",
+            });
+    }
     let mut header_json =
         serde_json::to_string(&proxy_header).with_context(|_| SerdeJsonSnafu {
             uri: uri.to_string(),
@@ -398,7 +455,7 @@ async fn get_proxy_stream(
         encrypted_header_bytes = len,
         "sent encrypted proxy connection header"
     );
-    Ok(proxy_server_stream)
+    Ok(proxy_server_stream.into())
 }
 
 /// Establish a TCP tunnel to a destination through an external SOCKS5 or HTTP proxy.

@@ -26,6 +26,7 @@ pub mod nodes;
 pub mod protocol;
 pub mod relay;
 pub mod rlimit;
+pub mod secure_transport;
 pub mod transport;
 pub mod util;
 

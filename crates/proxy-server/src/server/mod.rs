@@ -141,6 +141,7 @@ struct ServerContext {
     relay: Arc<RelayManager>,
     admin_token: Option<String>,
     require_control_encryption: bool,
+    require_secure_transport: bool,
     control_session_key: Option<String>,
     self_node_id: Option<String>,
     /// Monotonic trace id seed used to tag logs for each connection.
@@ -165,6 +166,7 @@ pub struct ServerConfig {
     pub relay: Arc<RelayManager>,
     pub admin_token: Option<String>,
     pub require_control_encryption: bool,
+    pub require_secure_transport: bool,
     pub control_session_key: Option<String>,
     pub self_node_id: Option<String>,
 }
@@ -178,6 +180,7 @@ impl Default for ServerConfig {
             nodes,
             admin_token: None,
             require_control_encryption: false,
+            require_secure_transport: false,
             control_session_key: None,
             self_node_id: None,
         }
@@ -353,6 +356,7 @@ pub async fn run_server_with_listener(
         relay: config.relay,
         admin_token: config.admin_token,
         require_control_encryption: config.require_control_encryption,
+        require_secure_transport: config.require_secure_transport,
         control_session_key: config.control_session_key,
         self_node_id: config.self_node_id,
         trace_id_seed: AtomicU64::new(1),
@@ -486,6 +490,7 @@ pub async fn start_server(host: impl AsRef<str> + Debug, port: u16) {
     }
 
     let config = ServerConfig {
+        require_secure_transport: std::env::var("PROXY_REQUIRE_V2").is_ok_and(|v| v == "1"),
         metrics,
         nodes,
         relay,

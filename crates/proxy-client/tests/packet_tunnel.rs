@@ -110,6 +110,7 @@ fn provider_forwards_dns_tcp_and_udp_in_plain_and_encrypted_modes_and_stops() {
             nodes,
             admin_token: None,
             require_control_encryption: false,
+            require_secure_transport: false,
             control_session_key: None,
             self_node_id: None,
         },

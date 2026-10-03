@@ -10,8 +10,10 @@ use std::ffi::{CStr, CString, c_char, c_int};
 use std::ptr;
 use std::time::{Duration, Instant};
 
+use proxy_core::Aes256GcmCryption;
 use proxy_core::config::gen_random_key;
-use proxy_core::transport::{change_msg_key, get_tcp_proxy_stream};
+use proxy_core::secure_transport::{ProxyStream, WireProtocol};
+use proxy_core::transport::{change_msg_key, get_tcp_proxy_stream_with_protocol};
 use proxy_core::util::error_report;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -119,6 +121,40 @@ pub unsafe extern "C" fn proxy_probe_node(
     force_codec: c_int,
     timeout_ms: u32,
 ) -> NodeProbeResult {
+    let protocol = match WireProtocol::configured() {
+        Ok(protocol) => protocol,
+        Err(error) => return failure(error.to_string(), 0),
+    };
+    unsafe { probe_node_inner(server_host, server_port, force_codec, timeout_ms, protocol) }
+}
+
+/// Probe using the explicitly selected protocol without altering running clients.
+///
+/// # Safety
+/// `server_host` must be a valid C string; free the result with the matching free function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_probe_node_v2(
+    server_host: *const c_char,
+    server_port: u16,
+    force_codec: c_int,
+    timeout_ms: u32,
+    secure_transport: c_int,
+) -> NodeProbeResult {
+    let protocol = match secure_transport {
+        0 => WireProtocol::Legacy,
+        1 => WireProtocol::V2,
+        _ => return failure("Invalid wire protocol", 0),
+    };
+    unsafe { probe_node_inner(server_host, server_port, force_codec, timeout_ms, protocol) }
+}
+
+unsafe fn probe_node_inner(
+    server_host: *const c_char,
+    server_port: u16,
+    force_codec: c_int,
+    timeout_ms: u32,
+    protocol: WireProtocol,
+) -> NodeProbeResult {
     if server_host.is_null() {
         return failure("Invalid server host", 0);
     }
@@ -139,8 +175,11 @@ pub unsafe extern "C" fn proxy_probe_node(
 
     runtime.block_on(async move {
         let start = Instant::now();
-        let outcome =
-            tokio::time::timeout(timeout, probe(&host, server_port, force_codec != 0)).await;
+        let outcome = tokio::time::timeout(
+            timeout,
+            probe(&host, server_port, force_codec != 0, protocol),
+        )
+        .await;
         let elapsed = start.elapsed().as_millis() as u64;
 
         // A probe traverses whatever routing and capture policy is active, so
@@ -190,7 +229,12 @@ pub unsafe extern "C" fn proxy_probe_node(
 }
 
 /// Returns `(country_code, egress_ip)`, or the stage the probe stopped at.
-async fn probe(host: &str, port: u16, force_codec: bool) -> Result<(String, String), ProbeError> {
+async fn probe(
+    host: &str,
+    port: u16,
+    force_codec: bool,
+    protocol: WireProtocol,
+) -> Result<(String, String), ProbeError> {
     // Mirror what a real connection through this node would negotiate, so a
     // node that only accepts encrypted sessions is probed the same way it is
     // used. A forced session key matches the client's force-codec setting.
@@ -200,26 +244,84 @@ async fn probe(host: &str, port: u16, force_codec: bool) -> Result<(String, Stri
         change_msg_key(host, None)
     };
 
-    let mut stream = get_tcp_proxy_stream(ECHO_HOST, ECHO_PORT, host, port, msg_key, "node probe")
-        .await
-        .map_err(|e| ProbeError::new(ProbeStage::Connect, error_report(&e)))?;
+    let stream = get_tcp_proxy_stream_with_protocol(
+        ECHO_HOST,
+        ECHO_PORT,
+        host,
+        port,
+        msg_key.clone(),
+        "node probe",
+        protocol,
+    )
+    .await
+    .map_err(|e| ProbeError::new(ProbeStage::Connect, error_report(&e)))?;
+    exchange_probe(stream, msg_key.as_deref()).await
+}
 
+async fn exchange_probe(
+    mut stream: ProxyStream,
+    msg_key: Option<&str>,
+) -> Result<(String, String), ProbeError> {
+    let mut cryptor = if !stream.is_secure() {
+        msg_key
+            .map(|key| Aes256GcmCryption::try_new(key.as_bytes()))
+            .transpose()
+            .map_err(|e| ProbeError::new(ProbeStage::Request, e.to_string()))?
+    } else {
+        None
+    };
+    let mut request = ECHO_REQUEST.as_bytes().to_vec();
+    if let Some(cryptor) = cryptor.as_mut() {
+        let tag = cryptor
+            .encrypt(&mut request)
+            .map_err(|e| ProbeError::new(ProbeStage::Request, e.to_string()))?;
+        request.extend_from_slice(tag.as_ref());
+        let len = request.len() as u32;
+        let mut framed = proxy_core::protocol::get_check_sum(len)
+            .to_be_bytes()
+            .to_vec();
+        framed.extend_from_slice(&len.to_be_bytes());
+        framed.extend_from_slice(&request);
+        request = framed;
+    }
     stream
-        .write_all(ECHO_REQUEST.as_bytes())
+        .write_all(&request)
         .await
         .map_err(|e| ProbeError::new(ProbeStage::Request, error_report(&e)))?;
-
     let mut response = Vec::with_capacity(512);
     let mut chunk = [0_u8; 1024];
     loop {
-        let read = stream
-            .read(&mut chunk)
-            .await
-            .map_err(|e| ProbeError::new(ProbeStage::Response, error_report(&e)))?;
-        if read == 0 {
-            break;
+        if let Some(cryptor) = cryptor.as_mut() {
+            let mut frame = proxy_core::codec::AsyncReaderWriterRef::new(&mut stream);
+            let length = proxy_core::get_data_size(&mut frame)
+                .await
+                .map_err(|e| ProbeError::new(ProbeStage::Response, error_report(&e)))?
+                as usize;
+            if !(16..=MAX_ECHO_RESPONSE + 16).contains(&length) {
+                return Err(ProbeError::new(
+                    ProbeStage::Response,
+                    "invalid encrypted echo length",
+                ));
+            }
+            let mut data = vec![0; length];
+            stream
+                .read_exact(&mut data)
+                .await
+                .map_err(|e| ProbeError::new(ProbeStage::Response, error_report(&e)))?;
+            let payload = cryptor
+                .decrypt_with_tag(&mut data)
+                .map_err(|e| ProbeError::new(ProbeStage::Response, e.to_string()))?;
+            response.extend_from_slice(payload);
+        } else {
+            let read = stream
+                .read(&mut chunk)
+                .await
+                .map_err(|e| ProbeError::new(ProbeStage::Response, error_report(&e)))?;
+            if read == 0 {
+                break;
+            }
+            response.extend_from_slice(&chunk[..read]);
         }
-        response.extend_from_slice(&chunk[..read]);
         if response.len() > MAX_ECHO_RESPONSE {
             return Err(ProbeError::new(
                 ProbeStage::Response,
@@ -302,6 +404,56 @@ pub unsafe extern "C" fn proxy_free_node_probe_result(result: *mut NodeProbeResu
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn encrypted_node_probe_uses_the_negotiated_codec() {
+        use proxy_core::codec::AsyncReaderWriterRef;
+        use proxy_core::{MyAsyncWriteExt, get_data_size, set_data_size};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+        let key = "01234567890123456789012345678901";
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let size = get_data_size(&mut AsyncReaderWriterRef::new(&mut stream))
+                .await
+                .unwrap();
+            let mut request = vec![0; size as usize];
+            stream.read_exact(&mut request).await.unwrap();
+            let mut crypto = super::Aes256GcmCryption::try_new(key.as_bytes()).unwrap();
+            assert_eq!(
+                crypto.decrypt_with_tag(&mut request).unwrap(),
+                super::ECHO_REQUEST.as_bytes()
+            );
+            for payload in [
+                b"HTTP/1.1 200 OK\r\n\r\nsuc".as_slice(),
+                b"cess\nSG\n203.0.113.1\n",
+            ] {
+                let mut response = payload.to_vec();
+                let tag = crypto.encrypt(&mut response).unwrap();
+                response.extend_from_slice(tag.as_ref());
+                let mut writer = AsyncReaderWriterRef::new(&mut stream);
+                set_data_size(&mut writer, response.len() as u32)
+                    .await
+                    .unwrap();
+                MyAsyncWriteExt::write_all(&mut writer, &response)
+                    .await
+                    .unwrap();
+            }
+            stream.shutdown().await.unwrap();
+        });
+        let stream = TcpStream::connect(address).await.unwrap();
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            super::exchange_probe(stream.into(), Some(key)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(answer, ("SG".into(), "203.0.113.1".into()));
+        server.await.unwrap();
+    }
+
     use super::{ProbeError, ProbeStage, parse_echo};
 
     fn expect_error(response: &[u8]) -> ProbeError {

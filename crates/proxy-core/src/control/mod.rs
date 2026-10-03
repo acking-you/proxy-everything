@@ -278,8 +278,8 @@ where
 
 pub struct ControlClient {
     codec: ControlCodec<
-        AsyncReader<tokio::net::tcp::OwnedReadHalf>,
-        AsyncWriter<tokio::net::tcp::OwnedWriteHalf>,
+        AsyncReader<tokio::io::ReadHalf<crate::secure_transport::ProxyStream>>,
+        AsyncWriter<tokio::io::WriteHalf<crate::secure_transport::ProxyStream>>,
     >,
 }
 
@@ -302,6 +302,11 @@ impl ControlClient {
             .await
             .map_err(|_| ControlError::Timeout)?
             .context(TransportSnafu)?;
+        let session_key = if stream.is_secure() {
+            None
+        } else {
+            session_key
+        };
         let (reader, writer) = stream.into_split();
         let codec = ControlCodec::new(
             AsyncReader::new(reader),

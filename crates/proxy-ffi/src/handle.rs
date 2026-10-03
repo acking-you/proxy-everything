@@ -25,7 +25,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::logging::send_log;
 use crate::types::{
-    ProxyConfig, ProxyConfigV2, ProxyConfigV3, ProxyConfigV4, ProxyConfigV5, ProxyResult,
+    ProxyConfig, ProxyConfigV2, ProxyConfigV3, ProxyConfigV4, ProxyConfigV5, ProxyConfigV6,
+    ProxyResult,
 };
 
 const LOOPBACK_LISTEN_HOST: &str = "127.0.0.1";
@@ -130,7 +131,18 @@ pub unsafe extern "C" fn proxy_start(
     }
 
     let config = unsafe { &*config };
-    proxy_start_inner(handle, config, true, false, true, false, Vec::new())
+    proxy_start_inner(
+        handle,
+        config,
+        StartOptions {
+            enable_udp: true,
+            enable_tun: false,
+            tun_udp_direct_fallback: true,
+            allow_lan: false,
+            tun_bypass_processes: Vec::new(),
+            secure_transport: false,
+        },
+    )
 }
 
 /// Start the proxy with the version 2 configuration.
@@ -166,11 +178,14 @@ pub unsafe extern "C" fn proxy_start_v2(
     proxy_start_inner(
         handle,
         &legacy_config,
-        config.enable_udp != 0,
-        false,
-        true,
-        false,
-        Vec::new(),
+        StartOptions {
+            enable_udp: config.enable_udp != 0,
+            enable_tun: false,
+            tun_udp_direct_fallback: true,
+            allow_lan: false,
+            tun_bypass_processes: Vec::new(),
+            secure_transport: false,
+        },
     )
 }
 
@@ -213,11 +228,14 @@ pub unsafe extern "C" fn proxy_start_v3(
     proxy_start_inner(
         handle,
         &legacy_config,
-        config.enable_udp != 0,
-        config.enable_tun != 0,
-        true,
-        false,
-        bypass_processes,
+        StartOptions {
+            enable_udp: config.enable_udp != 0,
+            enable_tun: config.enable_tun != 0,
+            tun_udp_direct_fallback: true,
+            allow_lan: false,
+            tun_bypass_processes: bypass_processes,
+            secure_transport: false,
+        },
     )
 }
 
@@ -258,11 +276,14 @@ pub unsafe extern "C" fn proxy_start_v4(
     proxy_start_inner(
         handle,
         &legacy_config,
-        config.enable_udp != 0,
-        config.enable_tun != 0,
-        config.tun_udp_direct_fallback != 0,
-        false,
-        bypass_processes,
+        StartOptions {
+            enable_udp: config.enable_udp != 0,
+            enable_tun: config.enable_tun != 0,
+            tun_udp_direct_fallback: config.tun_udp_direct_fallback != 0,
+            allow_lan: false,
+            tun_bypass_processes: bypass_processes,
+            secure_transport: false,
+        },
     )
 }
 
@@ -303,11 +324,62 @@ pub unsafe extern "C" fn proxy_start_v5(
     proxy_start_inner(
         handle,
         &legacy_config,
-        config.enable_udp != 0,
-        config.enable_tun != 0,
-        config.tun_udp_direct_fallback != 0,
-        config.allow_lan != 0,
-        bypass_processes,
+        StartOptions {
+            enable_udp: config.enable_udp != 0,
+            enable_tun: config.enable_tun != 0,
+            tun_udp_direct_fallback: config.tun_udp_direct_fallback != 0,
+            allow_lan: config.allow_lan != 0,
+            tun_bypass_processes: bypass_processes,
+            secure_transport: false,
+        },
+    )
+}
+
+/// Start using an explicitly selected authenticated transport protocol.
+///
+/// # Safety
+/// Pointers must be valid for the same lifetime as `proxy_start_v5`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_start_v6(
+    handle: *mut ProxyHandle,
+    config: *const ProxyConfigV6,
+) -> ProxyResult {
+    if handle.is_null() || config.is_null() {
+        return ProxyResult::InvalidParam;
+    }
+
+    let v6 = unsafe { &*config };
+    if !matches!(v6.secure_transport, 0 | 1) {
+        return ProxyResult::InvalidParam;
+    }
+    let config = &v6.base;
+    let legacy_config = ProxyConfig {
+        server_host: config.server_host,
+        server_port: config.server_port,
+        local_port: config.local_port,
+        session_key: config.session_key,
+        auto_proxy: config.auto_proxy,
+        reverse_geo: config.reverse_geo,
+        cache_dir: config.cache_dir,
+        need_codec_ips: config.need_codec_ips,
+        force_codec: config.force_codec,
+        set_system_proxy: config.set_system_proxy,
+    };
+    let bypass_processes = match parse_process_names(config.tun_bypass_processes) {
+        Ok(names) => names,
+        Err(result) => return result,
+    };
+    proxy_start_inner(
+        handle,
+        &legacy_config,
+        StartOptions {
+            enable_udp: config.enable_udp != 0,
+            enable_tun: config.enable_tun != 0,
+            tun_udp_direct_fallback: config.tun_udp_direct_fallback != 0,
+            allow_lan: config.allow_lan != 0,
+            tun_bypass_processes: bypass_processes,
+            secure_transport: v6.secure_transport == 1,
+        },
     )
 }
 
@@ -335,15 +407,28 @@ fn parse_process_names(value: *const c_char) -> Result<Vec<String>, ProxyResult>
         .collect())
 }
 
-fn proxy_start_inner(
-    handle: *mut ProxyHandle,
-    config: &ProxyConfig,
+struct StartOptions {
     enable_udp: bool,
     enable_tun: bool,
     tun_udp_direct_fallback: bool,
     allow_lan: bool,
     tun_bypass_processes: Vec<String>,
+    secure_transport: bool,
+}
+
+fn proxy_start_inner(
+    handle: *mut ProxyHandle,
+    config: &ProxyConfig,
+    options: StartOptions,
 ) -> ProxyResult {
+    let StartOptions {
+        enable_udp,
+        enable_tun,
+        tun_udp_direct_fallback,
+        allow_lan,
+        tun_bypass_processes,
+        secure_transport,
+    } = options;
     // The store dylib must fail closed even if an old UI/config reaches FFI.
     if cfg!(feature = "mac-app-store") && (enable_tun || config.set_system_proxy != 0) {
         return ProxyResult::InvalidParam;
@@ -429,6 +514,11 @@ fn proxy_start_inner(
     let set_system_proxy = config.set_system_proxy != 0;
     let listen_host = local_listen_host(allow_lan);
 
+    proxy_core::secure_transport::set_wire_protocol(if secure_transport {
+        proxy_core::secure_transport::WireProtocol::V2
+    } else {
+        proxy_core::secure_transport::WireProtocol::Legacy
+    });
     // Initialize runtime config directly (no env vars needed)
     proxy_core::config::runtime::init_config(
         server_host.clone(),

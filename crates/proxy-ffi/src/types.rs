@@ -123,6 +123,14 @@ pub struct ProxyConfigV5 {
     pub allow_lan: c_int,
 }
 
+/// Version 6 adds explicit v2 transport selection without altering older ABIs.
+#[repr(C)]
+pub struct ProxyConfigV6 {
+    pub base: ProxyConfigV5,
+    /// 0 explicitly selects legacy; 1 selects v2 with no automatic fallback.
+    pub secure_transport: c_int,
+}
+
 /// Result of latency test.
 #[repr(C)]
 pub struct LatencyResult {

@@ -173,7 +173,15 @@ fvm flutter build apk --release --target-platform android-arm64 --split-per-abi
 
 ```powershell
 .\scripts\windows\build.ps1 -Configuration Release
+# When vswhere discovery fails but VS 2022 Build Tools is already installed:
+.\scripts\windows\build.ps1 -Configuration Release -Offline `
+  -VisualStudioPath "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools"
 ```
+
+The explicit-path fallback uses MSVC and Ninja Multi-Config in a child process;
+it does not repair the registry, alter the installed SDK or terminate desktop
+processes. Its complete bundle is under
+`ui/flutter/build/windows/x64-explicit-msvc/runner/Release`.
 
 - Never stop or kill a currently running `proxy_ui` merely to build or package
   an upgrade. If an executable or DLL is locked, use a separate staging/output
