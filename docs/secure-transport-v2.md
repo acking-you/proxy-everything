@@ -54,6 +54,22 @@ Legacy clients remain byte compatible, including TCP headers without the
 length, even if its magic coincides with a legacy checksum. An authenticated
 handshake failure never causes a new legacy connection.
 
+The compatibility setting is intentional and remains the default for both
+existing and newly created profiles:
+
+| Client | Server / relay path | Setting and result |
+| --- | --- | --- |
+| Older client | New server | Works while `PROXY_REQUIRE_V2` is unset |
+| New client | Older server or any older relay | Leave **Secure transport v2** off; legacy traffic works |
+| New client | All-new server / relay path | Legacy works by default; explicitly enable v2 for the new security properties |
+| Older client | New server with `PROXY_REQUIRE_V2=1` | Rejected deliberately; do not enable this setting during a mixed-version rollout |
+
+Do not enable v2 merely because the client has been upgraded. A network failure
+does not prove the peer is old, so a v2 failure never changes the configured
+protocol. Compatibility cannot retrofit directional key separation into an
+unmodified old peer. TCP remains compatible with the original header schema;
+UDP and control operations require peers that already support those features.
+
 ## Coordinated migration
 
 1. Install native 0.4.32 or newer on every relay and terminating server, keeping
@@ -82,3 +98,6 @@ partial-write cancellation, altered retry buffers, tampering, replay/reordering,
 truncation, bounds, exhaustion, large payloads and authenticated half-close.
 Additional regressions cover encrypted node probes and immediate cancellation
 of a silent peer when server-side forwarding fails.
+Historical-wire tests exercise old TCP writers against the current server and
+the current legacy client against an independent old-format reader, with and
+without payload encryption. A rejected v2 handshake opens no legacy connection.
