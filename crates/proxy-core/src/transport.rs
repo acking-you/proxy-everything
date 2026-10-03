@@ -5,7 +5,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
@@ -14,10 +14,27 @@ use moka::sync::Cache;
 use snafu::{ResultExt, Snafu};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::{Mutex, Semaphore};
+use tokio::time::Instant;
 use tokio_socks::tcp::Socks5Stream;
 
 const DNS_CACHE_CAPACITY: u64 = 4096;
 const DNS_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const DNS_TIMEOUT: Duration = Duration::from_secs(3);
+const DNS_REFRESH_FLOOR: Duration = Duration::from_secs(2);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+const EXTERNAL_PROXY_TIMEOUT: Duration = Duration::from_secs(15);
+const ADDRESS_TIMEOUT: Duration = Duration::from_secs(3);
+const ADDRESS_STAGGER: Duration = Duration::from_millis(250);
+static DNS_SLOTS: Semaphore = Semaphore::const_new(8);
+
+struct DnsEntry {
+    addresses: Arc<[IpAddr]>,
+    refreshed: Instant,
+}
+
+static DNS_LOOKUPS: LazyLock<Cache<String, Arc<Mutex<()>>>> =
+    LazyLock::new(|| Cache::builder().max_capacity(DNS_CACHE_CAPACITY).build());
 
 /// Bounded, expiring cache for system DNS results.
 ///
@@ -25,7 +42,7 @@ const DNS_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 /// the process remains alive. A permanent single-address cache made both cases
 /// fail until restart and allowed arbitrary destination names to grow memory
 /// without a limit.
-static DNS_CACHE: LazyLock<Cache<String, Arc<[IpAddr]>>> = LazyLock::new(|| {
+static DNS_CACHE: LazyLock<Cache<String, Arc<DnsEntry>>> = LazyLock::new(|| {
     Cache::builder()
         .max_capacity(DNS_CACHE_CAPACITY)
         .time_to_live(DNS_CACHE_TTL)
@@ -77,6 +94,10 @@ fn dns_cache_key(host: &str) -> String {
 
 /// Resolve all addresses for a host through the bounded process cache.
 pub async fn resolve_host_addresses(host: &str) -> std::io::Result<Arc<[IpAddr]>> {
+    resolve_addresses(host, false).await
+}
+
+async fn resolve_addresses(host: &str, refresh: bool) -> std::io::Result<Arc<[IpAddr]>> {
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(Arc::from([ip]));
     }
@@ -88,34 +109,62 @@ pub async fn resolve_host_addresses(host: &str) -> std::io::Result<Arc<[IpAddr]>
             "DNS host is empty",
         ));
     }
-    if let Some(cached) = DNS_CACHE.get(&cache_key) {
-        tracing::debug!(host, addresses = ?cached, "DNS cache hit");
-        return Ok(cached);
-    }
-
-    let mut addresses = match tokio::net::lookup_host((host, 0)).await {
-        Ok(addresses) => addresses.map(|address| address.ip()).collect(),
-        Err(error) => {
-            tracing::warn!(host, %error, "system DNS failed, falling back to secondary resolvers");
-            Vec::new()
+    let lookup = async {
+        let gate = DNS_LOOKUPS.get_with(cache_key.clone(), || Arc::new(Mutex::new(())));
+        let _guard = gate.lock().await;
+        if let Some(cached) = DNS_CACHE.get(&cache_key)
+            && (!refresh || cached.refreshed.elapsed() < DNS_REFRESH_FLOOR)
+        {
+            return Ok(Arc::clone(&cached.addresses));
         }
-    };
-    if addresses.is_empty() {
-        addresses = uni_stream::addr::get_ip_addrs(host).await?;
-    }
-    let mut seen = HashSet::with_capacity(addresses.len());
-    addresses.retain(|address| seen.insert(*address));
-    if addresses.is_empty() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "Empty DNS record",
-        ));
-    }
 
-    let addresses: Arc<[IpAddr]> = addresses.into();
-    DNS_CACHE.insert(cache_key, Arc::clone(&addresses));
-    tracing::debug!(host, ?addresses, "DNS resolved and cached");
-    Ok(addresses)
+        // The permit stays with the OS call even if the async waiter times out.
+        // Cancelling lookup_host itself otherwise leaves an unbounded blocking job.
+        let permit = DNS_SLOTS.acquire().await.map_err(std::io::Error::other)?;
+        let owned_host = host.to_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            (owned_host.as_str(), 0)
+                .to_socket_addrs()
+                .map(|it| it.collect::<Vec<_>>())
+        })
+        .await
+        .map_err(std::io::Error::other)?;
+        let mut addresses = match result {
+            Ok(addresses) => addresses.into_iter().map(|address| address.ip()).collect(),
+            Err(error) => {
+                tracing::warn!(host, %error, "system DNS failed, falling back to secondary resolvers");
+                Vec::new()
+            }
+        };
+        if addresses.is_empty() {
+            addresses = uni_stream::addr::get_ip_addrs(host).await?;
+        }
+        let mut seen = HashSet::with_capacity(addresses.len());
+        addresses.retain(|address| seen.insert(*address));
+        if addresses.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Empty DNS record",
+            ));
+        }
+
+        let addresses: Arc<[IpAddr]> = addresses.into();
+        DNS_CACHE.insert(
+            cache_key,
+            Arc::new(DnsEntry {
+                addresses: Arc::clone(&addresses),
+                refreshed: Instant::now(),
+            }),
+        );
+        tracing::debug!(host, ?addresses, "DNS resolved and cached");
+        Ok(addresses)
+    };
+    tokio::time::timeout(DNS_TIMEOUT, lookup)
+        .await
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "DNS lookup budget exhausted")
+        })?
 }
 
 /// Resolves a hostname to the first currently preferred IP address.
@@ -131,30 +180,80 @@ pub async fn resolve_host(host: &str) -> std::io::Result<IpAddr> {
 /// Connect to every resolved address in resolver preference order, refreshing
 /// the cache once when all cached candidates fail.
 pub async fn connect_tcp_host(host: &str, port: u16) -> std::io::Result<TcpStream> {
-    let mut addresses = resolve_host_addresses(host).await?;
-    let mut socket_addresses = addresses
-        .iter()
-        .map(|address| std::net::SocketAddr::new(*address, port))
-        .collect::<Vec<std::net::SocketAddr>>();
-
-    match TcpStream::connect(socket_addresses.as_slice()).await {
-        Ok(stream) => return Ok(stream),
-        Err(_) if host.parse::<IpAddr>().is_err() => {
-            // A cached endpoint can disappear before its TTL expires. Force
-            // one fresh lookup before reporting the connection failure.
-            DNS_CACHE.invalidate(&dns_cache_key(host));
-            addresses = resolve_host_addresses(host).await?;
-            socket_addresses.clear();
-            socket_addresses.extend(
-                addresses
-                    .iter()
-                    .map(|address| std::net::SocketAddr::new(*address, port)),
-            );
+    tokio::time::timeout(CONNECT_TIMEOUT, async {
+        let addresses = resolve_host_addresses(host).await?;
+        match race_addresses(&addresses, port, TcpStream::connect).await {
+            Ok(stream) => Ok(stream),
+            Err(error) if host.parse::<IpAddr>().is_err() => {
+                let refreshed = resolve_addresses(host, true).await?;
+                if refreshed == addresses {
+                    return Err(error);
+                }
+                race_addresses(&refreshed, port, TcpStream::connect).await
+            }
+            Err(error) => Err(error),
         }
-        Err(source) => return Err(source),
-    }
+    })
+    .await
+    .map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "TCP connection budget exhausted",
+        )
+    })?
+}
 
-    TcpStream::connect(socket_addresses.as_slice()).await
+// At most two sockets are in flight. A blackholed preferred address must not
+// delay the other family until the operating system's SYN retries expire.
+async fn race_addresses<T, F, Fut>(
+    addresses: &[IpAddr],
+    port: u16,
+    connect: F,
+) -> std::io::Result<T>
+where
+    F: Fn(SocketAddr) -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<T>>,
+{
+    use futures::StreamExt;
+    use futures::stream::FuturesUnordered;
+    let mut ordered = addresses.to_vec();
+    if let Some(first) = ordered.first()
+        && let Some(other) = ordered
+            .iter()
+            .position(|ip| ip.is_ipv4() != first.is_ipv4())
+    {
+        let other = ordered.remove(other);
+        ordered.insert(1, other);
+    }
+    let mut remaining = ordered.into_iter();
+    let mut pending = FuturesUnordered::new();
+    let mut next_start = Instant::now();
+    let mut last_error = std::io::Error::new(std::io::ErrorKind::NotFound, "Empty DNS record");
+    loop {
+        if pending.is_empty() || (pending.len() < 2 && Instant::now() >= next_start) {
+            if let Some(ip) = remaining.next() {
+                pending.push(tokio::time::timeout(
+                    ADDRESS_TIMEOUT,
+                    connect(SocketAddr::new(ip, port)),
+                ));
+                next_start = Instant::now() + ADDRESS_STAGGER;
+            } else if pending.is_empty() {
+                return Err(last_error);
+            }
+        }
+        tokio::select! {
+            result = pending.next(), if !pending.is_empty() => {
+                match result {
+                    Some(Ok(Ok(stream))) => return Ok(stream),
+                    Some(Ok(Err(error))) => last_error = error,
+                    Some(Err(_)) => last_error = std::io::Error::new(std::io::ErrorKind::TimedOut, "TCP address timed out"),
+                    None => {}
+                }
+                next_start = Instant::now();
+            }
+            _ = tokio::time::sleep_until(next_start), if pending.len() < 2 && remaining.len() > 0 => {}
+        }
+    }
 }
 
 /// Establishes a TCP connection to the given host and port.
@@ -309,6 +408,23 @@ pub async fn get_tcp_external_proxy_stream(
     port: u16,
     detail: &'static str,
 ) -> Result<TcpStream> {
+    tokio::time::timeout(
+        EXTERNAL_PROXY_TIMEOUT,
+        negotiate_external_proxy(proxy, host, port, detail),
+    )
+    .await
+    .map_err(|_| TransportError::ExternalProxy {
+        proxy: proxy.display_url(),
+        detail: "proxy connection and handshake exceeded 15 seconds".to_string(),
+    })?
+}
+
+async fn negotiate_external_proxy(
+    proxy: &ExternalProxyTarget,
+    host: &str,
+    port: u16,
+    detail: &'static str,
+) -> Result<TcpStream> {
     match proxy.kind {
         ExternalProxyKind::Socks5 => {
             let proxy_stream = get_tcp_stream(proxy.host.as_str(), proxy.port, detail).await?;
@@ -346,7 +462,11 @@ pub async fn get_tcp_external_proxy_stream(
         }
         ExternalProxyKind::Http => {
             let mut stream = get_tcp_stream(proxy.host.as_str(), proxy.port, detail).await?;
-            let authority = format!("{host}:{port}");
+            let authority = if host.parse::<std::net::Ipv6Addr>().is_ok() {
+                format!("[{host}]:{port}")
+            } else {
+                format!("{host}:{port}")
+            };
             let mut request = format!(
                 "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Connection: \
                  Keep-Alive\r\n"
@@ -366,26 +486,12 @@ pub async fn get_tcp_external_proxy_stream(
                 })?;
 
             let mut response = Vec::new();
-            let mut chunk = [0u8; 512];
-            while !response.windows(4).any(|window| window == b"\r\n\r\n") {
-                if response.len() > 16 * 1024 {
-                    return Err(TransportError::ExternalProxy {
-                        proxy: proxy.display_url(),
-                        detail: "HTTP proxy response headers too large".to_string(),
-                    });
-                }
-                let n = stream.read(&mut chunk).await.with_context(|_| IoSnafu {
+            read_http_header(&mut stream, &mut response, 16 * 1024)
+                .await
+                .with_context(|_| IoSnafu {
                     uri: Some(proxy.display_url()),
                     detail: "read http proxy connect response",
                 })?;
-                if n == 0 {
-                    return Err(TransportError::ExternalProxy {
-                        proxy: proxy.display_url(),
-                        detail: "HTTP proxy closed connection during CONNECT".to_string(),
-                    });
-                }
-                response.extend_from_slice(&chunk[..n]);
-            }
 
             let Some(headers_end) = response.windows(4).position(|window| window == b"\r\n\r\n")
             else {
@@ -409,6 +515,46 @@ pub async fn get_tcp_external_proxy_stream(
             Ok(stream)
         }
     }
+}
+
+/// Append one HTTP header through its terminating CRLF pair, leaving payload
+/// bytes on the socket. `header` may contain an already-read protocol prefix.
+/// The caller owns the setup deadline and the maximum header size.
+pub async fn read_http_header(
+    stream: &mut TcpStream,
+    header: &mut Vec<u8>,
+    limit: usize,
+) -> std::io::Result<()> {
+    let mut chunk = [0; 4096];
+    while !header.ends_with(b"\r\n\r\n") {
+        if header.len() >= limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "HTTP proxy header exceeds its size limit",
+            ));
+        }
+        let capacity = chunk.len().min(limit - header.len());
+        let n = stream.peek(&mut chunk[..capacity]).await?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "incomplete HTTP proxy header",
+            ));
+        }
+        // A header can share a packet with a request body or a tunnel greeting.
+        // Inspect the previous three bytes too, in case CRLF straddles reads.
+        let prefix = header.len().min(3);
+        let mut boundary = [0; 4099];
+        boundary[..prefix].copy_from_slice(&header[header.len() - prefix..]);
+        boundary[prefix..prefix + n].copy_from_slice(&chunk[..n]);
+        let consume = boundary[..prefix + n]
+            .windows(4)
+            .position(|bytes| bytes == b"\r\n\r\n")
+            .map_or(n, |end| end + 4 - prefix);
+        stream.read_exact(&mut chunk[..consume]).await?;
+        header.extend_from_slice(&chunk[..consume]);
+    }
+    Ok(())
 }
 
 /// Returns a message key if the given IP requires encryption.
@@ -448,6 +594,123 @@ mod tests {
     #[test]
     fn dns_cache_keys_are_case_and_root_dot_insensitive() {
         assert_eq!(dns_cache_key("Example.COM."), "example.com");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn silent_external_proxies_release_the_connection_at_the_setup_deadline() {
+        for scheme in ["http", "socks5h"] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let proxy = ExternalProxyTarget::parse(&format!(
+                "{scheme}://{}",
+                listener.local_addr().unwrap()
+            ))
+            .unwrap();
+            let client = tokio::spawn(async move {
+                get_tcp_external_proxy_stream(&proxy, "example.test", 443, "deadline test").await
+            });
+            let (mut peer, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            assert!(peer.read(&mut request).await.unwrap() > 0);
+            tokio::time::advance(EXTERNAL_PROXY_TIMEOUT).await;
+            let error = client.await.unwrap().unwrap_err();
+            assert!(error.to_string().contains("handshake exceeded 15 seconds"));
+            let mut rest = Vec::new();
+            peer.read_to_end(&mut rest).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn http_connect_preserves_coalesced_payload_and_formats_ipv6_authorities() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy =
+            ExternalProxyTarget::parse(&format!("http://{}", listener.local_addr().unwrap()))
+                .unwrap();
+        let server = tokio::spawn(async move {
+            let (mut peer, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(peer.read_u8().await.unwrap());
+            }
+            assert!(request.starts_with(b"CONNECT [::1]:443 HTTP/1.1\r\n"));
+            // Split the delimiter across reads, then coalesce its end with data.
+            peer.write_all(b"HTTP/1.1 200 OK\r\n\r").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            peer.write_all(b"\nserver greeting").await.unwrap();
+        });
+        let mut stream = get_tcp_external_proxy_stream(&proxy, "::1", 443, "payload test")
+            .await
+            .unwrap();
+        let mut payload = Vec::new();
+        stream.read_to_end(&mut payload).await.unwrap();
+        assert_eq!(payload, b"server greeting");
+        server.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_blackholed_preferred_address_does_not_delay_the_other_family() {
+        let started = Instant::now();
+        let ips = [
+            "::1".parse().unwrap(),
+            "::2".parse().unwrap(),
+            "127.0.0.1".parse().unwrap(),
+        ];
+        let connected = race_addresses(&ips, 80, |address| async move {
+            if address.is_ipv6() {
+                std::future::pending::<()>().await;
+            }
+            Ok(address)
+        })
+        .await
+        .unwrap();
+        assert!(connected.is_ipv4());
+        assert_eq!(started.elapsed(), ADDRESS_STAGGER);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_candidates_advance_without_the_stagger_delay() {
+        let started = Instant::now();
+        let ips = ["127.0.0.1".parse().unwrap(), "127.0.0.2".parse().unwrap()];
+        let connected = race_addresses(&ips, 80, |address| async move {
+            if address.ip() == "127.0.0.1".parse::<IpAddr>().unwrap() {
+                return Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused));
+            }
+            Ok(address)
+        })
+        .await
+        .unwrap();
+        assert_eq!(connected.ip(), ips[1]);
+        assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_a_stalled_dial_drops_every_candidate_and_bounds_concurrency() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Active(Arc<AtomicUsize>);
+        impl Drop for Active {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let count = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let ips = (1..=20)
+            .map(|n| IpAddr::from([127, 0, 0, n]))
+            .collect::<Vec<_>>();
+        let attempt = race_addresses(&ips, 80, |_| {
+            let active = Active(Arc::clone(&count));
+            peak.fetch_max(count.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+            async move {
+                let _active = active;
+                std::future::pending::<std::io::Result<()>>().await
+            }
+        });
+        assert!(
+            tokio::time::timeout(CONNECT_TIMEOUT, attempt)
+                .await
+                .is_err()
+        );
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+        assert_eq!(count.load(Ordering::SeqCst), 0);
     }
 
     async fn start_echo_server() -> String {

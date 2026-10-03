@@ -17,7 +17,7 @@ use tokio::time::{Duration, timeout};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
-async fn socks5_udp_associate_supports_plain_encrypted_and_chained_relays() {
+async fn local_proxy_supports_plain_encrypted_http_and_udp_with_chained_relays() {
     let echo_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let echo_addr = echo_socket.local_addr().unwrap();
     let echo_task = tokio::spawn(async move {
@@ -85,6 +85,15 @@ async fn socks5_udp_associate_supports_plain_encrypted_and_chained_relays() {
         DatagramAddress::Ip(echo_addr),
         DatagramAddress::Ip(echo_addr),
         b"udp-through-plain-proxy",
+        false,
+    )
+    .await;
+    assert_udp_round_trip(
+        plain_addr,
+        DatagramAddress::Ip(echo_addr),
+        DatagramAddress::Ip(echo_addr),
+        b"udp-after-malformed-unpinned-packet",
+        true,
     )
     .await;
 
@@ -112,8 +121,12 @@ async fn socks5_udp_associate_supports_plain_encrypted_and_chained_relays() {
         DatagramAddress::Ip(echo_addr),
         DatagramAddress::Ip(echo_addr),
         b"udp-through-encrypted-proxy",
+        false,
     )
     .await;
+
+    assert_http_round_trip(plain_addr).await;
+    assert_http_round_trip(client_addr).await;
 
     let chained_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let chained_addr = chained_listener.local_addr().unwrap();
@@ -142,6 +155,7 @@ async fn socks5_udp_associate_supports_plain_encrypted_and_chained_relays() {
         DatagramAddress::Domain("127.0.0.1".to_string(), echo_addr.port()),
         DatagramAddress::Ip(echo_addr),
         b"udp-through-socks5-chain",
+        false,
     )
     .await;
 
@@ -196,11 +210,46 @@ async fn socks5_udp_associate_returns_command_not_supported_when_disabled() {
     task.await.unwrap();
 }
 
+async fn assert_http_round_trip(client_addr: std::net::SocketAddr) {
+    let destination = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = destination.local_addr().unwrap();
+    let echo = tokio::spawn(async move {
+        let (mut stream, _) = destination.accept().await.unwrap();
+        let (mut reader, mut writer) = stream.split();
+        tokio::io::copy(&mut reader, &mut writer).await.unwrap();
+    });
+    let mut stream = TcpStream::connect(client_addr).await.unwrap();
+    let request = format!(
+        "POST http://{target}/ HTTP/1.1\r\nHost: {target}\r\nContent-Length: 8\r\n\r\nbodydata"
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = vec![0; request.len()];
+    timeout(Duration::from_secs(3), stream.read_exact(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response, request.as_bytes());
+    // A later write must continue the existing encryption nonce sequence.
+    stream.write_all(b"later body").await.unwrap();
+    let mut later = [0; 10];
+    timeout(Duration::from_secs(3), stream.read_exact(&mut later))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&later, b"later body");
+    drop(stream);
+    timeout(Duration::from_secs(3), echo)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 async fn assert_udp_round_trip(
     client_addr: std::net::SocketAddr,
     destination: DatagramAddress,
     expected_source: DatagramAddress,
     payload: &[u8],
+    unspecified_port: bool,
 ) {
     let udp_client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut control = TcpStream::connect(client_addr).await.unwrap();
@@ -209,7 +258,10 @@ async fn assert_udp_round_trip(
     control.read_exact(&mut method).await.unwrap();
     assert_eq!(method, [0x05, 0x00]);
 
-    let udp_client_addr = udp_client.local_addr().unwrap();
+    let mut udp_client_addr = udp_client.local_addr().unwrap();
+    if unspecified_port {
+        udp_client_addr.set_port(0);
+    }
     let mut request = vec![0x05, 0x03, 0x00];
     proxy_core::datagram::encode_socks5_address(
         &DatagramAddress::Ip(udp_client_addr),
@@ -219,12 +271,16 @@ async fn assert_udp_round_trip(
     control.write_all(&request).await.unwrap();
     let relay_addr = read_socks5_reply(&mut control).await;
 
-    // A UDP association is pinned to the endpoint declared on its TCP control
-    // connection. A packet from a different source port must not be relayed.
+    // An explicit endpoint rejects other ports. A port-zero association must
+    // ignore malformed first packets without pinning their source endpoint.
     let unexpected_client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let request = encode_socks5_udp_packet(&destination, payload).unwrap();
+    let mut unexpected_request = request.clone();
+    if unspecified_port {
+        unexpected_request[2] = 1;
+    }
     unexpected_client
-        .send_to(&request, relay_addr)
+        .send_to(&unexpected_request, relay_addr)
         .await
         .unwrap();
     let mut ignored_response = [0u8; 2048];

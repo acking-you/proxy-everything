@@ -8,7 +8,7 @@ use proxy_core::codec::{
     AsyncDecryptCodec, AsyncEncryptCodec, AsyncNormalCodec, AsyncReader, AsyncWriter,
 };
 use proxy_core::control::{ControlCodec, is_control_target};
-use proxy_core::metrics::{ConnectionRecord, current_time_ms};
+use proxy_core::metrics::{ConnectionRecord, MetricsStore, current_time_ms};
 use proxy_core::relay::RelayRoute;
 use proxy_core::transport::get_tcp_external_proxy_stream;
 use proxy_core::util::{display_report, error_report};
@@ -28,6 +28,16 @@ use super::{
     ControlSnafu, IoSnafu, MAX_HEADER_SIZE, ProxySnafu, ReadHeaderSnafu, Result, ServerContext,
     ServerError, TransportSnafu,
 };
+
+static HEADER_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(512);
+const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
+
+struct ActiveConnection<'a>(&'a MetricsStore);
+impl Drop for ActiveConnection<'_> {
+    fn drop(&mut self) {
+        self.0.dec_active();
+    }
+}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(super) struct TransferStats {
@@ -180,8 +190,8 @@ pub(super) async fn handle_connect(
     async move {
         tracing::info!("connection accepted");
         ctx.metrics.inc_active();
+        let _active = ActiveConnection(&ctx.metrics);
         let result = handle_connect_inner(conn, peer_addr, ctx.clone(), trace_id).await;
-        ctx.metrics.dec_active();
         if let Err(err) = &result {
             tracing::error!("connection error: {}", error_report(err));
         }
@@ -204,21 +214,35 @@ async fn handle_connect_inner(
 
     let (r, w) = conn.into_split();
     let (mut client_reader, client_writer) = (AsyncReader::new(r), AsyncWriter::new(w));
-    let msg_len = get_data_size(&mut client_reader)
-        .await
-        .context(ReadHeaderSnafu)?;
-    if msg_len > MAX_HEADER_SIZE {
-        return Err(ServerError::HeaderSize { size: msg_len });
-    }
+    let _header_permit = HEADER_SLOTS.try_acquire().map_err(|_| ServerError::Io {
+        detail: "too many pending proxy headers".into(),
+        source: std::io::Error::from(std::io::ErrorKind::WouldBlock),
+    })?;
+    let (msg_len, mut header_buf) = tokio::time::timeout(HEADER_TIMEOUT, async {
+        let msg_len = get_data_size(&mut client_reader)
+            .await
+            .context(ReadHeaderSnafu)?;
+        if msg_len > MAX_HEADER_SIZE {
+            return Err(ServerError::HeaderSize { size: msg_len });
+        }
 
-    const STACK_SIZE: usize = MAX_HEADER_SIZE as usize / 2;
-    let mut header_buf: SmallVec<u8, STACK_SIZE> = smallvec![0u8; msg_len as usize];
-    client_reader
-        .read_exact(&mut header_buf)
-        .await
-        .context(IoSnafu {
-            detail: "Read Header(addr,tag)",
-        })?;
+        const STACK_SIZE: usize = MAX_HEADER_SIZE as usize / 2;
+        let mut header_buf: SmallVec<u8, STACK_SIZE> = smallvec![0u8; msg_len as usize];
+        client_reader
+            .read_exact(&mut header_buf)
+            .await
+            .context(IoSnafu {
+                detail: "Read Header(addr,tag)",
+            })?;
+
+        Ok::<_, ServerError>((msg_len, header_buf))
+    })
+    .await
+    .map_err(|_| ServerError::Io {
+        detail: "proxy header deadline exceeded".into(),
+        source: std::io::Error::from(std::io::ErrorKind::TimedOut),
+    })??;
+    drop(_header_permit);
 
     // Get relay context before mutate
     let relay_context = ctx.relay.select().map(|v| (v, header_buf.clone()));
@@ -338,9 +362,16 @@ async fn handle_connect_inner(
 
         match &relay_target.route {
             RelayRoute::ProxyServer { addr } => {
-                let relay_stream = TcpStream::connect(addr).await.context(IoSnafu {
-                    detail: format!("Connect to relay_server:{addr}"),
-                })?;
+                let relay_stream =
+                    tokio::time::timeout(Duration::from_secs(8), TcpStream::connect(addr))
+                        .await
+                        .map_err(|_| ServerError::Io {
+                            detail: "relay connection deadline exceeded".into(),
+                            source: std::io::Error::from(std::io::ErrorKind::TimedOut),
+                        })?
+                        .context(IoSnafu {
+                            detail: format!("Connect to relay_server:{addr}"),
+                        })?;
                 ctx.relay.on_connect(&relay_target.id);
                 let (r, w) = relay_stream.into_split();
                 let (server_reader, mut server_writer) = (AsyncReader::new(r), AsyncWriter::new(w));
@@ -429,7 +460,7 @@ async fn handle_connect_inner(
         "dest",
         field::display(format!("{}:{}", header.host, header.port)),
     );
-    let dest_stream = TcpStream::connect((header.host.as_str(), header.port))
+    let dest_stream = proxy_core::transport::connect_tcp_host(header.host.as_str(), header.port)
         .await
         .context(IoSnafu {
             detail: format!("Connect to `dest_server({})`", header),

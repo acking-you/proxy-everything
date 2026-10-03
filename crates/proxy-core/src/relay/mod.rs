@@ -79,7 +79,7 @@ pub enum ExternalProxyKind {
     Http,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ExternalProxyTarget {
     pub kind: ExternalProxyKind,
     pub host: String,
@@ -87,6 +87,18 @@ pub struct ExternalProxyTarget {
     pub username: Option<String>,
     pub password: Option<String>,
     pub remote_dns: bool,
+}
+
+impl std::fmt::Debug for ExternalProxyTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExternalProxyTarget")
+            .field("kind", &self.kind)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("authenticated", &self.username.is_some())
+            .field("remote_dns", &self.remote_dns)
+            .finish()
+    }
 }
 
 impl ExternalProxyTarget {
@@ -247,6 +259,18 @@ pub struct TargetStatus {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn debug_output_never_contains_external_proxy_credentials() {
+        let proxy = super::ExternalProxyTarget::parse(
+            "socks5://private-user:private-password@localhost:1080",
+        )
+        .unwrap();
+        let debug = format!("{proxy:?}");
+        assert!(!debug.contains("private-user"));
+        assert!(!debug.contains("private-password"));
+        assert!(debug.contains("localhost"));
+    }
+
     use super::*;
 
     #[test]

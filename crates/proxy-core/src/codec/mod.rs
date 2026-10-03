@@ -56,6 +56,15 @@ impl<T: tokio::io::AsyncReadExt + Unpin> AsyncReader<T> {
     pub fn new(reader: T) -> Self {
         Self(reader)
     }
+
+    /// Replay already-read bytes through the same codec as the remaining stream.
+    pub fn prepend(
+        self,
+        prefix: Vec<u8>,
+    ) -> AsyncReader<tokio::io::Chain<std::io::Cursor<Vec<u8>>, T>> {
+        use tokio::io::AsyncReadExt;
+        AsyncReader::new(std::io::Cursor::new(prefix).chain(self.0))
+    }
 }
 
 #[cfg(feature = "tokio")]

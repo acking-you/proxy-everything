@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [ValidateSet("Debug", "Release")]
-    [string]$Configuration = "Debug"
+    [string]$Configuration = "Debug",
+    [switch]$Offline
 )
 
 Set-StrictMode -Version Latest
@@ -25,7 +26,10 @@ foreach ($command in @("cargo", "fvm")) {
 
 Push-Location $repoRoot
 try {
-    $cargoArgs = @("build", "--workspace")
+    $cargoArgs = @("build", "--workspace", "--locked")
+    if ($Offline) {
+        $cargoArgs += "--offline"
+    }
     if ($Configuration -eq "Release") {
         $cargoArgs += "--release"
     }
@@ -39,11 +43,15 @@ try {
 
     Push-Location $uiRoot
     try {
-        & fvm flutter pub get
+        $pubArgs = @("flutter", "pub", "get")
+        if ($Offline) {
+            $pubArgs += "--offline"
+        }
+        & fvm @pubArgs
         if ($LASTEXITCODE -ne 0) {
             throw "Resolving Flutter dependencies failed with exit code $LASTEXITCODE."
         }
-        & fvm flutter build windows "--$flutterMode"
+        & fvm flutter build windows "--$flutterMode" --no-pub
         if ($LASTEXITCODE -ne 0) {
             throw "Building the Flutter Windows app failed with exit code $LASTEXITCODE."
         }

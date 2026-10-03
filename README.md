@@ -218,6 +218,7 @@ cargo build --release --bin http-proxy-admin
 
 ## Documentation
 
+- [Network resilience review](docs/network-resilience.md) - 0.4.31 / UI 1.2.17+43 recovery fixes, limits, validation, and remaining legacy protocol risk
 - [Server Deployment (Docker)](docs/server-deployment.md) - Docker deployment guide
 - [Server Deployment (Systemd)](docs/systemd-deployment.md) - Binary + systemd deployment
 - [Client Usage](docs/client-usage.md) - Windows, Linux, macOS, Android, iOS

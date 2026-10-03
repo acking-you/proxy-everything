@@ -277,10 +277,6 @@ impl UdpAssociation {
                         detail: "receive local SOCKS5 UDP packet",
                         source,
                     })?;
-                    if !self.accept_client_endpoint(source) {
-                        tracing::debug!(%source, "discarding SOCKS5 UDP packet from an unexpected client");
-                        continue;
-                    }
                     let packet = &local_buffer[..size];
                     let parsed = match parse_socks5_udp_packet(packet) {
                         Ok(parsed) => parsed,
@@ -289,6 +285,10 @@ impl UdpAssociation {
                             continue;
                         }
                     };
+                    if !self.accept_client_endpoint(source) {
+                        tracing::debug!(%source, "discarding SOCKS5 UDP packet from an unexpected client");
+                        continue;
+                    }
                     tracing::debug!(
                         direction = "client_to_upstream",
                         client = %source,

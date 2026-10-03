@@ -41,7 +41,7 @@ The primary binaries are `http-proxy-server`, `http-proxy-cli`,
 ### Flutter and FVM
 
 - Flutter is managed exclusively with FVM.
-- `ui/flutter/.fvmrc` is the source of truth and currently pins Flutter 3.38.6.
+- `ui/flutter/.fvmrc` is the source of truth and currently pins Flutter 3.44.9.
 - Never use bare `flutter` or `dart` commands for this project. Use
   `fvm flutter ...` and `fvm dart ...` from `ui/flutter`.
 - Run `fvm install` after cloning or after the pinned SDK changes.
@@ -56,6 +56,8 @@ Run these from the repository root in PowerShell:
 # Build all Rust binaries, the FFI DLL, and the Flutter Windows app.
 .\scripts\windows\build.ps1 -Configuration Debug
 .\scripts\windows\build.ps1 -Configuration Release
+# Reuse previously cached Cargo/Pub/Flutter dependencies without resolving online.
+.\scripts\windows\build.ps1 -Configuration Release -Offline
 
 # Run a Rust command-line component.
 .\scripts\windows\run-cli.ps1 server -- -H 127.0.0.1 -p 1081

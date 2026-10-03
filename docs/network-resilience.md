@@ -1,0 +1,115 @@
+# Network resilience review: native 0.4.31 / UI 1.2.17+43
+
+This review starts from native commit `1847db9`, tun2proxy `071b8a4`, and
+ProxyUI `34f9189`. It covers connection setup, TCP/UDP forwarding, Windows
+physical egress recovery, native resource ownership, and UI lifecycle/status.
+It does not establish the cause of any particular past Wi-Fi outage.
+
+## Corrected behavior
+
+| Failure | Change | Owning source |
+| --- | --- | --- |
+| One failed DNS address holds subsequent candidates behind OS SYN retries | Race up to two addresses, promote the other address family, cancel losing attempts, refresh failed cached DNS results | `crates/proxy-core/src/transport.rs` |
+| Cancelled DNS/process lookups leave many blocking jobs behind | Acquire bounded permits before dispatch; the OS job retains its permit even when its waiter is cancelled | `transport.rs`, `deps/tun2proxy/src/process/mod.rs` |
+| A partial local greeting is treated as a complete request; pipelined SOCKS requests are consumed as greeting bytes | Read exactly the greeting length or complete HTTP header, retaining following bytes on the socket | `crates/proxy-client/src/client/mod.rs`, `transport.rs` |
+| HTTP CONNECT consumes a coalesced destination greeting | Peek for the header boundary and consume only that header; format IPv6 CONNECT authorities with brackets | `transport.rs` |
+| The initial ordinary HTTP request bypasses the selected encryption codec | Replay the header through the same codec and nonce sequence as later body bytes | `crates/proxy-client/src/client/http.rs`, `crates/proxy-core/src/codec/mod.rs` |
+| Incomplete local/server handshakes and silent external proxies hold resources indefinitely | Bound setup time and pending handshake counts; leave established streams free of a new idle deadline | client/server connection handlers, `transport.rs` |
+| Full geo lookup queue stalls before the decision timeout even starts | Fall back to the configured proxy immediately when enqueue fails | client `need_proxy` |
+| Malformed first UDP packet pins a port-zero SOCKS association to the wrong endpoint | Validate the datagram before accepting its endpoint | client `udp.rs` |
+| Windows retains obsolete gateway/interface routes after reconnection | Reconcile owned bypass routes against connected physical routes, using prefix and route/interface metrics | `deps/tun2proxy/src/windows_network_config.rs` |
+| Direct process bypass retains an obsolete interface or DHCP DNS snapshot | Refresh Windows egress off the forwarding executor; new sessions use the latest snapshot | tun2proxy `lib.rs`, `direct.rs` |
+| A failed forwarding direction waits for its peer until idle expiry | Propagate errors, cancel the opposite pump, reset failed or capacity-rejected TCP sessions; preserve normal EOF half-close behavior | tun2proxy `lib.rs` |
+| Cancelled server sessions leak active-connection counts | Use a drop guard | `crates/proxy-server/src/server/connection.rs` |
+| Native warning storms or a stalled UI accumulate callback work/strings | Bound warning rate, message size, and outstanding native allocations; report suppression | `crates/proxy-ffi/src/logging.rs` |
+| Stop, latency checks and destruction overlap across Dart isolates | Serialize handle borrowers and defer off-thread destruction until borrowers return | UI `native_operation_queue.dart`, `proxy_service.dart` |
+| Queued native logs call a closed Dart callback | Retain a single callback for the UI isolate lifetime | UI `proxy_service.dart` |
+| UI remains connected when the worker dies without emitting a log | Independently reconcile native status once per second; retain a surviving TUN's visible stop control | UI `proxy_provider.dart` |
+| Debug output exposes session keys or upstream proxy passwords | Remove secret fields and redact external proxy Debug output | client `mod.rs`, core `relay/mod.rs` |
+| Legacy nonce counter panics in debug or wraps in release | Fail closed at exhaustion, retaining the wire encoding of existing counters | core `crypto/mod.rs` |
+
+## Budgets and ownership
+
+- DNS: 4,096 cached hostnames, five-minute TTL, three-second lookup budget,
+  eight OS lookups at once, same-host coalescing and a two-second refresh floor.
+  A timed-out OS call may continue, but it continues to occupy its slot.
+- TCP address selection: eight seconds including DNS, three seconds per
+  address, 250 ms initial stagger, at most two live attempts. Immediate failure
+  advances immediately. External SOCKS5/HTTP setup has a 15-second total budget.
+- Local handshake: 15 seconds, at most 256 pending setups, HTTP headers capped
+  at 32 KiB. Relay incoming headers: ten seconds, at most 512 pending headers.
+- TUN: the existing one-second interface monitor also reconciles owned bypass
+  routes. A separate sequential two-second egress lookup updates new sessions.
+  TCP connect/proxy negotiation has a ten-second deadline after handler creation;
+  this is not a ten-second bound on all process lookup or DNS work.
+- Route recovery installs a replacement before deleting its owned predecessor.
+  Offline state retains the loop barrier. Failed deletion retains both ownership
+  records for cleanup. Preexisting replacements never become teardown-owned.
+  Capture/default routes and unrelated routes are not removed by recovery.
+- Process discovery uses one blocking lookup per matcher, with asynchronous
+  waiters. Established sessions retain their pinned process identity.
+- Native logs: 512 ordinary plus 64 warning/error callbacks per second, with a
+  suppression summary; at most 1,024 pending strings, each at most 8 KiB.
+  Rust's matching free function releases each allocation and its slot.
+
+Existing TCP sessions cannot migrate between physical network paths. Recovery
+helps new connections and gives failed callers a prompt failure so they can
+retry. It cannot make a genuinely offline interface deliver traffic.
+
+## Validation and safe rollout
+
+Regression coverage includes fragmented and pipelined HTTP/SOCKS greetings,
+HTTP request headers and bodies through plain and encrypted relays, coalesced
+CONNECT response payloads, silent external proxies, bounded address racing,
+partial server headers, cancellation metrics, UDP endpoint poisoning, Windows
+route ownership/rollback, bounded logs, and Dart operation/disposal ordering.
+The modified loopback HTTP CONNECT and SOCKS5 tests fail with the original
+greeting implementation and pass with the fix.
+
+Windows route tests use mock operations. Builds and loopback tests run in a
+separate Windows directory. Verification does not switch the live TUN, change
+DNS, restart the current proxy, or deliberately disconnect Wi-Fi. Consequently,
+real adapter handover and live TUN routing recovery remain unverified.
+
+The 2026-10-03 checks passed 215 Linux and 219 Windows workspace tests (six
+preexisting ignored tests on each), 54 Linux and 75 Windows tun2proxy tests,
+strict Clippy on both platforms, formatting, Flutter analysis, and 99 Flutter
+tests (two preexisting skips). Windows x64 Release binaries and `http_proxy.dll`
+built successfully. The complete UI build stopped at Visual Studio discovery:
+Flutter reported no suitable toolchain, and the installed `vswhere.exe` failed
+with `0x80070583` / `0x80070008` despite the available Rust MSVC toolchain.
+No complete Windows UI bundle was produced or installed. Repairing the system
+toolchain or restarting the host was not part of this non-disruptive review.
+
+Use the complete Windows release directory or ZIP, not an isolated EXE/DLL.
+The native and UI sources must move together. The supported build command is
+`scripts/windows/build.ps1 -Configuration Release`; use `-Offline` when Cargo,
+Pub and Flutter's Windows build dependencies are already cached. Cargo uses
+the committed lockfile; Flutter dependency resolution runs once before build.
+
+## Open security issue: legacy AEAD nonce reuse
+
+The old wire protocol initializes the AES-GCM counter to zero in each
+encryptor. Headers reuse a configured long-term key across connections, and
+bidirectional streams use the same session key with independent counters.
+This repeats key/nonce pairs. A per-stream overflow check does **not** repair
+that design, and removing key logs does not make the protocol cryptographically
+sound. No exploitation or historical compromise was established by this review.
+The uniqueness requirement and consequences are specified in
+[NIST SP 800-38D, section 8 and appendix A](https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-38d.pdf).
+
+A complete fix must version the connection preface and update both endpoints:
+
+1. Authenticate the protocol version and a fresh connection salt, and derive
+   separate header, client-to-server, and server-to-client keys with explicit
+   domain separation. Never reuse the legacy shared-key/zero-counter scheme.
+2. Specify replay handling, framing limits, nonce exhaustion, and authentication
+   failure behavior. Reject a failed authenticated negotiation instead of
+   silently downgrading it to the legacy format.
+3. Add mixed-version and adversarial tests, then stage server support before
+   switching clients. Legacy acceptance must be explicit and observable, with
+   a removal path rather than an indefinite automatic fallback.
+
+This patch preserves existing wire compatibility and does not claim to close
+that issue. Deploying a protocol migration is a separate coordinated change;
+silently changing the cipher here would disconnect existing clients/servers.

@@ -88,7 +88,7 @@ impl ForwarderProvider for SocksProxierProvider {
             .context(SocksProxySnafu)?
         }
         let n = header_context.header[1];
-        if ((header_context.header.len() - 2) as u8) < n {
+        if header_context.header.len() - 2 < usize::from(n) {
             FirstRequestSnafu {
                 detail: "`METHODS` not valid",
             }
@@ -136,6 +136,7 @@ impl ForwarderProvider for SocksProxierProvider {
                 let (client_reader, client_writer) = split_and_wrap(proxy_context.stream);
                 let (server_reader, server_writer) = split_and_wrap(server_stream);
                 Ok(SocksForwarder::Tcp(TcpForwardImpl {
+                    initial_request: Vec::new(),
                     context: ForwardContext {
                         host,
                         port,

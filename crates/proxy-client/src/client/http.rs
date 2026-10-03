@@ -183,12 +183,18 @@ impl ForwarderProvider for HttpProxierProvider {
     // when it is https proxy we will decide start proxy or not
     async fn try_build_forwarder(self, mut context: ProxyContext<'_>) -> super::Result<Self::Item> {
         let (server_stream, need_proxy, msg_key) = self.get_server_stream(&mut context).await?;
+        let initial_request = if !self.has_ssl && need_proxy && msg_key.is_some() {
+            context.buffer.to_vec()
+        } else {
+            Vec::new()
+        };
 
         // Split streams using common helper
         let (client_reader, client_writer) = split_and_wrap(context.stream);
         let (server_reader, server_writer) = split_and_wrap(server_stream);
 
         Ok(TcpForwardImpl {
+            initial_request,
             context: ForwardContext {
                 need_proxy,
                 host: self.host,
@@ -336,14 +342,18 @@ impl HttpProxierProvider {
                     ),
                 }
             };
-            server_stream
-                .write_all(context.buffer)
-                .await
-                .with_context(|_| IoSnafu {
-                    uri: Some(self.get_uri()),
-                    detail: "http direct proxy first write error",
-                })
-                .context(HttpProxySnafu)?;
+            // An encrypted stream must send the initial HTTP header through
+            // the same codec and nonce sequence as the body that follows it.
+            if !need_proxy || msg_key.is_none() {
+                server_stream
+                    .write_all(context.buffer)
+                    .await
+                    .with_context(|_| IoSnafu {
+                        uri: Some(self.get_uri()),
+                        detail: "http direct proxy first write error",
+                    })
+                    .context(HttpProxySnafu)?;
+            }
 
             Ok((server_stream, need_proxy, msg_key))
         } else {
