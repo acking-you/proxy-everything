@@ -33,7 +33,7 @@
 //!
 //! ```text
 //! ┌──────────────────────────────────────────────────────────┐
-//! │  [4-byte length][JSON payload][16-byte auth tag if enc]  │
+//! │  [checksum:u32][length:u32][JSON][optional 16-byte tag]  │
 //! └──────────────────────────────────────────────────────────┘
 //! ```
 
@@ -48,11 +48,10 @@ use crate::metrics::{
     ConnectionRecord, Granularity, RealtimeSnapshot, TimeBucket, TopCategory, TrafficStats,
 };
 use crate::nodes::{NodeGroup, NodeInfo};
+use crate::protocol::{FrameReader, FrameWriter, MAX_DATA_SIZE};
 use crate::relay::{LoadBalanceAlgo, RelayConfig, RelayStatus, UpstreamTarget};
 use crate::transport::{TransportError, get_tcp_proxy_stream};
-use crate::{
-    Aes256GcmCryption, MyAsyncReadExt, MyAsyncWriteExt, ProxyError, get_data_size, set_data_size,
-};
+use crate::{MyAsyncReadExt, MyAsyncWriteExt, ProxyError};
 
 pub const CONTROL_HOST: &str = "__control__";
 pub const CONTROL_PORT: u16 = 0;
@@ -181,9 +180,8 @@ pub struct TopNEntry {
 }
 
 pub struct ControlCodec<R, W> {
-    reader: R,
-    writer: W,
-    cryptor: Option<Aes256GcmCryption>,
+    reader: FrameReader<R>,
+    writer: FrameWriter<W>,
 }
 
 impl<R, W> ControlCodec<R, W>
@@ -192,19 +190,11 @@ where
     W: MyAsyncWriteExt + Send + Unpin,
 {
     pub fn new(reader: R, writer: W, session_key: Option<&str>) -> Result<Self> {
-        let cryptor = if let Some(key) = session_key {
-            Some(
-                Aes256GcmCryption::try_new(key.as_bytes()).map_err(|e| ControlError::Crypto {
-                    detail: e.to_string(),
-                })?,
-            )
-        } else {
-            None
-        };
         Ok(Self {
-            reader,
-            writer,
-            cryptor,
+            reader: FrameReader::new(reader, session_key, MAX_DATA_SIZE as usize)
+                .context(ProtocolSnafu)?,
+            writer: FrameWriter::new(writer, session_key, MAX_DATA_SIZE as usize)
+                .context(ProtocolSnafu)?,
         })
     }
 
@@ -228,51 +218,18 @@ where
     where
         T: for<'de> Deserialize<'de>,
     {
-        let msg_len = match get_data_size(&mut self.reader).await {
-            Ok(len) => len,
-            Err(e) => {
-                if let ProxyError::ProtocolIo { source, .. } = &e
-                    && source.kind() == std::io::ErrorKind::UnexpectedEof
-                {
-                    return Ok(None);
-                }
-                return Err(ControlError::Protocol { source: e });
-            }
-        };
-        let mut buf = vec![0u8; msg_len as usize];
-        self.reader.read_exact(&mut buf).await.context(IoSnafu {
-            detail: "read control payload",
-        })?;
-        let payload = if let Some(cryptor) = self.cryptor.as_mut() {
-            cryptor
-                .decrypt_with_tag(&mut buf)
-                .map_err(|e| ControlError::Crypto {
-                    detail: e.to_string(),
-                })?
-        } else {
-            buf.as_mut_slice()
-        };
-        let message = serde_json::from_slice(payload).context(SerdeJsonSnafu)?;
-        Ok(Some(message))
+        self.reader
+            .read()
+            .await
+            .context(ProtocolSnafu)?
+            .map(|payload| serde_json::from_slice(payload).context(SerdeJsonSnafu))
+            .transpose()
     }
 
     async fn write_message<T: Serialize>(&mut self, message: &T) -> Result<()> {
-        let mut payload = serde_json::to_vec(message).context(SerdeJsonSnafu)?;
-        if let Some(cryptor) = self.cryptor.as_mut() {
-            let tag = cryptor
-                .encrypt(&mut payload)
-                .map_err(|e| ControlError::Crypto {
-                    detail: e.to_string(),
-                })?;
-            payload.extend_from_slice(tag.as_ref());
-        }
-        set_data_size(&mut self.writer, payload.len() as u32)
-            .await
-            .context(ProtocolSnafu)?;
-        self.writer.write_all(&payload).await.context(IoSnafu {
-            detail: "write control payload",
-        })?;
-        Ok(())
+        serde_json::to_writer(self.writer.prepare().context(ProtocolSnafu)?, message)
+            .context(SerdeJsonSnafu)?;
+        self.writer.send().await.context(ProtocolSnafu)
     }
 }
 

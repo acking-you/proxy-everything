@@ -74,13 +74,13 @@ where
     // relay socket ends the association and is recorded in connection metrics.
     let close_reason = loop {
         tokio::select! {
-            request = tunnel_reader.recv() => {
+            request = tunnel_reader.recv_ref() => {
                 let request = match request {
                     Ok(request) => request,
                     Err(error) if error.is_expected_disconnect() => break "client_tunnel_closed",
                     Err(error) => return Err(error).context(DatagramSnafu),
                 };
-                let packet = match parse_socks5_udp_packet(&request) {
+                let packet = match parse_socks5_udp_packet(request) {
                     Ok(packet) => packet,
                     Err(error) => {
                         tracing::debug!(%error, "discarding malformed UDP tunnel request");
@@ -94,7 +94,7 @@ where
                     payload_bytes = payload_len,
                     "relaying UDP request from proxy client"
                 );
-                if let Err(error) = relay_writer.send(&request).await {
+                if let Err(error) = relay_writer.send(request).await {
                     tracing::debug!(
                         remote = ?packet.destination,
                         payload_bytes = payload_len,

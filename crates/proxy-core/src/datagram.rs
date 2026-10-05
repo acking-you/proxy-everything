@@ -12,10 +12,9 @@ use dashmap::DashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 
-use crate::crypto::{Decryptor, Encryptor};
-use crate::protocol::{current_checksum_key, set_data_size_with_key, validate_data_size};
+use crate::protocol::{FrameReader, FrameWriter};
 use crate::relay::{ExternalProxyKind, ExternalProxyTarget};
-use crate::{Aes256GcmDecryptor, Aes256GcmEncryptor, MyAsyncReadExt, MyAsyncWriteExt, ProxyError};
+use crate::{MyAsyncReadExt, MyAsyncWriteExt, ProxyError};
 
 const SOCKS5_VERSION: u8 = 0x05;
 const SOCKS5_NO_AUTH: u8 = 0x00;
@@ -26,6 +25,7 @@ const SOCKS5_ATYP_IPV4: u8 = 0x01;
 const SOCKS5_ATYP_DOMAIN: u8 = 0x03;
 const SOCKS5_ATYP_IPV6: u8 = 0x04;
 const AES_GCM_TAG_LEN: usize = 16;
+#[cfg(test)]
 const DATAGRAM_FRAME_PREFIX_SIZE: usize = 8;
 
 /// Largest UDP packet accepted by the local SOCKS5 relay.
@@ -207,141 +207,48 @@ pub fn encode_socks5_address(address: &DatagramAddress, output: &mut Vec<u8>) ->
 /// the RFC 1928 UDP packet verbatim. Framing packets individually is important:
 /// treating the TCP tunnel as a byte stream would merge or split UDP messages.
 pub struct DatagramTunnelReader<R> {
-    reader: R,
-    decryptor: Option<Aes256GcmDecryptor>,
-    buffer: Vec<u8>,
-    prefix: [u8; DATAGRAM_FRAME_PREFIX_SIZE],
-    prefix_read: usize,
-    frame_size: Option<usize>,
-    frame_read: usize,
-    checksum_key: u32,
+    frame: FrameReader<R>,
 }
 
 impl<R: MyAsyncReadExt + Send + Unpin> DatagramTunnelReader<R> {
     pub fn new(reader: R, key: Option<&str>) -> crate::Result<Self> {
-        let decryptor = key
-            .map(|key| {
-                Aes256GcmDecryptor::try_new(key.as_bytes()).map_err(|_| ProxyError::Crypto {
-                    detail: "invalid UDP tunnel decryption key".to_string(),
-                })
-            })
-            .transpose()?;
         Ok(Self {
-            reader,
-            decryptor,
-            buffer: Vec::new(),
-            prefix: [0; DATAGRAM_FRAME_PREFIX_SIZE],
-            prefix_read: 0,
-            frame_size: None,
-            frame_read: 0,
-            checksum_key: current_checksum_key(),
+            frame: FrameReader::new(reader, key, MAX_DATAGRAM_TUNNEL_FRAME_SIZE)?,
         })
     }
 
+    /// Receive an owned packet for callers that retain it beyond the next read.
     pub async fn recv(&mut self) -> crate::Result<Vec<u8>> {
-        while self.prefix_read < self.prefix.len() {
-            let read = self
-                .reader
-                .read(&mut self.prefix[self.prefix_read..])
-                .await
-                .map_err(|source| tunnel_read_error("read datagram frame prefix", source))?;
-            if read == 0 {
-                return Err(tunnel_eof("read datagram frame prefix"));
-            }
-            self.prefix_read += read;
-        }
-
-        let size = match self.frame_size {
-            Some(size) => size,
-            None => {
-                let checksum =
-                    u32::from_be_bytes(self.prefix[..4].try_into().expect("fixed prefix"));
-                let wire_size =
-                    u32::from_be_bytes(self.prefix[4..].try_into().expect("fixed prefix"));
-                let size = match validate_data_size(checksum, wire_size, self.checksum_key) {
-                    Ok(size) => size as usize,
-                    Err(error) => {
-                        self.reset_frame();
-                        return Err(error);
-                    }
-                };
-                if size == 0 || size > MAX_DATAGRAM_TUNNEL_FRAME_SIZE {
-                    self.reset_frame();
-                    return protocol_error(format!("invalid UDP tunnel frame size {size}"));
-                }
-                self.buffer.resize(size, 0);
-                self.frame_size = Some(size);
-                size
-            }
-        };
-
-        while self.frame_read < size {
-            let read = self
-                .reader
-                .read(&mut self.buffer[self.frame_read..size])
-                .await
-                .map_err(|source| tunnel_read_error("read datagram frame body", source))?;
-            if read == 0 {
-                return Err(tunnel_eof("read datagram frame body"));
-            }
-            self.frame_read += read;
-        }
-
-        self.reset_frame();
-
-        let plaintext_len = match &mut self.decryptor {
-            Some(decryptor) => decryptor
-                .decrypt_with_tag(&mut self.buffer)
-                .map_err(|_| ProxyError::Crypto {
-                    detail: "failed to decrypt UDP tunnel frame".to_string(),
-                })?
-                .len(),
-            None => self.buffer.len(),
-        };
-        if plaintext_len > MAX_SOCKS5_UDP_DATAGRAM_SIZE {
-            return protocol_error("decrypted UDP tunnel frame is too large");
-        }
-        tracing::trace!(
-            wire_bytes = size,
-            datagram_bytes = plaintext_len,
-            encrypted = self.decryptor.is_some(),
-            "received one framed UDP datagram from the proxy tunnel"
-        );
-        self.buffer.truncate(plaintext_len);
-        Ok(self.buffer.clone())
+        Ok(self.recv_ref().await?.to_vec())
     }
 
-    fn reset_frame(&mut self) {
-        self.prefix_read = 0;
-        self.frame_size = None;
-        self.frame_read = 0;
+    /// Receive from the reusable frame buffer without copying the packet.
+    /// Cancelling a pending receive retains its framing progress.
+    pub async fn recv_ref(&mut self) -> crate::Result<&[u8]> {
+        let packet = self
+            .frame
+            .read()
+            .await?
+            .ok_or_else(|| tunnel_eof("read datagram frame"))?;
+        if packet.is_empty() || packet.len() > MAX_SOCKS5_UDP_DATAGRAM_SIZE {
+            return protocol_error("invalid decrypted UDP tunnel frame size");
+        }
+        Ok(packet)
     }
 }
 
 /// Writes one length-delimited datagram per proxy TCP tunnel frame.
 ///
-/// The encryptor owns an independent monotonically increasing nonce sequence
-/// for this direction. Reader and writer therefore must live for the complete
-/// association and must not be recreated between packets.
+/// The encryptor and reusable frame buffer belong to the association. An
+/// interrupted send is terminal so no new frame can follow a partial one.
 pub struct DatagramTunnelWriter<W> {
-    writer: W,
-    encryptor: Option<Aes256GcmEncryptor>,
-    checksum_key: u32,
+    frame: FrameWriter<W>,
 }
 
 impl<W: MyAsyncWriteExt + Send + Unpin> DatagramTunnelWriter<W> {
     pub fn new(writer: W, key: Option<&str>) -> crate::Result<Self> {
-        let encryptor = key
-            .map(|key| {
-                Aes256GcmEncryptor::try_new(key.as_bytes()).map_err(|_| ProxyError::Crypto {
-                    detail: "invalid UDP tunnel encryption key".to_string(),
-                })
-            })
-            .transpose()?;
         Ok(Self {
-            writer,
-            encryptor,
-            checksum_key: current_checksum_key(),
+            frame: FrameWriter::new(writer, key, MAX_DATAGRAM_TUNNEL_FRAME_SIZE)?,
         })
     }
 
@@ -349,30 +256,8 @@ impl<W: MyAsyncWriteExt + Send + Unpin> DatagramTunnelWriter<W> {
         if packet.is_empty() || packet.len() > MAX_SOCKS5_UDP_DATAGRAM_SIZE {
             return protocol_error(format!("invalid UDP tunnel datagram size {}", packet.len()));
         }
-        let mut frame = packet.to_vec();
-        if let Some(encryptor) = &mut self.encryptor {
-            let tag = encryptor
-                .encrypt(&mut frame)
-                .map_err(|_| ProxyError::Crypto {
-                    detail: "failed to encrypt UDP tunnel frame".to_string(),
-                })?;
-            frame.extend_from_slice(tag.as_ref());
-        }
-        tracing::trace!(
-            datagram_bytes = packet.len(),
-            wire_bytes = frame.len(),
-            encrypted = self.encryptor.is_some(),
-            "sending one framed UDP datagram through the proxy tunnel"
-        );
-        set_data_size_with_key(&mut self.writer, frame.len() as u32, self.checksum_key).await?;
-        self.writer
-            .write_all(&frame)
-            .await
-            .map_err(|source| ProxyError::Io {
-                context: "udp_tunnel",
-                detail: "write datagram frame".to_string(),
-                source,
-            })
+        self.frame.prepare()?.extend_from_slice(packet);
+        self.frame.send().await
     }
 }
 

@@ -30,7 +30,7 @@ unchanged. On macOS, replace the previous direct-download app with
 
 ## Low-latency encrypted transport
 
-Native **0.4.33** and UI **1.2.19+45** provide v3 encryption with **no additional
+Native **0.4.34** and UI **1.2.20+46** provide v3 encryption with **no additional
 handshake round trip**: the first flight carries the encrypted request. Fresh
 client and server salts separate connections and directions. Legacy remains the
 default for new and existing profiles, so old clients and servers still work.
@@ -38,6 +38,13 @@ Upgrade every relay/server before enabling **Low-latency encrypted transport
 (v3)** or `PROXY_WIRE_PROTOCOL=v3`. `PROXY_REQUIRE_V3=1` optionally rejects legacy.
 The unused challenge transport has been removed. See the
 [wire format, replay boundary and migration guide](docs/secure-transport-v3.md).
+
+## TUN ping
+
+TUN now forwards IPv4/IPv6 ICMP Echo through the configured native proxy exit,
+returning the target's actual reply. Upgrade the client and final server for this
+additional transport; default legacy TCP/UDP remains compatible with old nodes.
+The exit needs ICMP socket permission. See [Echo support and limits](docs/tun-icmp-echo.md).
 
 ## Quick Start
 

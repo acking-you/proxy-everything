@@ -226,6 +226,7 @@ impl PacketTunnelRuntime {
             dns: ArgDns::Virtual,
             virtual_dns_portals: vec![VIRTUAL_DNS.parse().expect("constant IPv4 address")],
             ipv6_enabled: true,
+            icmp_echo: true,
             udp_strategy: if config.udp_enabled {
                 ArgUdpStrategy::Proxy
             } else if config.udp_direct_fallback {

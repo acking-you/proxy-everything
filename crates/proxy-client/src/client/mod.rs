@@ -49,6 +49,7 @@
 #[cfg(feature = "auto-proxy")]
 pub mod auto_proxy;
 pub mod http;
+mod icmp;
 #[cfg(target_os = "macos")]
 pub mod macos_dns_restore;
 #[cfg(target_os = "macos")]

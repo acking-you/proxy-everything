@@ -45,6 +45,7 @@ const NAMING_SERVER: u8 = 0x03;
 pub enum SocksForwarder {
     Tcp(TcpForwardImpl),
     Udp(Box<UdpAssociation>),
+    Echo(Box<super::icmp::EchoForwarder>),
 }
 
 impl Forwarder for SocksForwarder {
@@ -52,6 +53,7 @@ impl Forwarder for SocksForwarder {
         match self {
             Self::Tcp(forwarder) => forwarder.forward().await,
             Self::Udp(forwarder) => (*forwarder).forward().await,
+            Self::Echo(forwarder) => (*forwarder).forward().await,
         }
     }
 }
@@ -59,6 +61,7 @@ impl Forwarder for SocksForwarder {
 enum SocksRequest {
     Connect { host: String, port: u16 },
     UdpAssociate { client_addr: DatagramAddress },
+    Echo { host: String, ipv6: bool },
 }
 
 pub struct SocksProxierProvider {
@@ -115,6 +118,38 @@ impl ForwarderProvider for SocksProxierProvider {
             .await
             .context(SocksProxySnafu)?
         {
+            SocksRequest::Echo { host, ipv6 } => {
+                if !proxy_context
+                    .stream
+                    .peer_addr()
+                    .context(IoSnafu {
+                        detail: "read Echo client address",
+                    })
+                    .context(SocksProxySnafu)?
+                    .ip()
+                    .is_loopback()
+                    || proxy_context.upstream_proxy.is_some()
+                {
+                    response_with_code(&mut proxy_context.stream, COMMAND_NOT_SUPPORTED)
+                        .await
+                        .context(SocksProxySnafu)?;
+                    return NotSupportedTransportSnafu {
+                        cmd: tun2proxy::icmp::SOCKS5_ECHO,
+                        detail: "ICMP Echo requires the loopback endpoint and a native proxy \
+                                 upstream",
+                    }
+                    .fail()
+                    .context(SocksProxySnafu);
+                }
+                let forwarder = super::icmp::EchoForwarder::connect(
+                    proxy_context.stream,
+                    &host,
+                    ipv6,
+                    self.msg_key,
+                )
+                .await?;
+                Ok(SocksForwarder::Echo(Box::new(forwarder)))
+            }
             SocksRequest::Connect { host, port } => {
                 let ServerConnection {
                     stream: server_stream,
@@ -216,12 +251,24 @@ async fn read_request(stream: &mut TcpStream) -> Result<SocksRequest> {
     }
     let address = read_address(stream).await?;
     match cmd {
-        TCP_CONN => {
+        TCP_CONN | tun2proxy::icmp::SOCKS5_ECHO => {
             let (host, port) = match address {
                 DatagramAddress::Ip(address) => (address.ip().to_string(), address.port()),
                 DatagramAddress::Domain(host, port) => (host, port),
             };
-            Ok(SocksRequest::Connect { host, port })
+            if cmd == TCP_CONN {
+                Ok(SocksRequest::Connect { host, port })
+            } else if port == 4 || port == 6 {
+                Ok(SocksRequest::Echo {
+                    host,
+                    ipv6: port == 6,
+                })
+            } else {
+                FirstRequestSnafu {
+                    detail: "ICMP Echo family must be 4 or 6",
+                }
+                .fail()
+            }
         }
         UDP_ASSOCIATE => Ok(SocksRequest::UdpAssociate {
             client_addr: address,

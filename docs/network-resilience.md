@@ -135,6 +135,35 @@ the running proxy and network configuration must remain untouched.
 
 The unused challenge transport is replaced by the explicitly selected v3
 transport. Legacy is still the default. Setup writes are coalesced, secure reads
-reuse their decryption buffer, and plaintext retry copies are retained only
-under backpressure. See [the v3 guide](secure-transport-v3.md) for wire semantics,
+reuse their decryption buffer. The 0.4.34 follow-up removes plaintext retry
+copies under backpressure too. See [the v3 guide](secure-transport-v3.md) for wire semantics,
 replay limits, test results and measured buffer/CPU differences.
+
+
+## CR and framing follow-up (0.4.34 / 1.2.20+46)
+
+Windows tracks desired bypass routes separately from rows it owns. A handover
+that borrows an existing route retains the destination for subsequent recovery,
+and cleanup deletes only owned rows. Automatic interface selection stays
+automatic after the first network setup; a manually selected adapter stays pinned.
+Physical default selection respects the interface's DisableDefaultRoutes flag.
+IP Helper table allocations use an RAII guard, without copying whole OS tables.
+
+Control messages and UDP datagrams now share one bounded framing implementation.
+Partial reads survive cancellation, malformed/authentication failures are terminal,
+and a cancelled partial write cannot append a second message. Writers reuse
+one buffer and coalesce prefix/body/tag into one write; UDP hot paths borrow the
+reader's packet instead of copying it. TCP wire bytes and the default legacy
+protocol do not change. V3 writes obey buffered AsyncWrite ownership and flush
+at framework message boundaries, without retaining a second plaintext record.
+
+[TUN Echo support](tun-icmp-echo.md) adds real remote IPv4/IPv6 ping. It does not
+turn temporary Wi-Fi loss into reachability or recover established TCP sessions.
+
+Verification: 240 Linux / 244 Windows workspace tests; tun2proxy 56 / 79;
+strict Clippy and formatting passed on both platforms. ProxyUI analysis and
+100 tests passed (two existing skips). The Windows release bundle pairs UI
+1.2.20+46 with a freshly built, hash-matched native 0.4.34 DLL. Real packet-path
+Echo was verified through isolated Linux loopback, including both ICMP socket
+types, native relays and Fake-IP targets. Live Windows TUN/Wi-Fi handover was
+not exercised; the existing running proxy process was not restarted.

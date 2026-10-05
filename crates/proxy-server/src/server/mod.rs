@@ -69,6 +69,7 @@ mod advertise;
 mod connection;
 mod control;
 mod discovery;
+mod icmp;
 mod relay;
 mod udp;
 

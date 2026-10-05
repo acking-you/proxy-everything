@@ -1701,6 +1701,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "internet-checksum"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc6d6206008e25125b1f97fbe5d309eb7b85141cf9199d52dbd3729a1584dd16"
+
+[[package]]
 name = "ipconfig"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2859,7 +2865,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-client"
-version = "0.4.33"
+version = "0.4.34"
 dependencies = [
  "anyhow",
  "async-broadcast",
@@ -2896,7 +2902,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-core"
-version = "0.4.33"
+version = "0.4.34"
 dependencies = [
  "arc-swap",
  "async-broadcast",
@@ -2933,7 +2939,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-ffi"
-version = "0.4.33"
+version = "0.4.34"
 dependencies = [
  "libc",
  "proxy-client",
@@ -2949,16 +2955,18 @@ dependencies = [
 
 [[package]]
 name = "proxy-server"
-version = "0.4.33"
+version = "0.4.34"
 dependencies = [
  "anyhow",
  "clap",
+ "internet-checksum",
  "parking_lot",
  "proxy-core",
  "serde",
  "serde_json",
  "smallvec 2.0.0-alpha.12",
  "snafu",
+ "socket2",
  "sysinfo",
  "tokio",
  "tokio-util",
@@ -2969,7 +2977,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-tui"
-version = "0.4.33"
+version = "0.4.34"
 dependencies = [
  "chrono",
  "clap",
@@ -4346,6 +4354,7 @@ dependencies = [
  "hashlink",
  "hickory-proto",
  "httparse",
+ "internet-checksum",
  "ipstack",
  "jni 0.22.4",
  "log",

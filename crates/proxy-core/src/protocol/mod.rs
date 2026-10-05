@@ -39,6 +39,9 @@ use snafu::ResultExt;
 use crate::config::runtime;
 use crate::error::{CheckSumSnafu, MaxSizeSnafu, ProtocolIoSnafu, ProxyError};
 
+mod frame;
+pub use frame::{FrameReader, FrameWriter};
+
 /// Transport carried by a proxy connection.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -48,6 +51,8 @@ pub enum ProxyTransport {
     Tcp,
     /// A SOCKS5 UDP association whose datagrams are framed over the TCP tunnel.
     UdpAssociate,
+    /// ICMP Echo requests to `host`; `port` selects IPv4 (4) or IPv6 (6).
+    IcmpEcho,
 }
 
 impl ProxyTransport {
@@ -221,15 +226,19 @@ pub(crate) async fn set_data_size_with_key<T: crate::MyAsyncWriteExt + Unpin>(
     checksum_key: DataSize,
 ) -> Result<(), ProxyError> {
     writer
-        .write_u32(get_check_sum_with_key(data_size, checksum_key))
+        .write_all(&encode_data_size(data_size, checksum_key))
         .await
         .context(ProtocolIoSnafu {
-            detail: "write checksum",
+            detail: "write frame prefix",
         })?;
-    writer.write_u32(data_size).await.context(ProtocolIoSnafu {
-        detail: "write length",
-    })?;
     Ok(())
+}
+
+pub(crate) fn encode_data_size(data_size: u32, checksum_key: u32) -> [u8; 8] {
+    let mut prefix = [0; 8];
+    prefix[..4].copy_from_slice(&get_check_sum_with_key(data_size, checksum_key).to_be_bytes());
+    prefix[4..].copy_from_slice(&data_size.to_be_bytes());
+    prefix
 }
 
 #[cfg(test)]

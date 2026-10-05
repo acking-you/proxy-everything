@@ -320,8 +320,16 @@ async fn handle_connect_inner(
     })??;
     drop(_header_permit);
 
-    // Get relay context before mutate
-    let relay_context = relay_target.map(|v| (v, header_buf.clone()));
+    // Only an opaque legacy relay needs the original encrypted bytes after
+    // local decoding. External routes and v3 do not need a header copy.
+    let relay_context = relay_target.map(|target| {
+        let raw_header = if !secure && matches!(target.route, RelayRoute::ProxyServer { .. }) {
+            header_buf.clone()
+        } else {
+            SmallVec::new()
+        };
+        (target, raw_header)
+    });
 
     // Attempt to decode header for control handling.
     let mut header = if secure {
@@ -396,6 +404,40 @@ async fn handle_connect_inner(
 
     if secure && let Some(header) = header.as_mut() {
         header.key = None;
+    }
+
+    if let Some(header) = header.as_ref()
+        && header.transport == ProxyTransport::IcmpEcho
+        && !relay_context
+            .as_ref()
+            .is_some_and(|(target, _)| matches!(target.route, RelayRoute::ProxyServer { .. }))
+    {
+        if relay_context.is_some() {
+            return Err(ServerError::Io {
+                detail: "ICMP Echo is unavailable through an external HTTP/SOCKS upstream".into(),
+                source: std::io::ErrorKind::Unsupported.into(),
+            });
+        }
+        tracing::Span::current().record("mode", "icmp-echo");
+        tracing::Span::current().record("dest", field::display(&header.host));
+        let result = super::icmp::proxy_echo(
+            client_reader,
+            client_writer,
+            &header.host,
+            header.port,
+            header.key.as_deref(),
+        )
+        .await;
+        record_connection(
+            &ctx,
+            &peer_ip,
+            &header.host,
+            header.port,
+            started_at_ms,
+            trace_id,
+            &result,
+        );
+        return result.map(|_| ());
     }
 
     if let Some(header) = header.as_ref()

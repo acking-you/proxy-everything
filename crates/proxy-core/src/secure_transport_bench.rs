@@ -50,6 +50,7 @@ fn records_and_setup() {
                 for _ in 0..iterations {
                     writer.inner.clear();
                     writer.write_all(black_box(&data)).await.unwrap();
+                    writer.flush().await.unwrap();
                     std::mem::swap(&mut writer.inner, reader.inner.get_mut());
                     reader.inner.set_position(0);
                     reader.read_exact(black_box(&mut output)).await.unwrap();
@@ -63,9 +64,7 @@ fn records_and_setup() {
             println!("v3_record_{size}_ns={:.2}", median(samples));
             println!(
                 "buffers_{size}={}",
-                writer.outgoing.capacity()
-                    + writer.outgoing_plain.capacity()
-                    + reader.incoming.capacity()
+                writer.outgoing.capacity() + reader.incoming.capacity()
             );
         }
     });

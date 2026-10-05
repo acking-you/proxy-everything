@@ -61,10 +61,14 @@ The header's optional key retains its control authorization role.
 An authenticated empty record half-closes a sending direction. Raw EOF before
 that record, authentication failures, invalid lengths, counter exhaustion and
 I/O errors are terminal. Record and response-salt read progress belong to the
-stream, so cancelling a read does not lose framing. A pending write owns sealed
-bytes and reserves its counter before I/O; resuming with changed unacknowledged
-plaintext fails. Decrypted data is read directly from the existing receive buffer.
-A plaintext retry copy is allocated only when socket writes actually block.
+stream, so cancelling a read does not lose framing. A write acknowledges bytes
+once the bounded ciphertext buffer owns them; a pending write accepts none of
+its current input. Subsequent writes drain the prior record before accepting new
+input. Flush/shutdown drains acknowledged records. Framework message boundaries
+flush explicitly, including the initial request, to prevent a stalled response
+under socket backpressure. Cancellation never reseals a record or reuses its
+counter. Decrypted data is read directly from the receive buffer; no plaintext
+retry buffer or byte-for-byte retry comparison is needed.
 
 ## Security boundary and compatibility
 
@@ -118,7 +122,7 @@ occur in that test. A loopback integration matrix covers legacy/v3 HTTP, SOCKS,
 UDP, control, opaque relays and external SOCKS chains. Independent historical
 readers/writers check both directions of legacy compatibility, with payload
 cryptography on and off. Adversarial cases cover response binding, fresh response
-keys after repeated hellos, partial salt/record reads, cancellation, altered retry
+keys after repeated hellos, partial salt/record reads, cancellation, replaced pending-write
 buffers, tampering, ordering, truncation, counter exhaustion and half-close.
 
 The release microbenchmark excludes sockets, TCP setup and WAN latency:
@@ -148,8 +152,8 @@ wall time in this microbenchmark. Small-record time is essentially unchanged;
 complete key/stream setup costs about 38 ns more. V3 defers the client's receive
 key until the first response, so that complete-setup benchmark is not its initial
 request critical path. Buffer counts exclude sockets, allocator bookkeeping and
-stream structs; backpressure may retain one additional bounded plaintext retry
-buffer. There is no claim of a measured WAN throughput improvement.
+stream structs. The follow-up removes the backpressure-only plaintext retry
+buffer as well. There is no claim of a measured WAN throughput improvement.
 
 The 0.4.33 workspace passed 233 Linux and 237 Windows tests; seven tests were
 ignored on each platform, including the separately executed manual benchmark.
@@ -158,3 +162,41 @@ ProxyUI 1.2.19+45 passed Windows Flutter analysis and 100 tests (two existing
 skips), and the complete Windows x64 release bundle built with a fresh FFI DLL.
 Live proxy/TUN recovery and native macOS/Android builds were not exercised in
 this change; no running proxy, network configuration or Codex mapping was altered.
+
+
+## Framing and write-contract review (0.4.34)
+
+Against commit `06670c8` (0.4.33), six alternating before/after pairs on the
+same pinned Linux/WSL CPU, with the same dependency versions and each test's
+warmup plus nine samples, produced these medians. The revised benchmark flushes
+at the message boundary, matching the buffered writer's contract:
+
+| Measurement | 0.4.33 | 0.4.34 |
+| --- | ---: | ---: |
+| Construct stream with both direction keys | 948.70 ns | 976.96 ns |
+| One 256-byte encrypted record round trip | 155.72 ns | 151.52 ns |
+| One 16-KiB encrypted record round trip | 2832.35 ns | 2833.93 ns |
+| Unblocked sender + receiver record buffers, 16 KiB | 32,804 B | 32,804 B |
+
+The large-record cost is essentially unchanged, while this run measured a
+28-ns increase in complete stream construction. There is no added network RTT.
+These local CPU measurements do not establish a global optimum or WAN speedup.
+The bounded plaintext retry allocation is removed entirely, saving up to
+another 16 KiB per stream after backpressure; the unblocked benchmark never
+allocated that old buffer and therefore does not measure this saving.
+
+Control and UDP now share a reusable, cancellation-safe frame reader and a
+terminal-on-cancel frame writer. Serialization appends directly to the writer's
+buffer; prefix/body/tag are sent in one call. UDP proxy hot paths borrow the
+reader's decoded bytes. Independent legacy decoders verify unchanged bytes and
+counters and assert one write per frame. Partial-read tests cancel at every
+prefix/body boundary; partial-write tests require discarding the failed writer.
+
+Final 0.4.34 checks passed 240 Linux / 244 Windows workspace tests (seven
+ignored on each), plus the packet adapter integration on both platforms.
+Tun2proxy passed 56 Linux / 79 Windows tests. Formatting and strict Clippy
+passed. UI 1.2.20+46 passed analysis and 100 tests (two existing skips), and its
+Windows x64 release bundle contains the matching newly built native DLL.
+[Real ICMP Echo integration](tun-icmp-echo.md) passed in isolated Linux network
+namespaces with both datagram and raw sockets. Live Windows TUN handover and
+native macOS/Android execution remain unverified.

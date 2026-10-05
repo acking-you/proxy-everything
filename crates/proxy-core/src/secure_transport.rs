@@ -259,7 +259,6 @@ pub struct SecureStream<T> {
     recv_sequence: u64,
     outgoing: Vec<u8>,
     outgoing_position: usize,
-    outgoing_plain: Vec<u8>,
     header: [u8; 4],
     header_position: usize,
     incoming: Vec<u8>,
@@ -317,7 +316,6 @@ impl<T> SecureStream<T> {
             recv_sequence: 0,
             outgoing: Vec::new(),
             outgoing_position: 0,
-            outgoing_plain: Vec::new(),
             header: [0; 4],
             header_position: 0,
             incoming: Vec::new(),
@@ -469,32 +467,19 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for SecureStream<T> {
             return Poll::Ready(Err(invalid("v3 writer is closed")));
         }
         let result = (|| {
-            let n = if this.outgoing_plain.is_empty() {
-                let n = RECORD_LIMIT.min(buf.len());
-                if n == 0 {
-                    return Poll::Ready(Ok(0));
-                }
-                this.seal_record(&buf[..n])?;
-                n
-            } else {
-                if !buf.starts_with(&this.outgoing_plain) {
-                    return Poll::Ready(Err(invalid("v3 write resumed with different bytes")));
-                }
-                this.outgoing_plain.len()
-            };
+            // Pending must not consume any bytes from this call. Drain the
+            // previously acknowledged record before accepting another one.
+            ready!(this.flush_record(cx))?;
+            let n = RECORD_LIMIT.min(buf.len());
+            if n == 0 {
+                return Poll::Ready(Ok(0));
+            }
+            this.seal_record(&buf[..n])?;
             match this.flush_record(cx) {
-                Poll::Pending => {
-                    // Only backpressure needs a retained copy to validate retries.
-                    if this.outgoing_plain.is_empty() {
-                        this.outgoing_plain.extend_from_slice(&buf[..n]);
-                    }
-                    Poll::Pending
-                }
                 Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
-                Poll::Ready(Ok(())) => {
-                    this.outgoing_plain.clear();
-                    Poll::Ready(Ok(n))
-                }
+                // The bounded ciphertext buffer now owns these bytes. Like
+                // other buffered writers, callers flush at message boundaries.
+                _ => Poll::Ready(Ok(n)),
             }
         })();
         if matches!(result, Poll::Ready(Err(_))) {
@@ -627,31 +612,45 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn cancelled_partial_write_resumes_without_a_second_seal() {
+    async fn buffered_record_is_acknowledged_once_under_backpressure() {
         let (writer, mut reader) = tokio::io::duplex(8);
         let mut writer = configured(writer, &KEY, &hello(1), &[2; 32], true).unwrap();
-        assert!(futures::poll!(Box::pin(writer.write_all(b"fragmented payload"))).is_pending());
+        assert_eq!(writer.write(b"fragmented payload").await.unwrap(), 18);
         assert_eq!(writer.send_sequence, 1);
         let drain = tokio::spawn(async move {
-            let mut v = Vec::new();
-            reader.read_to_end(&mut v).await.unwrap();
-            v
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes).await.unwrap();
+            bytes
         });
-        writer.write_all(b"fragmented payload").await.unwrap();
         writer.shutdown().await.unwrap();
         assert_eq!(
             drain.await.unwrap(),
             wire(b"fragmented payload", true).await
         );
     }
+
     #[tokio::test]
-    async fn changed_buffer_after_cancel_fails_closed() {
-        let (writer, _reader) = tokio::io::duplex(8);
+    async fn pending_write_accepts_no_bytes_and_can_be_cancelled() {
+        let (writer, mut reader) = tokio::io::duplex(8);
         let mut writer = configured(writer, &KEY, &hello(1), &[2; 32], true).unwrap();
-        assert!(futures::poll!(Box::pin(writer.write_all(b"original payload"))).is_pending());
-        assert!(writer.write_all(b"different payload").await.is_err());
-        assert!(writer.write_all(b"original payload").await.is_err());
+        writer.write_all(b"accepted").await.unwrap();
+        assert!(futures::poll!(Box::pin(writer.write(b"cancelled"))).is_pending());
         assert_eq!(writer.send_sequence, 1);
+        let drain = tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes).await.unwrap();
+            bytes
+        });
+        // A cancelled Pending call consumed nothing: the next buffer is free
+        // to differ, as required by AsyncWrite.
+        writer.write_all(b"replacement").await.unwrap();
+        writer.shutdown().await.unwrap();
+        assert_eq!(writer.send_sequence, 3);
+        let bytes = drain.await.unwrap();
+        let mut reader = configured(bytes.as_slice(), &KEY, &hello(1), &[2; 32], false).unwrap();
+        let mut output = Vec::new();
+        reader.read_to_end(&mut output).await.unwrap();
+        assert_eq!(output, b"acceptedreplacement");
     }
     #[tokio::test]
     async fn tampering_truncation_reordering_and_duplicate_records_fail() {
@@ -788,17 +787,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn flushing_a_cancelled_write_does_not_seal_it_twice() {
+    async fn cancelled_flush_preserves_the_acknowledged_record() {
         let (writer, mut input) = tokio::io::duplex(8);
         let mut writer = configured(writer, &KEY, &hello(1), &[2; 32], true).unwrap();
-        assert!(futures::poll!(Box::pin(writer.write_all(b"cancel then flush"))).is_pending());
+        writer.write_all(b"cancel then flush").await.unwrap();
+        assert!(futures::poll!(Box::pin(writer.flush())).is_pending());
         let drain = tokio::spawn(async move {
             let mut bytes = Vec::new();
             input.read_to_end(&mut bytes).await.unwrap();
             bytes
         });
         writer.flush().await.unwrap();
-        writer.write_all(b"cancel then flush").await.unwrap();
         assert_eq!(writer.send_sequence, 1);
         writer.shutdown().await.unwrap();
         assert_eq!(drain.await.unwrap(), wire(b"cancel then flush", true).await);

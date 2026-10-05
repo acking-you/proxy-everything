@@ -359,6 +359,35 @@ pub async fn get_udp_proxy_stream(
     .await
 }
 
+/// Establish an ICMP Echo stream. Existing proxy paths remain legacy-compatible;
+/// this additional transport requires an Echo-capable final server.
+pub async fn get_icmp_proxy_stream(
+    host: &str,
+    ipv6: bool,
+    proxy_server: &str,
+    proxy_server_port: u16,
+    msg_key: Option<Cow<'static, str>>,
+) -> Result<ProxyStream> {
+    let header = ProxyHeader {
+        host: host.to_owned(),
+        port: if ipv6 { 6 } else { 4 },
+        key: msg_key,
+        transport: ProxyTransport::IcmpEcho,
+    };
+    get_proxy_stream(
+        header,
+        proxy_server,
+        proxy_server_port,
+        "ICMP Echo",
+        host,
+        WireProtocol::configured().context(IoSnafu {
+            uri: None,
+            detail: "select Echo wire protocol",
+        })?,
+    )
+    .await
+}
+
 async fn get_proxy_stream(
     proxy_header: ProxyHeader,
     proxy_server: &str,
@@ -412,6 +441,7 @@ async fn get_proxy_stream(
         let setup = async {
             let mut stream = connect_v3(proxy_server_stream, &key, control)?;
             stream.write_all(&header).await?;
+            stream.flush().await?;
             Ok::<_, std::io::Error>(ProxyStream::Secure(Box::new(stream)))
         };
         return tokio::time::timeout(Duration::from_secs(10), setup)

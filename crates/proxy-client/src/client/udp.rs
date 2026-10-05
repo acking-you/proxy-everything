@@ -30,10 +30,10 @@ enum UpstreamReader {
 }
 
 impl UpstreamReader {
-    async fn recv(&mut self) -> std::result::Result<Vec<u8>, ProxyError> {
+    async fn recv(&mut self) -> std::result::Result<std::borrow::Cow<'_, [u8]>, ProxyError> {
         match self {
-            Self::Proxy(reader) => reader.recv().await,
-            Self::Socks5(reader) => reader.recv().await,
+            Self::Proxy(reader) => reader.recv_ref().await.map(std::borrow::Cow::Borrowed),
+            Self::Socks5(reader) => reader.recv().await.map(std::borrow::Cow::Owned),
         }
     }
 }
