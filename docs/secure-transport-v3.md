@@ -192,7 +192,11 @@ reader's decoded bytes. Independent legacy decoders verify unchanged bytes and
 counters and assert one write per frame. Partial-read tests cancel at every
 prefix/body boundary; partial-write tests require discarding the failed writer.
 
-Final 0.4.34 checks passed 240 Linux / 244 Windows workspace tests (seven
+The node probe and initial HTTP request also use the shared flushing writer.
+A one-byte duplex regression fails with the old probe write boundary and
+passes with the fix, covering requests buffered under socket backpressure.
+
+Final 0.4.34 checks passed 242 Linux / 246 Windows workspace tests (seven
 ignored on each), plus the packet adapter integration on both platforms.
 Tun2proxy passed 56 Linux / 79 Windows tests. Formatting and strict Clippy
 passed. UI 1.2.20+46 passed analysis and 100 tests (two existing skips), and its

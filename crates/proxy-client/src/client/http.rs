@@ -1,6 +1,8 @@
 use std::borrow::Cow;
 
 use base64::Engine;
+use proxy_core::MyAsyncWriteExt;
+use proxy_core::codec::AsyncReaderWriterRef;
 use proxy_core::config::runtime;
 use proxy_core::relay::{ExternalProxyKind, ExternalProxyTarget};
 use proxy_core::secure_transport::ProxyStream;
@@ -356,7 +358,7 @@ impl HttpProxierProvider {
             // An encrypted stream must send the initial HTTP header through
             // the same codec and nonce sequence as the body that follows it.
             if !need_proxy || msg_key.is_none() {
-                server_stream
+                AsyncReaderWriterRef::new(&mut server_stream)
                     .write_all(context.buffer)
                     .await
                     .with_context(|_| IoSnafu {

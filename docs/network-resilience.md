@@ -156,11 +156,15 @@ one buffer and coalesce prefix/body/tag into one write; UDP hot paths borrow the
 reader's packet instead of copying it. TCP wire bytes and the default legacy
 protocol do not change. V3 writes obey buffered AsyncWrite ownership and flush
 at framework message boundaries, without retaining a second plaintext record.
+The node probe and initial HTTP request use that same flushing writer. A
+one-byte transport regression reproduces the previous stalled-response bug
+without a flush and completes with the shared writer. Echo DNS also reuses the
+bounded resolver, retaining its concurrency slot through OS lookup cancellation.
 
 [TUN Echo support](tun-icmp-echo.md) adds real remote IPv4/IPv6 ping. It does not
 turn temporary Wi-Fi loss into reachability or recover established TCP sessions.
 
-Verification: 240 Linux / 244 Windows workspace tests; tun2proxy 56 / 79;
+Verification: 242 Linux / 246 Windows workspace tests; tun2proxy 56 / 79;
 strict Clippy and formatting passed on both platforms. ProxyUI analysis and
 100 tests passed (two existing skips). The Windows release bundle pairs UI
 1.2.20+46 with a freshly built, hash-matched native 0.4.34 DLL. Real packet-path

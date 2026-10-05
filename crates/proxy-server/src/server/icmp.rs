@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use proxy_core::protocol::{FrameReader, FrameWriter};
+use proxy_core::transport::resolve_host_addresses;
 use proxy_core::{MyAsyncReadExt, MyAsyncWriteExt};
 use snafu::ResultExt;
 use socket2::{Domain, Protocol, Socket, Type};
@@ -100,20 +101,7 @@ struct EchoSocket {
 
 impl EchoSocket {
     async fn connect(host: &str, ipv6: bool) -> io::Result<Self> {
-        let target = tokio::net::lookup_host((host, 0))
-            .await?
-            .find(|address| {
-                address.is_ipv6() == ipv6
-                    && !address.ip().is_multicast()
-                    && !address.ip().is_unspecified()
-                    && address.ip() != std::net::Ipv4Addr::BROADCAST
-            })
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::AddrNotAvailable,
-                    "no unicast Echo target in requested address family",
-                )
-            })?;
+        let target = resolve_target(host, ipv6).await?;
         let domain = if ipv6 { Domain::IPV6 } else { Domain::IPV4 };
         let protocol = if ipv6 {
             Protocol::ICMPV6
@@ -211,6 +199,26 @@ impl EchoSocket {
     }
 }
 
+async fn resolve_target(host: &str, ipv6: bool) -> io::Result<SocketAddr> {
+    resolve_host_addresses(host)
+        .await?
+        .iter()
+        .copied()
+        .find(|address| {
+            address.is_ipv6() == ipv6
+                && !address.is_multicast()
+                && !address.is_unspecified()
+                && *address != std::net::Ipv4Addr::BROADCAST
+        })
+        .map(|address| SocketAddr::new(address, 0))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "no unicast Echo target in requested address family",
+            )
+        })
+}
+
 fn reply_offset(packet: &[u8], ipv4_header: bool) -> Option<usize> {
     if !ipv4_header {
         return Some(0);
@@ -234,6 +242,29 @@ fn matches_reply(reply: &[u8], request: &[u8], ipv6: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn resolves_only_unicast_targets_in_the_requested_family() {
+        for (host, ipv6) in [("127.0.0.1", false), ("::1", true)] {
+            assert_eq!(
+                resolve_target(host, ipv6).await.unwrap(),
+                SocketAddr::new(host.parse().unwrap(), 0)
+            );
+            assert_eq!(
+                resolve_target(host, !ipv6).await.unwrap_err().kind(),
+                io::ErrorKind::AddrNotAvailable
+            );
+        }
+        for host in ["0.0.0.0", "255.255.255.255", "224.0.0.1", "::", "ff02::1"] {
+            assert_eq!(
+                resolve_target(host, host.contains(':'))
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::AddrNotAvailable
+            );
+        }
+    }
 
     #[test]
     fn rejects_unrelated_truncated_and_corrupt_replies() {

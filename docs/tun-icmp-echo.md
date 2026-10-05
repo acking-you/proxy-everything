@@ -54,6 +54,9 @@ queue wait. Idle flows close after 15 seconds; the local bridge/exit also have
 
 Each server process permits at most 64 Echo sessions. DNS/socket setup and each
 probe are bounded to four seconds; frame sizes are checked before allocation.
+DNS uses the shared expiring cache and eight-slot resolver limit. A timed-out
+lookup retains its slot until the underlying OS call finishes, so retries cannot
+accumulate unbounded blocking DNS tasks.
 Buffers are reused. Source, type, code, identifier, sequence and actual payload
 are checked before accepting a reply. Linux ping socket identifiers are assigned
 by the kernel; raw probes use a checked process-wide counter. Sockets retire
