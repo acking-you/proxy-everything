@@ -90,7 +90,7 @@ The native and UI sources must move together. The supported build command is
 Pub and Flutter's Windows build dependencies are already cached. Cargo uses
 the committed lockfile; Flutter dependency resolution runs once before build.
 
-## Legacy AEAD nonce reuse and the v2 migration
+## Legacy AEAD nonce reuse and the v3 migration
 
 The old wire protocol initializes the AES-GCM counter to zero in each
 encryptor. Headers reuse a configured long-term key across connections, and
@@ -104,24 +104,21 @@ The uniqueness requirement and consequences are specified in
 A complete fix must version the connection preface and update both endpoints:
 
 1. Authenticate the protocol version and a fresh connection salt, and derive
-   separate header, client-to-server, and server-to-client keys with explicit
+   separate client-to-server and server-to-client keys with explicit
    domain separation. Never reuse the legacy shared-key/zero-counter scheme.
 2. Specify replay handling, framing limits, nonce exhaustion, and authentication
    failure behavior. Reject a failed authenticated negotiation instead of
    silently downgrading it to the legacy format.
 3. Add mixed-version and adversarial tests, then stage server support before
-   switching clients. Legacy acceptance must be explicit and observable, with
-   a removal path rather than an indefinite automatic fallback.
+   switching clients. Legacy remains the compatibility default; protocol
+   selection is explicit and failures must never silently change it.
 
-Native 0.4.32 / UI 1.2.18+44 adds the separately selected
-[secure transport v2](secure-transport-v2.md). It uses fresh randomness from both
-peers and separate direction keys for the header and all traffic, including UDP
-and control. Legacy profiles remain compatible and retain the old security
-limitation. Deployment must follow the documented server-first migration; this
-review did not switch running services. The same follow-up also fixes encrypted
-node probes and server forwarding that waited indefinitely for a silent peer
-after the other direction failed.
-
+Native 0.4.33 / UI 1.2.19+45 supplies the separately selected
+[zero-extra-RTT transport v3](secure-transport-v3.md). It uses fresh sender salts
+and separate direction keys for the header and all traffic, including UDP and
+control. Legacy profiles remain compatible and retain the old security
+limitation. The unused one-RTT transport was removed. Deployment must follow the
+documented server-first migration; development does not switch running services.
 
 ## Follow-up verification (0.4.32 / 1.2.18+44)
 
@@ -132,3 +129,12 @@ Release bundle built from the same source and contains native 0.4.32 and UI
 1.2.18+44. Native TUN source is unchanged from the preceding 54 Linux / 75 Windows
 test pass. Actual Wi-Fi handover and live TUN recovery remain untested because
 the running proxy and network configuration must remain untouched.
+
+
+## Zero-extra-RTT follow-up (0.4.33 / 1.2.19+45)
+
+The unused challenge transport is replaced by the explicitly selected v3
+transport. Legacy is still the default. Setup writes are coalesced, secure reads
+reuse their decryption buffer, and plaintext retry copies are retained only
+under backpressure. See [the v3 guide](secure-transport-v3.md) for wire semantics,
+replay limits, test results and measured buffer/CPU differences.

@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::logging::send_log;
 use crate::types::{
-    ProxyConfig, ProxyConfigV2, ProxyConfigV3, ProxyConfigV4, ProxyConfigV5, ProxyConfigV6,
+    ProxyConfig, ProxyConfigV2, ProxyConfigV3, ProxyConfigV4, ProxyConfigV5, ProxyConfigV7,
     ProxyResult,
 };
 
@@ -140,7 +140,7 @@ pub unsafe extern "C" fn proxy_start(
             tun_udp_direct_fallback: true,
             allow_lan: false,
             tun_bypass_processes: Vec::new(),
-            secure_transport: false,
+            wire_protocol: proxy_core::secure_transport::WireProtocol::Legacy,
         },
     )
 }
@@ -184,7 +184,7 @@ pub unsafe extern "C" fn proxy_start_v2(
             tun_udp_direct_fallback: true,
             allow_lan: false,
             tun_bypass_processes: Vec::new(),
-            secure_transport: false,
+            wire_protocol: proxy_core::secure_transport::WireProtocol::Legacy,
         },
     )
 }
@@ -234,7 +234,7 @@ pub unsafe extern "C" fn proxy_start_v3(
             tun_udp_direct_fallback: true,
             allow_lan: false,
             tun_bypass_processes: bypass_processes,
-            secure_transport: false,
+            wire_protocol: proxy_core::secure_transport::WireProtocol::Legacy,
         },
     )
 }
@@ -282,7 +282,7 @@ pub unsafe extern "C" fn proxy_start_v4(
             tun_udp_direct_fallback: config.tun_udp_direct_fallback != 0,
             allow_lan: false,
             tun_bypass_processes: bypass_processes,
-            secure_transport: false,
+            wire_protocol: proxy_core::secure_transport::WireProtocol::Legacy,
         },
     )
 }
@@ -330,29 +330,37 @@ pub unsafe extern "C" fn proxy_start_v5(
             tun_udp_direct_fallback: config.tun_udp_direct_fallback != 0,
             allow_lan: config.allow_lan != 0,
             tun_bypass_processes: bypass_processes,
-            secure_transport: false,
+            wire_protocol: proxy_core::secure_transport::WireProtocol::Legacy,
         },
     )
 }
 
-/// Start using an explicitly selected authenticated transport protocol.
+/// Start with an explicit wire version. Unknown versions fail before side effects.
 ///
 /// # Safety
 /// Pointers must be valid for the same lifetime as `proxy_start_v5`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn proxy_start_v6(
+pub unsafe extern "C" fn proxy_start_v7(
     handle: *mut ProxyHandle,
-    config: *const ProxyConfigV6,
+    config: *const ProxyConfigV7,
 ) -> ProxyResult {
     if handle.is_null() || config.is_null() {
         return ProxyResult::InvalidParam;
     }
-
-    let v6 = unsafe { &*config };
-    if !matches!(v6.secure_transport, 0 | 1) {
+    let config = unsafe { &*config };
+    let Ok(protocol) =
+        proxy_core::secure_transport::WireProtocol::from_version(config.wire_protocol)
+    else {
         return ProxyResult::InvalidParam;
-    }
-    let config = &v6.base;
+    };
+    start_with_protocol(handle, &config.base, protocol)
+}
+
+fn start_with_protocol(
+    handle: *mut ProxyHandle,
+    config: &ProxyConfigV5,
+    protocol: proxy_core::secure_transport::WireProtocol,
+) -> ProxyResult {
     let legacy_config = ProxyConfig {
         server_host: config.server_host,
         server_port: config.server_port,
@@ -378,7 +386,7 @@ pub unsafe extern "C" fn proxy_start_v6(
             tun_udp_direct_fallback: config.tun_udp_direct_fallback != 0,
             allow_lan: config.allow_lan != 0,
             tun_bypass_processes: bypass_processes,
-            secure_transport: v6.secure_transport == 1,
+            wire_protocol: protocol,
         },
     )
 }
@@ -413,7 +421,7 @@ struct StartOptions {
     tun_udp_direct_fallback: bool,
     allow_lan: bool,
     tun_bypass_processes: Vec<String>,
-    secure_transport: bool,
+    wire_protocol: proxy_core::secure_transport::WireProtocol,
 }
 
 fn proxy_start_inner(
@@ -427,7 +435,7 @@ fn proxy_start_inner(
         tun_udp_direct_fallback,
         allow_lan,
         tun_bypass_processes,
-        secure_transport,
+        wire_protocol,
     } = options;
     // The store dylib must fail closed even if an old UI/config reaches FFI.
     if cfg!(feature = "mac-app-store") && (enable_tun || config.set_system_proxy != 0) {
@@ -514,11 +522,7 @@ fn proxy_start_inner(
     let set_system_proxy = config.set_system_proxy != 0;
     let listen_host = local_listen_host(allow_lan);
 
-    proxy_core::secure_transport::set_wire_protocol(if secure_transport {
-        proxy_core::secure_transport::WireProtocol::V2
-    } else {
-        proxy_core::secure_transport::WireProtocol::Legacy
-    });
+    proxy_core::secure_transport::set_wire_protocol(wire_protocol);
     // Initialize runtime config directly (no env vars needed)
     proxy_core::config::runtime::init_config(
         server_host.clone(),

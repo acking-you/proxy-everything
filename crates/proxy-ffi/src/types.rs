@@ -123,12 +123,11 @@ pub struct ProxyConfigV5 {
     pub allow_lan: c_int,
 }
 
-/// Version 6 adds explicit v2 transport selection without altering older ABIs.
+/// Version 7 selects legacy (0) or zero-RTT v3 (3).
 #[repr(C)]
-pub struct ProxyConfigV6 {
+pub struct ProxyConfigV7 {
     pub base: ProxyConfigV5,
-    /// 0 explicitly selects legacy; 1 selects v2 with no automatic fallback.
-    pub secure_transport: c_int,
+    pub wire_protocol: c_int,
 }
 
 /// Result of latency test.
@@ -210,6 +209,12 @@ mod tests {
                 );
             };
         }
+
+        assert_eq!(std::mem::offset_of!(ProxyConfigV7, base), 0);
+        assert_eq!(
+            std::mem::offset_of!(ProxyConfigV7, wire_protocol),
+            std::mem::size_of::<ProxyConfigV5>()
+        );
 
         assert_same_offset!(ProxyConfig, ProxyConfigV2, server_host);
         assert_same_offset!(ProxyConfig, ProxyConfigV2, server_port);

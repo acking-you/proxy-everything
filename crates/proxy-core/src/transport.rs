@@ -49,12 +49,10 @@ static DNS_CACHE: LazyLock<Cache<String, Arc<DnsEntry>>> = LazyLock::new(|| {
         .build()
 });
 
-use crate::codec::AsyncReaderWriterRef;
 use crate::config::runtime;
-use crate::protocol::set_data_size;
 use crate::relay::{ExternalProxyKind, ExternalProxyTarget};
-use crate::secure_transport::{ProxyStream, WireProtocol, connect_v2};
-use crate::{Aes256GcmCryption, MyAsyncWriteExt, ProxyHeader, ProxyTransport};
+use crate::secure_transport::{ProxyStream, WireProtocol, connect_v3};
+use crate::{Aes256GcmCryption, ProxyHeader, ProxyTransport};
 
 #[derive(Debug, Snafu)]
 pub enum TransportError {
@@ -183,14 +181,14 @@ pub async fn resolve_host(host: &str) -> std::io::Result<IpAddr> {
 pub async fn connect_tcp_host(host: &str, port: u16) -> std::io::Result<TcpStream> {
     tokio::time::timeout(CONNECT_TIMEOUT, async {
         let addresses = resolve_host_addresses(host).await?;
-        match race_addresses(&addresses, port, TcpStream::connect).await {
+        match race_addresses(&addresses, port, connect_socket).await {
             Ok(stream) => Ok(stream),
             Err(error) if host.parse::<IpAddr>().is_err() => {
                 let refreshed = resolve_addresses(host, true).await?;
                 if refreshed == addresses {
                     return Err(error);
                 }
-                race_addresses(&refreshed, port, TcpStream::connect).await
+                race_addresses(&refreshed, port, connect_socket).await
             }
             Err(error) => Err(error),
         }
@@ -202,6 +200,12 @@ pub async fn connect_tcp_host(host: &str, port: u16) -> std::io::Result<TcpStrea
             "TCP connection budget exhausted",
         )
     })?
+}
+
+async fn connect_socket(address: SocketAddr) -> std::io::Result<TcpStream> {
+    let stream = TcpStream::connect(address).await?;
+    stream.set_nodelay(true)?;
+    Ok(stream)
 }
 
 // At most two sockets are in flight. A blackholed preferred address must not
@@ -375,78 +379,68 @@ async fn get_proxy_stream(
         "opening proxy transport connection"
     );
     let mut proxy_server_stream = get_tcp_stream(proxy_server, proxy_server_port, detail).await?;
-    if protocol == WireProtocol::V2 {
-        let key = runtime::with_secret_key(|key, _| key.to_vec());
+    // One snapshot binds header encryption and framing to the same credential.
+    let (key, checksum_key) =
+        runtime::with_secret_key(|key, hash| <[u8; 32]>::try_from(key).map(|key| (key, hash)))
+            .map_err(|error| TransportError::Encryption {
+                uri: uri.to_string(),
+                detail: error.to_string(),
+            })?;
+    let mut header = vec![0; 8];
+    serde_json::to_writer(&mut header, &proxy_header).with_context(|_| SerdeJsonSnafu {
+        uri: uri.to_string(),
+    })?;
+    if protocol == WireProtocol::Legacy {
+        let mut cryption =
+            Aes256GcmCryption::try_new(&key).map_err(|e| TransportError::Encryption {
+                uri: uri.to_string(),
+                detail: e.to_string(),
+            })?;
+        let tag = cryption
+            .encrypt(&mut header[8..])
+            .map_err(|e| TransportError::Encryption {
+                uri: uri.to_string(),
+                detail: e.to_string(),
+            })?;
+        header.extend_from_slice(tag.as_ref());
+    }
+    let len = (header.len() - 8) as u32;
+    header[..4].copy_from_slice(&(len ^ checksum_key).to_be_bytes());
+    header[4..8].copy_from_slice(&len.to_be_bytes());
+    if protocol == WireProtocol::V3 {
         let control = crate::control::is_control_target(&proxy_header.host, proxy_header.port);
         let setup = async {
-            let mut stream = connect_v2(proxy_server_stream, &key, control).await?;
-            let header = serde_json::to_vec(&proxy_header).map_err(std::io::Error::other)?;
-            let mut writer = AsyncReaderWriterRef::new(&mut stream);
-            set_data_size(&mut writer, header.len() as u32)
-                .await
-                .map_err(std::io::Error::other)?;
-            writer.write_all(&header).await?;
+            let mut stream = connect_v3(proxy_server_stream, &key, control)?;
+            stream.write_all(&header).await?;
             Ok::<_, std::io::Error>(ProxyStream::Secure(Box::new(stream)))
         };
         return tokio::time::timeout(Duration::from_secs(10), setup)
             .await
             .map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::TimedOut, "v2 handshake timed out")
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "v3 header write timed out")
             })
-            .and_then(|r| r)
+            .and_then(|result| result)
             .context(IoSnafu {
                 uri: None,
-                detail: "v2 handshake",
+                detail: "v3 setup",
             });
     }
-    let mut header_json =
-        serde_json::to_string(&proxy_header).with_context(|_| SerdeJsonSnafu {
-            uri: uri.to_string(),
-        })?;
-    let mut cryption =
-        Aes256GcmCryption::try_new_with_default_key().map_err(|e| TransportError::Encryption {
-            uri: uri.to_string(),
-            detail: e.to_string(),
-        })?;
-
-    // SAFETY: We use `as_bytes_mut()` to encrypt the JSON string in-place.
-    // After encryption, the bytes are no longer valid UTF-8, but we only use
-    // `addr` as a byte slice for network transmission (write_all), never as
-    // a String again. The String is dropped after this scope.
-    let (addr, tag, len) = unsafe {
-        let addr = header_json.as_bytes_mut();
-        let tag = cryption
-            .encrypt(addr)
-            .map_err(|e| TransportError::Encryption {
-                uri: uri.to_string(),
-                detail: e.to_string(),
-            })?;
-        let len = addr.len() + tag.as_ref().len();
-        (addr, tag, len as u32)
-    };
-
-    let mut proxy_server_stream_ref = AsyncReaderWriterRef::new(&mut proxy_server_stream);
-
-    // 3. send proxy header
-    set_data_size(&mut proxy_server_stream_ref, len)
-        .await
-        .with_context(|_| SendHeaderSnafu {
-            uri: uri.to_string(),
-        })?;
-    proxy_server_stream_ref
-        .write_all(addr)
-        .await
-        .with_context(|_| IoSnafu {
-            uri: Some(uri.to_string()),
-            detail: "Send Header(host,ip)",
-        })?;
-    proxy_server_stream_ref
-        .write_all(tag.as_ref())
-        .await
-        .with_context(|_| IoSnafu {
-            uri: Some(uri.to_string()),
-            detail: "Send Header(tag)",
-        })?;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        proxy_server_stream.write_all(&header),
+    )
+    .await
+    .map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "legacy header write timed out",
+        )
+    })
+    .and_then(|result| result)
+    .with_context(|_| IoSnafu {
+        uri: Some(uri.to_string()),
+        detail: "send proxy header",
+    })?;
     tracing::debug!(
         proxy_server,
         proxy_server_port,

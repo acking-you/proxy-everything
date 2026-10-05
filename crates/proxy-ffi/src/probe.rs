@@ -128,22 +128,21 @@ pub unsafe extern "C" fn proxy_probe_node(
     unsafe { probe_node_inner(server_host, server_port, force_codec, timeout_ms, protocol) }
 }
 
-/// Probe using the explicitly selected protocol without altering running clients.
+/// Probe a specific wire version without changing the active client's protocol.
 ///
 /// # Safety
 /// `server_host` must be a valid C string; free the result with the matching free function.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn proxy_probe_node_v2(
+pub unsafe extern "C" fn proxy_probe_node_v3(
     server_host: *const c_char,
     server_port: u16,
     force_codec: c_int,
     timeout_ms: u32,
-    secure_transport: c_int,
+    wire_protocol: c_int,
 ) -> NodeProbeResult {
-    let protocol = match secure_transport {
-        0 => WireProtocol::Legacy,
-        1 => WireProtocol::V2,
-        _ => return failure("Invalid wire protocol", 0),
+    let protocol = match WireProtocol::from_version(wire_protocol) {
+        Ok(protocol) => protocol,
+        Err(_) => return failure("Invalid wire protocol", 0),
     };
     unsafe { probe_node_inner(server_host, server_port, force_codec, timeout_ms, protocol) }
 }

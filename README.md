@@ -28,14 +28,16 @@ protocols and storage identifiers stay compatible. Repository URLs remain
 unchanged. On macOS, replace the previous direct-download app with
 `CipherRelay.app`; renaming does not migrate data between the two editions.
 
-## Secure transport migration
+## Low-latency encrypted transport
 
-Native **0.4.32** and UI **1.2.18+44** add an explicitly selected v2 transport
-with fresh connection material and separate direction keys for TCP, UDP and
-control traffic. Upgrade all relays/servers first, then enable **Secure transport
-v2** or `PROXY_WIRE_PROTOCOL=v2`; after migration, servers can require it with
-`PROXY_REQUIRE_V2=1`. Existing profiles retain legacy compatibility and its
-nonce-reuse limitation. See [the wire format and migration guide](docs/secure-transport-v2.md).
+Native **0.4.33** and UI **1.2.19+45** provide v3 encryption with **no additional
+handshake round trip**: the first flight carries the encrypted request. Fresh
+client and server salts separate connections and directions. Legacy remains the
+default for new and existing profiles, so old clients and servers still work.
+Upgrade every relay/server before enabling **Low-latency encrypted transport
+(v3)** or `PROXY_WIRE_PROTOCOL=v3`. `PROXY_REQUIRE_V3=1` optionally rejects legacy.
+The unused challenge transport has been removed. See the
+[wire format, replay boundary and migration guide](docs/secure-transport-v3.md).
 
 ## Quick Start
 

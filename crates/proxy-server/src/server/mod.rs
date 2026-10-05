@@ -490,7 +490,7 @@ pub async fn start_server(host: impl AsRef<str> + Debug, port: u16) {
     }
 
     let config = ServerConfig {
-        require_secure_transport: std::env::var("PROXY_REQUIRE_V2").is_ok_and(|v| v == "1"),
+        require_secure_transport: std::env::var("PROXY_REQUIRE_V3").is_ok_and(|v| v == "1"),
         metrics,
         nodes,
         relay,

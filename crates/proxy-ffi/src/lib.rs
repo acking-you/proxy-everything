@@ -35,16 +35,16 @@ pub use handle::{
     proxy_is_elevated, proxy_is_running, proxy_is_tun_running, proxy_list_tun_processes,
     proxy_list_tun_processes_v2, proxy_relaunch_elevated_for_tun, proxy_set_tun_bypass_processes,
     proxy_start, proxy_start_tun, proxy_start_v2, proxy_start_v3, proxy_start_v4, proxy_start_v5,
-    proxy_start_v6, proxy_stop, proxy_stop_tun, proxy_switch_upstream,
+    proxy_start_v7, proxy_stop, proxy_stop_tun, proxy_switch_upstream,
 };
 pub use latency::{proxy_free_latency_result, proxy_test_latency};
 pub use logging::{
     proxy_free_string, proxy_init_logging, proxy_set_log_callback, proxy_set_log_level,
 };
 pub use nodes::{proxy_free_nodes_result, proxy_get_server_nodes};
-pub use probe::{proxy_free_node_probe_result, proxy_probe_node, proxy_probe_node_v2};
+pub use probe::{proxy_free_node_probe_result, proxy_probe_node, proxy_probe_node_v3};
 pub use types::{
     GroupsResult, LatencyResult, LogCallback, NodeGroupInfo, NodeInfoWithGeo, NodeProbeResult,
     NodesResult, ProxyConfig, ProxyConfigV2, ProxyConfigV3, ProxyConfigV4, ProxyConfigV5,
-    ProxyConfigV6, ProxyResult,
+    ProxyConfigV7, ProxyResult,
 };

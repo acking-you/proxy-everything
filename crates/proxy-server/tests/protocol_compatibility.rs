@@ -146,28 +146,30 @@ async fn current_legacy_client_interoperates_with_historical_server_wire_format(
 }
 
 #[tokio::test]
-async fn rejected_v2_handshake_does_not_open_a_legacy_connection() {
+async fn rejected_v3_handshake_does_not_open_a_legacy_connection() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let old_server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut hello = [0; 40];
         stream.read_exact(&mut hello).await.unwrap();
-        assert_eq!(&hello[..4], b"PXY2");
+        assert_eq!(&hello[..4], b"PXY3");
         drop(stream);
         listener
     });
-    let result = get_tcp_proxy_stream_with_protocol(
+    let stream = get_tcp_proxy_stream_with_protocol(
         "legacy.example",
         443,
         "127.0.0.1",
         addr.port(),
         None,
-        "v2 must stay v2",
-        WireProtocol::V2,
+        "v3 must stay v3",
+        WireProtocol::V3,
     )
     .await;
-    assert!(result.is_err());
+    if let Ok(mut stream) = stream {
+        assert!(stream.read_u8().await.is_err());
+    }
     let listener = old_server.await.unwrap();
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())

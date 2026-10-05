@@ -10,7 +10,7 @@ use proxy_core::codec::{
 use proxy_core::control::{ControlCodec, is_control_target};
 use proxy_core::metrics::{ConnectionRecord, MetricsStore, current_time_ms};
 use proxy_core::relay::RelayRoute;
-use proxy_core::secure_transport::{MAGIC, ProxyStream, accept_v2};
+use proxy_core::secure_transport::{MAGIC, ProxyStream, accept_v3};
 use proxy_core::transport::get_tcp_external_proxy_stream;
 use proxy_core::util::{display_report, error_report};
 use proxy_core::{
@@ -196,6 +196,9 @@ async fn handle_connect_inner(
     })?;
     let deadline = tokio::time::Instant::now() + HEADER_TIMEOUT;
     let relay_target = ctx.relay.select();
+    conn.set_nodelay(true).context(IoSnafu {
+        detail: "set client TCP_NODELAY",
+    })?;
     let mut conn = conn;
     let mut magic = [0u8; 8];
     tokio::time::timeout_at(
@@ -211,14 +214,14 @@ async fn handle_connect_inner(
         detail: "read protocol preface",
     })?;
     // The second word in a valid legacy header is at most MAX_HEADER_SIZE.
-    // V2 reserves a larger value, even if its magic collides with a checksum.
+    // V3 reserves a larger value, even if its magic collides with a checksum.
     let legacy_length = u32::from_be_bytes(magic[4..8].try_into().unwrap_or_default());
     let secure = magic[..4] == MAGIC && legacy_length > MAX_HEADER_SIZE;
     let mut control_hello = false;
     let conn = if secure {
-        if magic[4] != 2 || magic[5] > 1 || magic[6..8] != [0, 0] {
+        if magic[4] != 3 || magic[5] > 1 || magic[6..8] != [0, 0] {
             return Err(ServerError::Decryption {
-                detail: "invalid v2 version or flags".into(),
+                detail: "invalid v3 version or flags".into(),
             });
         }
         if magic[5] == 0
@@ -228,16 +231,19 @@ async fn handle_connect_inner(
             let mut upstream = tokio::time::timeout_at(deadline, TcpStream::connect(addr))
                 .await
                 .map_err(|_| ServerError::Io {
-                    detail: "v2 relay connect timeout".into(),
+                    detail: "v3 relay connect timeout".into(),
                     source: std::io::ErrorKind::TimedOut.into(),
                 })?
                 .context(IoSnafu {
-                    detail: "connect v2 relay",
+                    detail: "connect v3 relay",
                 })?;
+            upstream.set_nodelay(true).context(IoSnafu {
+                detail: "set relay TCP_NODELAY",
+            })?;
             tokio::io::AsyncWriteExt::write_all(&mut upstream, &magic)
                 .await
                 .context(IoSnafu {
-                    detail: "relay v2 preface",
+                    detail: "relay v3 preface",
                 })?;
             drop(_header_permit);
             ctx.relay.on_connect(&target.id);
@@ -262,22 +268,25 @@ async fn handle_connect_inner(
             );
             return result.map(|_| ());
         }
-        let key = proxy_core::config::runtime::with_secret_key(|key, _| key.to_vec());
-        let (stream, control) = tokio::time::timeout_at(deadline, accept_v2(conn, &key, magic))
+        let key = proxy_core::config::runtime::with_secret_key(|key, _| <[u8; 32]>::try_from(key))
+            .map_err(|error| ServerError::Decryption {
+                detail: error.to_string(),
+            })?;
+        let (stream, control) = tokio::time::timeout_at(deadline, accept_v3(conn, &key, magic))
             .await
             .map_err(|_| ServerError::Io {
-                detail: "v2 handshake timeout".into(),
+                detail: "v3 handshake timeout".into(),
                 source: std::io::ErrorKind::TimedOut.into(),
             })?
             .context(IoSnafu {
-                detail: "accept v2 handshake",
+                detail: "accept v3 handshake",
             })?;
         control_hello = control;
         ProxyStream::Secure(Box::new(stream))
     } else {
         if ctx.require_secure_transport {
             return Err(ServerError::Decryption {
-                detail: "legacy transport disabled; v2 required".into(),
+                detail: "legacy transport disabled; v3 required".into(),
             });
         }
         tracing::debug!(wire_protocol = "legacy", "accepted legacy proxy transport");
@@ -320,7 +329,7 @@ async fn handle_connect_inner(
             serde_json::from_slice::<ProxyHeader>(&header_buf).context(super::SerdeJsonSnafu)?;
         if control_hello != is_control_target(&header.host, header.port) {
             return Err(ServerError::Decryption {
-                detail: "v2 authenticated route mismatch".into(),
+                detail: "v3 authenticated route mismatch".into(),
             });
         }
         Some(header)
@@ -458,6 +467,9 @@ async fn handle_connect_inner(
                         .context(IoSnafu {
                             detail: format!("Connect to relay_server:{addr}"),
                         })?;
+                relay_stream.set_nodelay(true).context(IoSnafu {
+                    detail: "set relay TCP_NODELAY",
+                })?;
                 ctx.relay.on_connect(&relay_target.id);
                 let (r, w) = ProxyStream::from(relay_stream).into_split();
                 let (server_reader, mut server_writer) = (AsyncReader::new(r), AsyncWriter::new(w));

@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn local_proxy_supports_plain_encrypted_http_and_udp_with_chained_relays() {
-    for protocol in [WireProtocol::Legacy, WireProtocol::V2] {
+    for protocol in [WireProtocol::Legacy, WireProtocol::V3] {
         timeout(Duration::from_secs(30), protocol_round_trips(protocol))
             .await
             .unwrap();
@@ -59,7 +59,7 @@ async fn protocol_round_trips(protocol: WireProtocol) {
         nodes,
         admin_token: None,
         require_control_encryption: true,
-        require_secure_transport: protocol == WireProtocol::V2,
+        require_secure_transport: protocol == WireProtocol::V3,
         control_session_key: Some(DEFAULT_SECRET_KEY.to_string()),
         self_node_id: None,
     };
@@ -87,7 +87,7 @@ async fn protocol_round_trips(protocol: WireProtocol) {
         .unwrap();
     assert!(matches!(response.result, Some(ControlResult::Pong)));
     drop(control);
-    if protocol == WireProtocol::V2 {
+    if protocol == WireProtocol::V3 {
         let mut legacy = TcpStream::connect(server_addr).await.unwrap();
         legacy.write_all(b"old!\0\0\0\x01").await.unwrap();
         assert!(legacy.read_u8().await.is_err());
@@ -193,10 +193,10 @@ async fn protocol_round_trips(protocol: WireProtocol) {
     )
     .await;
 
-    if protocol == WireProtocol::V2 {
+    if protocol == WireProtocol::V3 {
         let relay_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = relay_listener.local_addr().unwrap();
-        let relay_dir = unique_temp_dir("v2-opaque-relay");
+        let relay_dir = unique_temp_dir("v3-opaque-relay");
         std::fs::create_dir_all(&relay_dir).unwrap();
         let relay_nodes = Arc::new(NodeStore::new(relay_dir.join("nodes.json")));
         let relay = Arc::new(RelayManager::new(relay_nodes.clone(), &relay_dir));
@@ -223,7 +223,7 @@ async fn protocol_round_trips(protocol: WireProtocol) {
             client_addr,
             DatagramAddress::Ip(echo_addr),
             DatagramAddress::Ip(echo_addr),
-            b"v2 opaque relay",
+            b"v3 opaque relay",
             false,
         )
         .await;
