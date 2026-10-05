@@ -161,10 +161,22 @@ one-byte transport regression reproduces the previous stalled-response bug
 without a flush and completes with the shared writer. Echo DNS also reuses the
 bounded resolver, retaining its concurrency slot through OS lookup cancellation.
 
+The DNS dependency update uses Hickory's fixed encoder for
+[GHSA-q2qq-hmj6-3wpp](https://github.com/hickory-dns/hickory-dns/security/advisories/GHSA-q2qq-hmj6-3wpp).
+The TUN DNS paths preserve their existing validation and filtering with the
+stable message API. The uni-stream fallback now awaits the async resolver
+directly, reusing its cache without an additional blocking job or hostname copy.
+A regression occupies the runtime's only blocking worker and verifies that the
+async lookup still completes. These DNS dependencies require Rust 1.88 or later;
+the project's pinned toolchain already meets that requirement.
+
+Local empty/oversized frame validation leaves the writer usable and consumes
+no encryption nonce. Encryption/I/O failures and cancelled sends remain terminal.
+
 [TUN Echo support](tun-icmp-echo.md) adds real remote IPv4/IPv6 ping. It does not
 turn temporary Wi-Fi loss into reachability or recover established TCP sessions.
 
-Verification: 242 Linux / 246 Windows workspace tests; tun2proxy 56 / 79;
+Verification: 243 Linux / 247 Windows workspace tests; tun2proxy 56 / 79;
 strict Clippy and formatting passed on both platforms. ProxyUI analysis and
 100 tests passed (two existing skips). The Windows release bundle pairs UI
 1.2.20+46 with a freshly built, hash-matched native 0.4.34 DLL. Real packet-path

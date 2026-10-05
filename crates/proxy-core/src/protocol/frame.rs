@@ -167,14 +167,14 @@ impl<W: MyAsyncWriteExt + Send + Unpin> FrameWriter<W> {
                 "message writer is closed after an interrupted send",
             ));
         }
-        // A cancelled write_all may have emitted a partial frame. Poison the
-        // writer until this entire send completes; never append a new frame.
-        self.interrupted = true;
         let length = self.buffer.len().saturating_sub(PREFIX_LEN);
         let tag_len = if self.encryptor.is_some() { 16 } else { 0 };
         if length == 0 || length.saturating_add(tag_len) > self.limit {
             return Err(protocol_error("invalid outgoing message frame size"));
         }
+        // Encryption can consume a nonce and a cancelled write can emit bytes.
+        // From this point onward, only a complete send permits another frame.
+        self.interrupted = true;
         if let Some(encryptor) = &mut self.encryptor {
             let tag = encryptor
                 .encrypt(&mut self.buffer[PREFIX_LEN..])
@@ -225,6 +225,29 @@ mod tests {
         }
         assert_eq!(writer.writer.writes, packets.len());
         writer.writer.bytes
+    }
+
+    #[tokio::test]
+    async fn invalid_local_frames_preserve_the_writer_and_nonce_sequence() {
+        for key in [None, Some("01234567890123456789012345678901")] {
+            let mut writer = FrameWriter::new(Capture::default(), key, 32).unwrap();
+            assert!(writer.send().await.is_err());
+            let packets: &[&[u8]] = &[b"first", b"second"];
+            for (sent, packet) in packets.iter().enumerate() {
+                for length in [0, 33] {
+                    writer
+                        .prepare()
+                        .unwrap()
+                        .extend_from_slice(&[0; 33][..length]);
+                    assert!(writer.send().await.is_err());
+                    assert_eq!(writer.writer.writes, sent);
+                }
+                writer.prepare().unwrap().extend_from_slice(packet);
+                writer.send().await.unwrap();
+            }
+            assert_eq!(writer.writer.writes, packets.len());
+            assert_eq!(writer.writer.bytes, frames(key, packets).await);
+        }
     }
 
     #[tokio::test]
@@ -295,14 +318,16 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_frame_send_cannot_be_followed_by_a_new_message() {
-        let (stream, _reader) = tokio::io::duplex(4);
-        let mut writer = FrameWriter::new(AsyncWriter::new(stream), None, 1024).unwrap();
-        writer
-            .prepare()
-            .unwrap()
-            .extend_from_slice(b"partially emitted");
-        assert!(futures::poll!(Box::pin(writer.send())).is_pending());
-        assert!(writer.prepare().is_err());
-        assert!(writer.send().await.is_err());
+        for key in [None, Some("01234567890123456789012345678901")] {
+            let (stream, _reader) = tokio::io::duplex(4);
+            let mut writer = FrameWriter::new(AsyncWriter::new(stream), key, 1024).unwrap();
+            writer
+                .prepare()
+                .unwrap()
+                .extend_from_slice(b"partially emitted");
+            assert!(futures::poll!(Box::pin(writer.send())).is_pending());
+            assert!(writer.prepare().is_err());
+            assert!(writer.send().await.is_err());
+        }
     }
 }

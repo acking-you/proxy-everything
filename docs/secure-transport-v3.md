@@ -196,7 +196,7 @@ The node probe and initial HTTP request also use the shared flushing writer.
 A one-byte duplex regression fails with the old probe write boundary and
 passes with the fix, covering requests buffered under socket backpressure.
 
-Final 0.4.34 checks passed 242 Linux / 246 Windows workspace tests (seven
+Final 0.4.34 checks passed 243 Linux / 247 Windows workspace tests (seven
 ignored on each), plus the packet adapter integration on both platforms.
 Tun2proxy passed 56 Linux / 79 Windows tests. Formatting and strict Clippy
 passed. UI 1.2.20+46 passed analysis and 100 tests (two existing skips), and its
