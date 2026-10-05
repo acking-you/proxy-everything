@@ -56,6 +56,15 @@ impl<T: tokio::io::AsyncReadExt + Unpin> AsyncReader<T> {
     pub fn new(reader: T) -> Self {
         Self(reader)
     }
+
+    /// Replay already-read bytes through the same codec as the remaining stream.
+    pub fn prepend(
+        self,
+        prefix: Vec<u8>,
+    ) -> AsyncReader<tokio::io::Chain<std::io::Cursor<Vec<u8>>, T>> {
+        use tokio::io::AsyncReadExt;
+        AsyncReader::new(std::io::Cursor::new(prefix).chain(self.0))
+    }
 }
 
 #[cfg(feature = "tokio")]
@@ -79,7 +88,7 @@ impl<'a, T: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin>
 // ============================================================================
 
 #[cfg(feature = "tokio")]
-impl<T: tokio::io::AsyncReadExt + Send + Unpin + 'static> MyAsyncReadExt for AsyncReader<T> {
+impl<T: tokio::io::AsyncReadExt + Send + Unpin> MyAsyncReadExt for AsyncReader<T> {
     async fn read_u32(&mut self) -> std::result::Result<u32, std::io::Error> {
         self.0.read_u32().await
     }
@@ -115,13 +124,22 @@ impl<'a, T: tokio::io::AsyncWriteExt + tokio::io::AsyncReadExt + Send + Unpin> M
 // ============================================================================
 
 #[cfg(feature = "tokio")]
+async fn write_and_flush<T: tokio::io::AsyncWriteExt + Unpin>(
+    writer: &mut T,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    writer.write_all(bytes).await?;
+    writer.flush().await
+}
+
+#[cfg(feature = "tokio")]
 impl<T: tokio::io::AsyncWriteExt + Send + Unpin> MyAsyncWriteExt for AsyncWriter<T> {
     async fn write_u32(&mut self, n: u32) -> std::result::Result<(), std::io::Error> {
-        self.0.write_u32(n).await
+        write_and_flush(&mut self.0, &n.to_be_bytes()).await
     }
 
     async fn write_all(&mut self, src: &[u8]) -> std::result::Result<(), std::io::Error> {
-        self.0.write_all(src).await
+        write_and_flush(&mut self.0, src).await
     }
 
     async fn shutdown(&mut self) -> std::result::Result<(), std::io::Error> {
@@ -134,11 +152,11 @@ impl<'a, T: tokio::io::AsyncWriteExt + tokio::io::AsyncReadExt + Send + Unpin> M
     for AsyncReaderWriterRef<'a, T>
 {
     async fn write_u32(&mut self, n: u32) -> std::result::Result<(), std::io::Error> {
-        self.0.write_u32(n).await
+        write_and_flush(self.0, &n.to_be_bytes()).await
     }
 
     async fn write_all(&mut self, src: &[u8]) -> std::result::Result<(), std::io::Error> {
-        self.0.write_all(src).await
+        write_and_flush(self.0, src).await
     }
 
     async fn shutdown(&mut self) -> std::result::Result<(), std::io::Error> {

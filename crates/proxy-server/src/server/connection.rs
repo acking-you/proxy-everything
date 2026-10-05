@@ -8,8 +8,9 @@ use proxy_core::codec::{
     AsyncDecryptCodec, AsyncEncryptCodec, AsyncNormalCodec, AsyncReader, AsyncWriter,
 };
 use proxy_core::control::{ControlCodec, is_control_target};
-use proxy_core::metrics::{ConnectionRecord, current_time_ms};
+use proxy_core::metrics::{ConnectionRecord, MetricsStore, current_time_ms};
 use proxy_core::relay::RelayRoute;
+use proxy_core::secure_transport::{MAGIC, ProxyStream, accept_v3};
 use proxy_core::transport::get_tcp_external_proxy_stream;
 use proxy_core::util::{display_report, error_report};
 use proxy_core::{
@@ -29,6 +30,16 @@ use super::{
     ServerError, TransportSnafu,
 };
 
+static HEADER_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(512);
+const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
+
+struct ActiveConnection<'a>(&'a MetricsStore);
+impl Drop for ActiveConnection<'_> {
+    fn drop(&mut self) {
+        self.0.dec_active();
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub(super) struct TransferStats {
     pub(super) bytes_up: u64,
@@ -36,18 +47,12 @@ pub(super) struct TransferStats {
     pub(super) latency_ms: Option<u64>,
 }
 
-#[derive(Debug)]
-struct CopyOutcome {
-    bytes: DataSize,
-    error: Option<proxy_core::ProxyError>,
-}
-
 async fn copy_with_metrics<R, W>(
     mut reader: R,
     mut writer: W,
     mut first_byte_tx: Option<oneshot::Sender<Duration>>,
     start: Instant,
-) -> CopyOutcome
+) -> proxy_core::Result<DataSize>
 where
     R: MyAsyncCodecReader + Send + Unpin,
     W: MyAsyncWriteExt + Send + Unpin,
@@ -65,19 +70,10 @@ where
                 }
                 total = total.saturating_add(n);
             }
-            Err(err) => {
-                let _ = writer.shutdown().await;
-                return CopyOutcome {
-                    bytes: total,
-                    error: Some(err),
-                };
-            }
+            Err(err) => return Err(err),
         }
     }
-    CopyOutcome {
-        bytes: total,
-        error: None,
-    }
+    Ok(total)
 }
 
 async fn proxy_with_metrics_normal<
@@ -103,19 +99,15 @@ async fn proxy_with_metrics_normal<
         Some(tx),
         start,
     );
-    let (client_to_server, server_to_client) = tokio::join!(client_to_server, server_to_client);
-    let first_byte_latency = rx.await.ok().map(|v| v.as_millis() as u64);
-    let bytes_up = client_to_server.bytes;
-    let bytes_down = server_to_client.bytes;
-    let error = client_to_server.error.or(server_to_client.error);
-    match error {
-        Some(err) => Err(ServerError::Proxy { source: err }),
-        None => Ok(TransferStats {
-            bytes_up: bytes_up as u64,
-            bytes_down: bytes_down as u64,
-            latency_ms: first_byte_latency,
-        }),
-    }
+    // Authentication/I/O errors cancel the other direction immediately. A
+    // normal EOF still half-closes its writer and lets the peer drain.
+    let (bytes_up, bytes_down) =
+        tokio::try_join!(client_to_server, server_to_client).context(ProxySnafu)?;
+    Ok(TransferStats {
+        bytes_up: bytes_up as u64,
+        bytes_down: bytes_down as u64,
+        latency_ms: rx.await.ok().map(|v| v.as_millis() as u64),
+    })
 }
 
 async fn proxy_with_metrics_cryptor<
@@ -145,19 +137,15 @@ async fn proxy_with_metrics_cryptor<
     let start = Instant::now();
     let client_to_server = copy_with_metrics(client_codec, server_writer, None, start);
     let server_to_client = copy_with_metrics(server_codec, client_writer, Some(tx), start);
-    let (client_to_server, server_to_client) = tokio::join!(client_to_server, server_to_client);
-    let first_byte_latency = rx.await.ok().map(|v| v.as_millis() as u64);
-    let bytes_up = client_to_server.bytes;
-    let bytes_down = server_to_client.bytes;
-    let error = client_to_server.error.or(server_to_client.error);
-    match error {
-        Some(err) => Err(ServerError::Proxy { source: err }),
-        None => Ok(TransferStats {
-            bytes_up: bytes_up as u64,
-            bytes_down: bytes_down as u64,
-            latency_ms: first_byte_latency,
-        }),
-    }
+    // Authentication/I/O errors cancel the other direction immediately. A
+    // normal EOF still half-closes its writer and lets the peer drain.
+    let (bytes_up, bytes_down) =
+        tokio::try_join!(client_to_server, server_to_client).context(ProxySnafu)?;
+    Ok(TransferStats {
+        bytes_up: bytes_up as u64,
+        bytes_down: bytes_down as u64,
+        latency_ms: rx.await.ok().map(|v| v.as_millis() as u64),
+    })
 }
 
 /// Handle a new TCP connection with a per-connection tracing span.
@@ -180,8 +168,8 @@ pub(super) async fn handle_connect(
     async move {
         tracing::info!("connection accepted");
         ctx.metrics.inc_active();
+        let _active = ActiveConnection(&ctx.metrics);
         let result = handle_connect_inner(conn, peer_addr, ctx.clone(), trace_id).await;
-        ctx.metrics.dec_active();
         if let Err(err) = &result {
             tracing::error!("connection error: {}", error_report(err));
         }
@@ -202,45 +190,176 @@ async fn handle_connect_inner(
     let mut dest_host = "unknown".to_string();
     let mut dest_port: u16 = 0;
 
+    let _header_permit = HEADER_SLOTS.try_acquire().map_err(|_| ServerError::Io {
+        detail: "too many pending proxy headers".into(),
+        source: std::io::Error::from(std::io::ErrorKind::WouldBlock),
+    })?;
+    let deadline = tokio::time::Instant::now() + HEADER_TIMEOUT;
+    let relay_target = ctx.relay.select();
+    conn.set_nodelay(true).context(IoSnafu {
+        detail: "set client TCP_NODELAY",
+    })?;
+    let mut conn = conn;
+    let mut magic = [0u8; 8];
+    tokio::time::timeout_at(
+        deadline,
+        tokio::io::AsyncReadExt::read_exact(&mut conn, &mut magic),
+    )
+    .await
+    .map_err(|_| ServerError::Io {
+        detail: "protocol preface timeout".into(),
+        source: std::io::ErrorKind::TimedOut.into(),
+    })?
+    .context(IoSnafu {
+        detail: "read protocol preface",
+    })?;
+    // The second word in a valid legacy header is at most MAX_HEADER_SIZE.
+    // V3 reserves a larger value, even if its magic collides with a checksum.
+    let legacy_length = u32::from_be_bytes(magic[4..8].try_into().unwrap_or_default());
+    let secure = magic[..4] == MAGIC && legacy_length > MAX_HEADER_SIZE;
+    let mut control_hello = false;
+    let conn = if secure {
+        if magic[4] != 3 || magic[5] > 1 || magic[6..8] != [0, 0] {
+            return Err(ServerError::Decryption {
+                detail: "invalid v3 version or flags".into(),
+            });
+        }
+        if magic[5] == 0
+            && let Some(target) = relay_target.as_ref()
+            && let RelayRoute::ProxyServer { addr } = &target.route
+        {
+            let mut upstream = tokio::time::timeout_at(deadline, TcpStream::connect(addr))
+                .await
+                .map_err(|_| ServerError::Io {
+                    detail: "v3 relay connect timeout".into(),
+                    source: std::io::ErrorKind::TimedOut.into(),
+                })?
+                .context(IoSnafu {
+                    detail: "connect v3 relay",
+                })?;
+            upstream.set_nodelay(true).context(IoSnafu {
+                detail: "set relay TCP_NODELAY",
+            })?;
+            tokio::io::AsyncWriteExt::write_all(&mut upstream, &magic)
+                .await
+                .context(IoSnafu {
+                    detail: "relay v3 preface",
+                })?;
+            drop(_header_permit);
+            ctx.relay.on_connect(&target.id);
+            let (cr, cw) = ProxyStream::from(conn).into_split();
+            let (sr, sw) = ProxyStream::from(upstream).into_split();
+            let result = proxy_with_metrics_normal(
+                AsyncReader::new(cr),
+                AsyncReader::new(sr),
+                AsyncWriter::new(cw),
+                AsyncWriter::new(sw),
+            )
+            .await;
+            ctx.relay.on_disconnect(&target.id);
+            record_connection(
+                &ctx,
+                &peer_ip,
+                &format!("relay:{}", target.addr),
+                0,
+                started_at_ms,
+                trace_id,
+                &result,
+            );
+            return result.map(|_| ());
+        }
+        let key = proxy_core::config::runtime::with_secret_key(|key, _| <[u8; 32]>::try_from(key))
+            .map_err(|error| ServerError::Decryption {
+                detail: error.to_string(),
+            })?;
+        let (stream, control) = tokio::time::timeout_at(deadline, accept_v3(conn, &key, magic))
+            .await
+            .map_err(|_| ServerError::Io {
+                detail: "v3 handshake timeout".into(),
+                source: std::io::ErrorKind::TimedOut.into(),
+            })?
+            .context(IoSnafu {
+                detail: "accept v3 handshake",
+            })?;
+        control_hello = control;
+        ProxyStream::Secure(Box::new(stream))
+    } else {
+        if ctx.require_secure_transport {
+            return Err(ServerError::Decryption {
+                detail: "legacy transport disabled; v3 required".into(),
+            });
+        }
+        tracing::debug!(wire_protocol = "legacy", "accepted legacy proxy transport");
+        ProxyStream::legacy_with_prefix(conn, magic.to_vec())
+    };
     let (r, w) = conn.into_split();
     let (mut client_reader, client_writer) = (AsyncReader::new(r), AsyncWriter::new(w));
-    let msg_len = get_data_size(&mut client_reader)
-        .await
-        .context(ReadHeaderSnafu)?;
-    if msg_len > MAX_HEADER_SIZE {
-        return Err(ServerError::HeaderSize { size: msg_len });
-    }
+    let (msg_len, mut header_buf) = tokio::time::timeout_at(deadline, async {
+        let msg_len = get_data_size(&mut client_reader)
+            .await
+            .context(ReadHeaderSnafu)?;
+        if msg_len > MAX_HEADER_SIZE {
+            return Err(ServerError::HeaderSize { size: msg_len });
+        }
 
-    const STACK_SIZE: usize = MAX_HEADER_SIZE as usize / 2;
-    let mut header_buf: SmallVec<u8, STACK_SIZE> = smallvec![0u8; msg_len as usize];
-    client_reader
-        .read_exact(&mut header_buf)
-        .await
-        .context(IoSnafu {
-            detail: "Read Header(addr,tag)",
-        })?;
+        const STACK_SIZE: usize = MAX_HEADER_SIZE as usize / 2;
+        let mut header_buf: SmallVec<u8, STACK_SIZE> = smallvec![0u8; msg_len as usize];
+        client_reader
+            .read_exact(&mut header_buf)
+            .await
+            .context(IoSnafu {
+                detail: "Read Header(addr,tag)",
+            })?;
 
-    // Get relay context before mutate
-    let relay_context = ctx.relay.select().map(|v| (v, header_buf.clone()));
+        Ok::<_, ServerError>((msg_len, header_buf))
+    })
+    .await
+    .map_err(|_| ServerError::Io {
+        detail: "proxy header deadline exceeded".into(),
+        source: std::io::Error::from(std::io::ErrorKind::TimedOut),
+    })??;
+    drop(_header_permit);
+
+    // Only an opaque legacy relay needs the original encrypted bytes after
+    // local decoding. External routes and v3 do not need a header copy.
+    let relay_context = relay_target.map(|target| {
+        let raw_header = if !secure && matches!(target.route, RelayRoute::ProxyServer { .. }) {
+            header_buf.clone()
+        } else {
+            SmallVec::new()
+        };
+        (target, raw_header)
+    });
 
     // Attempt to decode header for control handling.
-    let header = match Aes256GcmCryption::try_new_with_default_key() {
-        Ok(mut cryption) => match cryption.decrypt_with_tag(&mut header_buf) {
-            Ok(payload) => match serde_json::from_slice::<ProxyHeader>(payload) {
-                Ok(header) => Some(header),
+    let mut header = if secure {
+        let header =
+            serde_json::from_slice::<ProxyHeader>(&header_buf).context(super::SerdeJsonSnafu)?;
+        if control_hello != is_control_target(&header.host, header.port) {
+            return Err(ServerError::Decryption {
+                detail: "v3 authenticated route mismatch".into(),
+            });
+        }
+        Some(header)
+    } else {
+        match Aes256GcmCryption::try_new_with_default_key() {
+            Ok(mut cryption) => match cryption.decrypt_with_tag(&mut header_buf) {
+                Ok(payload) => match serde_json::from_slice::<ProxyHeader>(payload) {
+                    Ok(header) => Some(header),
+                    Err(err) => {
+                        tracing::warn!("parse header failed: {}", error_report(&err));
+                        None
+                    }
+                },
                 Err(err) => {
-                    tracing::warn!("parse header failed: {}", error_report(&err));
+                    tracing::warn!("decrypt header failed: {}", display_report(err));
                     None
                 }
             },
             Err(err) => {
-                tracing::warn!("decrypt header failed: {}", display_report(err));
+                tracing::warn!("init decryptor failed: {}", display_report(err));
                 None
             }
-        },
-        Err(err) => {
-            tracing::warn!("init decryptor failed: {}", display_report(err));
-            None
         }
     };
 
@@ -273,10 +392,52 @@ async fn handle_connect_inner(
                 tracing::warn!("control connection rejected: server has no session key");
                 return Ok(());
             }
-            let codec = ControlCodec::new(client_reader, client_writer, session_key)
-                .context(ControlSnafu)?;
+            let codec = ControlCodec::new(
+                client_reader,
+                client_writer,
+                if secure { None } else { session_key },
+            )
+            .context(ControlSnafu)?;
             return handle_control_session(codec, ctx).await;
         }
+    }
+
+    if secure && let Some(header) = header.as_mut() {
+        header.key = None;
+    }
+
+    if let Some(header) = header.as_ref()
+        && header.transport == ProxyTransport::IcmpEcho
+        && !relay_context
+            .as_ref()
+            .is_some_and(|(target, _)| matches!(target.route, RelayRoute::ProxyServer { .. }))
+    {
+        if relay_context.is_some() {
+            return Err(ServerError::Io {
+                detail: "ICMP Echo is unavailable through an external HTTP/SOCKS upstream".into(),
+                source: std::io::ErrorKind::Unsupported.into(),
+            });
+        }
+        tracing::Span::current().record("mode", "icmp-echo");
+        tracing::Span::current().record("dest", field::display(&header.host));
+        let result = super::icmp::proxy_echo(
+            client_reader,
+            client_writer,
+            &header.host,
+            header.port,
+            header.key.as_deref(),
+        )
+        .await;
+        record_connection(
+            &ctx,
+            &peer_ip,
+            &header.host,
+            header.port,
+            started_at_ms,
+            trace_id,
+            &result,
+        );
+        return result.map(|_| ());
     }
 
     if let Some(header) = header.as_ref()
@@ -338,11 +499,21 @@ async fn handle_connect_inner(
 
         match &relay_target.route {
             RelayRoute::ProxyServer { addr } => {
-                let relay_stream = TcpStream::connect(addr).await.context(IoSnafu {
-                    detail: format!("Connect to relay_server:{addr}"),
+                let relay_stream =
+                    tokio::time::timeout(Duration::from_secs(8), TcpStream::connect(addr))
+                        .await
+                        .map_err(|_| ServerError::Io {
+                            detail: "relay connection deadline exceeded".into(),
+                            source: std::io::Error::from(std::io::ErrorKind::TimedOut),
+                        })?
+                        .context(IoSnafu {
+                            detail: format!("Connect to relay_server:{addr}"),
+                        })?;
+                relay_stream.set_nodelay(true).context(IoSnafu {
+                    detail: "set relay TCP_NODELAY",
                 })?;
                 ctx.relay.on_connect(&relay_target.id);
-                let (r, w) = relay_stream.into_split();
+                let (r, w) = ProxyStream::from(relay_stream).into_split();
                 let (server_reader, mut server_writer) = (AsyncReader::new(r), AsyncWriter::new(w));
                 set_data_size(&mut server_writer, msg_len)
                     .await
@@ -385,7 +556,7 @@ async fn handle_connect_inner(
                 .await
                 .context(TransportSnafu)?;
                 ctx.relay.on_connect(&relay_target.id);
-                let (r, w) = server_stream.into_split();
+                let (r, w) = ProxyStream::from(server_stream).into_split();
                 let (server_reader, server_writer) = (AsyncReader::new(r), AsyncWriter::new(w));
                 let result = if let Some(key) = header.key.as_ref() {
                     proxy_with_metrics_cryptor(
@@ -429,12 +600,12 @@ async fn handle_connect_inner(
         "dest",
         field::display(format!("{}:{}", header.host, header.port)),
     );
-    let dest_stream = TcpStream::connect((header.host.as_str(), header.port))
+    let dest_stream = proxy_core::transport::connect_tcp_host(header.host.as_str(), header.port)
         .await
         .context(IoSnafu {
             detail: format!("Connect to `dest_server({})`", header),
         })?;
-    let (r, w) = dest_stream.into_split();
+    let (r, w) = ProxyStream::from(dest_stream).into_split();
     let (server_reader, server_writer) = (AsyncReader::new(r), AsyncWriter::new(w));
     let result = if let Some(key) = header.key.as_ref() {
         proxy_with_metrics_cryptor(
@@ -500,4 +671,42 @@ fn record_connection(
         error: error_msg,
     };
     ctx.metrics.record_connection(record);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct Reader(bool);
+    impl MyAsyncReadExt for Reader {
+        async fn read_u32(&mut self) -> std::io::Result<u32> {
+            unreachable!()
+        }
+
+        async fn read_exact(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            unreachable!()
+        }
+
+        async fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.0 {
+                Err(std::io::ErrorKind::ConnectionReset.into())
+            } else {
+                std::future::pending().await
+            }
+        }
+    }
+    #[tokio::test]
+    async fn forwarding_error_does_not_wait_for_a_silent_peer() {
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            proxy_with_metrics_normal(
+                Reader(true),
+                Reader(false),
+                AsyncWriter::new(Vec::new()),
+                AsyncWriter::new(Vec::new()),
+            ),
+        )
+        .await
+        .expect("peer direction must be cancelled");
+        assert!(result.is_err());
+    }
 }

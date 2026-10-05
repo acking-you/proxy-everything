@@ -21,12 +21,12 @@
 //!
 //! # Security Considerations
 //!
-//! - **Nonce uniqueness**: Uses a counter-based nonce sequence to ensure each encryption operation
-//!   uses a unique nonce. The counter is stored in the last 4 bytes of the 12-byte nonce.
-//!
-//! - **Per-connection instances**: Each connection should create its own `Aes256GcmCryption`
-//!   instance to maintain independent nonce counters. Sharing instances across connections would
-//!   cause nonce reuse.
+//! - **Legacy nonce scope**: The counter is unique only within one encryptor instance. Creating
+//!   another instance with the same key repeats its nonce sequence. Independent
+//!   connection/direction counters do not provide global nonce uniqueness. The legacy header and
+//!   bidirectional stream format require a versioned protocol migration; see
+//!   `docs/network-resilience.md` for the remaining security boundary.
+//! - **Exhaustion**: A counter reaching its limit fails rather than wrapping.
 //!
 //! - **Key requirements**: The encryption key must be exactly 32 bytes (256 bits) for AES-256-GCM.
 //!
@@ -81,7 +81,9 @@ impl NonceSequence for CounterNonceSequence {
         let bytes = self.0.to_be_bytes();
         nonce_bytes[8..].copy_from_slice(&bytes);
 
-        self.0 += 1; // Advance counter for next operation
+        // Exhaustion must fail closed in release builds too, never wrap to a
+        // previously used nonce. Existing nonces retain their wire encoding.
+        self.0 = self.0.checked_add(1).ok_or(ring::error::Unspecified)?;
         Ok(Nonce::assume_unique_for_key(*nonce_bytes))
     }
 }
@@ -232,6 +234,14 @@ pub trait Decryptor {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn exhausted_nonce_sequence_never_wraps_or_panics() {
+        use ring::aead::NonceSequence;
+        let mut sequence = super::CounterNonceSequence(u32::MAX - 1, [0; 12]);
+        assert!(sequence.advance().is_ok());
+        assert!(sequence.advance().is_err());
+        assert!(sequence.advance().is_err());
+    }
     use std::time::Instant;
 
     use super::*;

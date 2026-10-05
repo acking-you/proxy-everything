@@ -46,6 +46,16 @@ fn receive(tunnel: &PacketTunnelRuntime, accept: impl Fn(&SlicedPacket<'_>) -> b
 /// entirely on loopback. No OS tunnel, routes, DNS or public service is touched.
 #[test]
 fn provider_forwards_dns_tcp_and_udp_in_plain_and_encrypted_modes_and_stops() {
+    packet_round_trips(false);
+}
+
+#[test]
+#[ignore = "requires ICMP sockets; run inside an isolated network namespace"]
+fn provider_forwards_real_echo_v4_v6_legacy_and_v3() {
+    packet_round_trips(true);
+}
+
+fn packet_round_trips(with_echo: bool) {
     struct TestLog;
     impl log::Log for TestLog {
         fn enabled(&self, _: &log::Metadata<'_>) -> bool {
@@ -58,7 +68,7 @@ fn provider_forwards_dns_tcp_and_udp_in_plain_and_encrypted_modes_and_stops() {
 
         fn flush(&self) {}
     }
-    log::set_logger(&TestLog).unwrap();
+    let _ = log::set_logger(&TestLog);
     log::set_max_level(log::LevelFilter::Debug);
     let dir = TempDir(std::env::temp_dir().join(format!("proxy-packet-test-{}-{}",
         std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos())));
@@ -102,26 +112,58 @@ fn provider_forwards_dns_tcp_and_udp_in_plain_and_encrypted_modes_and_stops() {
     });
     let nodes = Arc::new(NodeStore::new(dir.0.join("nodes.json")));
     let cancel = CancellationToken::new();
-    let server = runtime.spawn(run_server_with_listener(
-        server_listener,
+    let config = ServerConfig {
+        metrics: Arc::new(MetricsStore::with_default_config()),
+        relay: Arc::new(RelayManager::new(nodes.clone(), &dir.0)),
+        nodes: nodes.clone(),
+        admin_token: None,
+        require_control_encryption: false,
+        require_secure_transport: false,
+        control_session_key: None,
+        self_node_id: None,
+    };
+    let relay_directory = dir.0.join("relay");
+    std::fs::create_dir_all(&relay_directory).unwrap();
+    let relay_manager = Arc::new(RelayManager::new(nodes, &relay_directory));
+    relay_manager.set_config(proxy_core::relay::RelayConfig {
+        enabled: true,
+        targets: vec![proxy_core::relay::UpstreamTarget::node(
+            server_addr.to_string(),
+        )],
+        ..Default::default()
+    });
+    let relay_listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
+    let relay_address = relay_listener.local_addr().unwrap();
+    let relay = runtime.spawn(run_server_with_listener(
+        relay_listener,
         ServerConfig {
-            metrics: Arc::new(MetricsStore::with_default_config()),
-            relay: Arc::new(RelayManager::new(nodes.clone(), &dir.0)),
-            nodes,
-            admin_token: None,
-            require_control_encryption: false,
-            control_session_key: None,
-            self_node_id: None,
+            relay: relay_manager,
+            ..config.clone()
         },
         cancel.clone(),
         None,
     ));
+    let server = runtime.spawn(run_server_with_listener(
+        server_listener,
+        config,
+        cancel.clone(),
+        None,
+    ));
 
-    for encrypted in [false, true] {
+    for (encrypted, protocol, endpoint) in [
+        (false, proxy_core::secure_transport::WireProtocol::Legacy),
+        (true, proxy_core::secure_transport::WireProtocol::Legacy),
+        (true, proxy_core::secure_transport::WireProtocol::V3),
+    ]
+    .into_iter()
+    .flat_map(|(encrypted, protocol)| {
+        [server_addr, relay_address].map(move |endpoint| (encrypted, protocol, endpoint))
+    }) {
+        proxy_core::secure_transport::set_wire_protocol(protocol);
         let tunnel = PacketTunnelRuntime::start(
             PacketTunnelConfig {
-                server_host: server_addr.ip().to_string(),
-                server_port: server_addr.port(),
+                server_host: endpoint.ip().to_string(),
+                server_port: endpoint.port(),
                 local_port: 0,
                 session_key: Some(DEFAULT_SECRET_KEY.into()),
                 auto_proxy: false,
@@ -222,6 +264,98 @@ fn provider_forwards_dns_tcp_and_udp_in_plain_and_encrypted_modes_and_stops() {
             if udp.destination_port() == 43003 && udp.payload() == b"ipv6-udp-echo")
         });
 
+        if with_echo {
+            let query = b"\x43\x21\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x09localhost\x00\x00\x01\x00\x01";
+            packet.clear();
+            PacketBuilder::ipv4([10, 77, 0, 2], [10, 77, 0, 1], 64)
+                .udp(43004, 53)
+                .write(&mut packet, query)
+                .unwrap();
+            send(&tunnel, &packet);
+            let answer = receive(
+                &tunnel,
+                |parsed| matches!(&parsed.transport, Some(TransportSlice::Udp(udp)) if udp.destination_port() == 43004),
+            );
+            let parsed = SlicedPacket::from_ip(&answer).unwrap();
+            let Some(TransportSlice::Udp(udp)) = parsed.transport else {
+                panic!("expected DNS reply")
+            };
+            let dns = udp.payload();
+            assert_eq!(u16::from_be_bytes([dns[6], dns[7]]), 1);
+            let fake_ip: [u8; 4] = dns[dns.len() - 4..].try_into().unwrap();
+            assert_eq!(fake_ip[0], 198);
+            packet.clear();
+            PacketBuilder::ipv4([10, 77, 0, 2], fake_ip, 64)
+                .icmpv4_echo_request(0xabcd, 1)
+                .write(&mut packet, b"fake-ip-echo")
+                .unwrap();
+            send(&tunnel, &packet);
+            let response = receive(
+                &tunnel,
+                |parsed| matches!(&parsed.transport, Some(TransportSlice::Icmpv4(icmp)) if matches!(icmp.icmp_type(), etherparse::Icmpv4Type::EchoReply(header) if header.id == 0xabcd)),
+            );
+            let mut expected = Vec::new();
+            PacketBuilder::ipv4(fake_ip, [10, 77, 0, 2], 64)
+                .icmpv4_echo_reply(0xabcd, 1)
+                .write(&mut expected, b"fake-ip-echo")
+                .unwrap();
+            assert_eq!(&response[12..], &expected[12..]);
+
+            // Two requests per family exercise reuse and original identifier /
+            // sequence restoration. A real kernel Echo reply crosses every hop.
+            for sequence in [7, 8] {
+                let payload = b"real-icmp-echo-odd-payload";
+                for ipv6 in [false, true] {
+                    packet.clear();
+                    if ipv6 {
+                        PacketBuilder::ipv6(
+                            "fd77::2".parse::<std::net::Ipv6Addr>().unwrap().octets(),
+                            std::net::Ipv6Addr::LOCALHOST.octets(),
+                            64,
+                        )
+                        .icmpv6_echo_request(0x1234, sequence)
+                        .write(&mut packet, payload)
+                        .unwrap();
+                    } else {
+                        PacketBuilder::ipv4([10, 77, 0, 2], [127, 0, 0, 1], 64)
+                            .icmpv4_echo_request(0x1234, sequence)
+                            .write(&mut packet, payload)
+                            .unwrap();
+                    }
+                    send(&tunnel, &packet);
+                    let response = receive(&tunnel, |parsed| match &parsed.transport {
+                        Some(TransportSlice::Icmpv4(icmp)) => {
+                            matches!(icmp.icmp_type(), etherparse::Icmpv4Type::EchoReply(header) if header.id == 0x1234 && header.seq == sequence)
+                        }
+                        Some(TransportSlice::Icmpv6(icmp)) => {
+                            matches!(icmp.icmp_type(), etherparse::Icmpv6Type::EchoReply(header) if header.id == 0x1234 && header.seq == sequence)
+                        }
+                        _ => false,
+                    });
+                    // Build the expected whole packet independently, including
+                    // both checksums and the rewritten TUN addresses.
+                    let mut expected = Vec::new();
+                    if ipv6 {
+                        PacketBuilder::ipv6(
+                            std::net::Ipv6Addr::LOCALHOST.octets(),
+                            "fd77::2".parse::<std::net::Ipv6Addr>().unwrap().octets(),
+                            64,
+                        )
+                        .icmpv6_echo_reply(0x1234, sequence)
+                        .write(&mut expected, payload)
+                        .unwrap();
+                        assert_eq!(&response[8..], &expected[8..]);
+                    } else {
+                        PacketBuilder::ipv4([127, 0, 0, 1], [10, 77, 0, 2], 64)
+                            .icmpv4_echo_reply(0x1234, sequence)
+                            .write(&mut expected, payload)
+                            .unwrap();
+                        assert_eq!(&response[12..], &expected[12..]);
+                    }
+                }
+            }
+        }
+
         let port = tunnel.local_port;
         let shutdown = std::time::Instant::now();
         std::thread::scope(|scope| {
@@ -245,5 +379,6 @@ fn provider_forwards_dns_tcp_and_udp_in_plain_and_encrypted_modes_and_stops() {
     }
     cancel.cancel();
     runtime.block_on(server).unwrap();
+    runtime.block_on(relay).unwrap();
     runtime.shutdown_timeout(Duration::from_secs(2));
 }

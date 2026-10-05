@@ -49,6 +49,7 @@
 #[cfg(feature = "auto-proxy")]
 pub mod auto_proxy;
 pub mod http;
+mod icmp;
 #[cfg(target_os = "macos")]
 pub mod macos_dns_restore;
 #[cfg(target_os = "macos")]
@@ -74,11 +75,11 @@ use auto_proxy::{SenderChan, run_auto_proxy_by_country};
 use proxy_core::codec::{AsyncReader, AsyncWriter};
 use proxy_core::config::{gen_random_key, runtime};
 use proxy_core::relay::ExternalProxyTarget;
+use proxy_core::secure_transport::ProxyStream;
 use proxy_core::util::{GracefulShutdownManager, GracefulShutdownManagerImpl, error_report};
 use proxy_core::{client_proxy_with_cryptor_codec, proxy_with_norlmal_codec};
 use snafu::{Report, ResultExt, Snafu};
-use tokio::io::AsyncReadExt;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::io::{AsyncReadExt, ReadHalf, WriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -267,8 +268,8 @@ macro_rules! make_provider_type {
 make_provider_type!(HttpProxierProviderType, "HTTP/HTTPS", HttpProxierProvider);
 make_provider_type!(SocksProxierProviderType, "SOCKS5", SocksProxierProvider);
 
-pub type TcpAsyncReader<T = OwnedReadHalf> = AsyncReader<T>;
-pub type TcpAsyncWriter<T = OwnedWriteHalf> = AsyncWriter<T>;
+pub type TcpAsyncReader<T = ReadHalf<ProxyStream>> = AsyncReader<T>;
+pub type TcpAsyncWriter<T = WriteHalf<ProxyStream>> = AsyncWriter<T>;
 
 #[derive(Debug)]
 pub struct ForwardContext {
@@ -290,6 +291,7 @@ impl Display for ForwardContext {
 
 pub struct TcpForwardImpl {
     context: ForwardContext,
+    initial_request: Vec<u8>,
     client_reader: TcpAsyncReader,
     client_writer: TcpAsyncWriter,
     server_reader: TcpAsyncReader,
@@ -305,8 +307,8 @@ pub struct TcpForwardImpl {
 /// This is a convenience function that wraps the stream splitting
 /// and adapter creation into a single call.
 #[inline]
-pub fn split_and_wrap(stream: TcpStream) -> (TcpAsyncReader, TcpAsyncWriter) {
-    let (r, w) = stream.into_split();
+pub fn split_and_wrap(stream: impl Into<ProxyStream>) -> (TcpAsyncReader, TcpAsyncWriter) {
+    let (r, w) = stream.into().into_split();
     (AsyncReader::new(r), AsyncWriter::new(w))
 }
 
@@ -316,7 +318,7 @@ pub fn split_and_wrap(stream: TcpStream) -> (TcpAsyncReader, TcpAsyncWriter) {
 /// including the established stream and routing information.
 pub struct ServerConnection {
     /// The established TCP connection to the server (direct or proxy).
-    pub stream: TcpStream,
+    pub stream: ProxyStream,
     /// Whether the connection goes through the proxy server.
     pub need_proxy: bool,
     /// Optional session encryption key.
@@ -379,7 +381,7 @@ pub async fn resolve_server_connection(
         .await
         .context(ExternalProxySnafu)?;
         return Ok(ServerConnection {
-            stream,
+            stream: stream.into(),
             need_proxy: true,
             msg_key: None,
         });
@@ -512,12 +514,13 @@ pub async fn need_proxy(
 
             // Cache miss: send to background task for geo query
             let (tx, rx) = kanal::bounded_async(1);
-            sender
-                .send((host.as_ref().to_string(), tx))
-                .await
-                .map_err(|_| ClientError::SendAutoProxy {
-                    uri: get_uri(host.as_ref(), port),
-                })?;
+            if sender.try_send((host.as_ref().to_string(), tx)).is_err() {
+                tracing::debug!(
+                    host = host.as_ref(),
+                    "geo lookup queue unavailable; using proxy"
+                );
+                return Ok(ProxyStatus::NorlmalProxy);
+            }
             // Bounded so a slow or throttled lookup cannot hold up the
             // connection. Giving up does not waste the query: it finishes in the
             // background and records the answer, so the next connection to this
@@ -565,9 +568,10 @@ pub async fn need_proxy(
 }
 
 #[inline]
-pub async fn get_tcp_stream(host: &str, port: u16, detail: &'static str) -> Result<TcpStream> {
+pub async fn get_tcp_stream(host: &str, port: u16, detail: &'static str) -> Result<ProxyStream> {
     proxy_core::transport::connect_tcp_host(host, port)
         .await
+        .map(Into::into)
         .with_context(|_| IoSnafu {
             uri: Some(format!("TcpStream({}:{})", host, port)),
             detail,
@@ -581,7 +585,7 @@ pub async fn get_tcp_proxy_stream(
     proxy_server_port: u16,
     msg_key: Option<Cow<'static, str>>,
     detail: &'static str,
-) -> Result<TcpStream> {
+) -> Result<ProxyStream> {
     proxy_core::transport::get_tcp_proxy_stream(
         host,
         port,
@@ -599,11 +603,14 @@ impl Forwarder for TcpForwardImpl {
     async fn forward(self) -> Result<()> {
         let TcpForwardImpl {
             context,
+            initial_request,
             client_reader,
             client_writer,
             server_reader,
             server_writer,
         } = self;
+        let client_reader = client_reader.prepend(initial_request);
+        let server_reader = server_reader.prepend(Vec::new());
         let ForwardContext {
             need_proxy,
             host,
@@ -611,12 +618,12 @@ impl Forwarder for TcpForwardImpl {
             msg_key,
         } = context;
 
-        tracing::debug!(host, port, need_proxy, ?msg_key);
+        tracing::debug!(host, port, need_proxy, encrypted = msg_key.is_some());
 
         // start to forward
         match (need_proxy, msg_key) {
             (true, Some(key)) => {
-                tracing::debug!(?key, info = "start with codec forward");
+                tracing::debug!("start with codec forward");
                 client_proxy_with_cryptor_codec(
                     &host,
                     &key,
@@ -677,24 +684,66 @@ fn get_provider<T: ProxierProviderType>(header: HeaderContext<'_>) -> Option<T::
 async fn handle_proxy(
     proxy_context: ProxyContext<'_>,
     provider: impl ForwarderProvider,
+    deadline: tokio::time::Instant,
+    permit: tokio::sync::SemaphorePermit<'_>,
 ) -> Result<()> {
-    let proxier = provider.try_build_forwarder(proxy_context).await?;
+    let proxier = tokio::time::timeout_at(deadline, provider.try_build_forwarder(proxy_context))
+        .await
+        .map_err(|_| setup_timeout())??;
+    drop(permit);
     proxier.forward().await
 }
 
-#[tracing::instrument(skip_all, fields(msg_key))]
+const CLIENT_SETUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const MAX_HTTP_HEADER_BYTES: usize = 32 * 1024;
+static CLIENT_SETUP_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(256);
+
+fn setup_timeout() -> ClientError {
+    ClientError::Io {
+        uri: None,
+        detail: "local proxy handshake timed out",
+        source: std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "proxy setup deadline exceeded",
+        ),
+    }
+}
+
+async fn read_initial_header(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+    let first = stream.read_u8().await?;
+    let mut header = vec![first];
+    if first == 5 {
+        let methods = stream.read_u8().await?;
+        header.push(methods);
+        header.resize(2 + usize::from(methods), 0);
+        stream.read_exact(&mut header[2..]).await?;
+        return Ok(header);
+    }
+    proxy_core::transport::read_http_header(stream, &mut header, MAX_HTTP_HEADER_BYTES).await?;
+    Ok(header)
+}
+
+#[tracing::instrument(skip_all)]
 pub async fn handle_client(mut context: ClientProxyContext) -> Result<()> {
-    // FIXME Turn header read to every structure
-    let mut header_buf = [0; 1024 * 4];
-    let n = context
-        .stream
-        .read(&mut header_buf)
+    let permit = CLIENT_SETUP_SLOTS
+        .try_acquire()
+        .map_err(|_| ClientError::Io {
+            uri: None,
+            detail: "local proxy setup capacity exhausted",
+            source: std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "too many pending handshakes",
+            ),
+        })?;
+    let deadline = tokio::time::Instant::now() + CLIENT_SETUP_TIMEOUT;
+    let header_buf = tokio::time::timeout_at(deadline, read_initial_header(&mut context.stream))
         .await
+        .map_err(|_| setup_timeout())?
         .context(IoSnafu {
             uri: None,
             detail: "Read First Header Error",
         })?;
-    let header = &header_buf[..n];
+    let header = header_buf.as_slice();
     let header_context = HeaderContext {
         header,
         msg_key: context.msg_key.as_deref(),
@@ -713,7 +762,7 @@ pub async fn handle_client(mut context: ClientProxyContext) -> Result<()> {
     macro_rules! start_proxy_with_provider {
         ($header_context:expr,$proxy_context:expr,$provider_type:ty) => {
             if let Some(p) = get_provider::<$provider_type>($header_context) {
-                return handle_proxy($proxy_context, p).await;
+                return handle_proxy($proxy_context, p, deadline, permit).await;
             }
         };
 
@@ -946,7 +995,7 @@ pub async fn start_client_with_config<const NEED_CODEC: bool>(
     start_client_with_runtime_config::<NEED_CODEC>(host, port, config.map(Into::into)).await
 }
 
-#[tracing::instrument]
+#[tracing::instrument(skip(config))]
 pub async fn start_client_with_runtime_config<const NEED_CODEC: bool>(
     host: impl AsRef<str> + Debug,
     port: u16,
@@ -988,6 +1037,87 @@ pub async fn start_client<const NEED_CODEC: bool>(
 
 #[cfg(test)]
 mod tests {
+    async fn tcp_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (writer, reader) = tokio::join!(
+            TcpStream::connect(listener.local_addr().unwrap()),
+            listener.accept()
+        );
+        (writer.unwrap(), reader.unwrap().0)
+    }
+
+    #[tokio::test]
+    async fn http_header_does_not_consume_pipelined_tunnel_bytes() {
+        let (mut writer, mut reader) = tcp_pair().await;
+        let header = b"CONNECT example.test:443 HTTP/1.1\r\n\r\n";
+        writer
+            .write_all(&[header.as_slice(), b"early data"].concat())
+            .await
+            .unwrap();
+        assert_eq!(
+            super::read_initial_header(&mut reader).await.unwrap(),
+            header
+        );
+        let mut payload = [0; 10];
+        reader.read_exact(&mut payload).await.unwrap();
+        assert_eq!(&payload, b"early data");
+    }
+
+    #[tokio::test]
+    async fn fragmented_socks_greeting_preserves_a_pipelined_request() {
+        use tokio::io::AsyncWriteExt;
+        let (mut writer, mut reader) = tcp_pair().await;
+        let task = tokio::spawn(async move {
+            for byte in [5, 1, 0, 5, 1, 0, 1] {
+                writer.write_all(&[byte]).await.unwrap();
+                tokio::task::yield_now().await;
+            }
+        });
+        assert_eq!(
+            super::read_initial_header(&mut reader).await.unwrap(),
+            [5, 1, 0]
+        );
+        let mut request = Vec::new();
+        reader.read_to_end(&mut request).await.unwrap();
+        assert_eq!(request, [5, 1, 0, 1]);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fragmented_http_header_is_complete_before_protocol_selection() {
+        use tokio::io::AsyncWriteExt;
+        let header = b"CONNECT example.test:443 HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        let (mut writer, mut reader) = tcp_pair().await;
+        let task = tokio::spawn(async move {
+            for part in header.chunks(3) {
+                writer.write_all(part).await.unwrap();
+                tokio::task::yield_now().await;
+            }
+        });
+        assert_eq!(
+            super::read_initial_header(&mut reader).await.unwrap(),
+            header
+        );
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn oversized_http_header_is_rejected_without_waiting_for_eof() {
+        use tokio::io::AsyncWriteExt;
+        let (mut writer, mut reader) = tcp_pair().await;
+        writer
+            .write_all(&vec![b'A'; super::MAX_HTTP_HEADER_BYTES])
+            .await
+            .unwrap();
+        assert_eq!(
+            super::read_initial_header(&mut reader)
+                .await
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
+
     use proxy_core::relay::ExternalProxyTarget;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -995,6 +1125,21 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+
+    #[tokio::test]
+    async fn a_full_geo_queue_falls_back_to_proxy_without_waiting() {
+        let (sender, _receiver) = kanal::bounded_async::<auto_proxy::SendItem>(1);
+        let (notify, _reply) = kanal::bounded_async(1);
+        sender.try_send(("queued.example".into(), notify)).unwrap();
+        let status = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            need_proxy("full-queue.example", 443, &sender),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(status, ProxyStatus::NorlmalProxy));
+    }
 
     /// A geo lookup must not hold up the connection. When the background task is
     /// slow, the decision falls back to the proxy rather than waiting.
@@ -1243,12 +1388,13 @@ mod tests {
         let (client_addr, token) = start_client_for_test(upstream_proxy).await;
 
         let mut stream = TcpStream::connect(client_addr).await.unwrap();
-        stream.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
-        let mut handshake = [0u8; 2];
-        stream.read_exact(&mut handshake).await.unwrap();
-        assert_eq!(handshake, [0x05, 0x00]);
+        stream.write_all(&[0x05]).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        // The rest of the greeting and the request arrive together.
         stream
             .write_all(&[
+                0x01,
+                0x00,
                 0x05,
                 0x01,
                 0x00,
@@ -1262,6 +1408,9 @@ mod tests {
             ])
             .await
             .unwrap();
+        let mut handshake = [0u8; 2];
+        stream.read_exact(&mut handshake).await.unwrap();
+        assert_eq!(handshake, [0x05, 0x00]);
         let mut response = [0u8; 10];
         stream.read_exact(&mut response).await.unwrap();
         assert_eq!(response[0..2], [0x05, 0x00]);
@@ -1283,9 +1432,11 @@ mod tests {
         let (client_addr, token) = start_client_for_test(upstream_proxy).await;
 
         let mut stream = TcpStream::connect(client_addr).await.unwrap();
+        stream.write_all(b"CON").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         stream
             .write_all(
-                format!("CONNECT {target_addr} HTTP/1.1\r\nHost: {target_addr}\r\n\r\n").as_bytes(),
+                format!("NECT {target_addr} HTTP/1.1\r\nHost: {target_addr}\r\n\r\n").as_bytes(),
             )
             .await
             .unwrap();

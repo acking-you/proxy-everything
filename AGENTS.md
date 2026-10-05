@@ -41,7 +41,7 @@ The primary binaries are `http-proxy-server`, `http-proxy-cli`,
 ### Flutter and FVM
 
 - Flutter is managed exclusively with FVM.
-- `ui/flutter/.fvmrc` is the source of truth and currently pins Flutter 3.38.6.
+- `ui/flutter/.fvmrc` is the source of truth and currently pins Flutter 3.44.9.
 - Never use bare `flutter` or `dart` commands for this project. Use
   `fvm flutter ...` and `fvm dart ...` from `ui/flutter`.
 - Run `fvm install` after cloning or after the pinned SDK changes.
@@ -56,6 +56,8 @@ Run these from the repository root in PowerShell:
 # Build all Rust binaries, the FFI DLL, and the Flutter Windows app.
 .\scripts\windows\build.ps1 -Configuration Debug
 .\scripts\windows\build.ps1 -Configuration Release
+# Reuse previously cached Cargo/Pub/Flutter dependencies without resolving online.
+.\scripts\windows\build.ps1 -Configuration Release -Offline
 
 # Run a Rust command-line component.
 .\scripts\windows\run-cli.ps1 server -- -H 127.0.0.1 -p 1081
@@ -171,7 +173,15 @@ fvm flutter build apk --release --target-platform android-arm64 --split-per-abi
 
 ```powershell
 .\scripts\windows\build.ps1 -Configuration Release
+# When vswhere discovery fails but VS 2022 Build Tools is already installed:
+.\scripts\windows\build.ps1 -Configuration Release -Offline `
+  -VisualStudioPath "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools"
 ```
+
+The explicit-path fallback uses MSVC and Ninja Multi-Config in a child process;
+it does not repair the registry, alter the installed SDK or terminate desktop
+processes. Its complete bundle is under
+`ui/flutter/build/windows/x64-explicit-msvc/runner/Release`.
 
 - Never stop or kill a currently running `proxy_ui` merely to build or package
   an upgrade. If an executable or DLL is locked, use a separate staging/output

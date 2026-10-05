@@ -28,6 +28,24 @@ protocols and storage identifiers stay compatible. Repository URLs remain
 unchanged. On macOS, replace the previous direct-download app with
 `CipherRelay.app`; renaming does not migrate data between the two editions.
 
+## Low-latency encrypted transport
+
+Native **0.4.34** and UI **1.2.20+46** provide v3 encryption with **no additional
+handshake round trip**: the first flight carries the encrypted request. Fresh
+client and server salts separate connections and directions. Legacy remains the
+default for new and existing profiles, so old clients and servers still work.
+Upgrade every relay/server before enabling **Low-latency encrypted transport
+(v3)** or `PROXY_WIRE_PROTOCOL=v3`. `PROXY_REQUIRE_V3=1` optionally rejects legacy.
+The unused challenge transport has been removed. See the
+[wire format, replay boundary and migration guide](docs/secure-transport-v3.md).
+
+## TUN ping
+
+TUN now forwards IPv4/IPv6 ICMP Echo through the configured native proxy exit,
+returning the target's actual reply. Upgrade the client and final server for this
+additional transport; default legacy TCP/UDP remains compatible with old nodes.
+The exit needs ICMP socket permission. See [Echo support and limits](docs/tun-icmp-echo.md).
+
 ## Quick Start
 
 ### Server
@@ -218,6 +236,7 @@ cargo build --release --bin http-proxy-admin
 
 ## Documentation
 
+- [Network resilience review](docs/network-resilience.md) - 0.4.31 / UI 1.2.17+43 recovery fixes, limits, validation, and remaining legacy protocol risk
 - [Server Deployment (Docker)](docs/server-deployment.md) - Docker deployment guide
 - [Server Deployment (Systemd)](docs/systemd-deployment.md) - Binary + systemd deployment
 - [Client Usage](docs/client-usage.md) - Windows, Linux, macOS, Android, iOS

@@ -752,6 +752,7 @@ async fn run_with_ready_inner(
         "starting TUN traffic capture with mandatory loop prevention"
     );
 
+    args.icmp_echo = true;
     match ready {
         Some(ready) => {
             tun2proxy::general_run_async_with_process_bypass_and_ready_and_virtual_dns(

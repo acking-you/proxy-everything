@@ -20,6 +20,8 @@ sysinfo = { workspace = true }
 ureq = { workspace = true }
 parking_lot = { workspace = true }
 smallvec = { workspace = true }
+socket2 = { version = "0.6.4", features = ["all"] }
+internet-checksum = "0.2.1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = [

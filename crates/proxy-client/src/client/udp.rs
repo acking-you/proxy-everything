@@ -14,9 +14,9 @@ use proxy_core::datagram::{
     parse_socks5_udp_packet, udp_association_idle_timeout,
 };
 use proxy_core::relay::ExternalProxyTarget;
+use proxy_core::secure_transport::ProxyStream;
 use snafu::ResultExt;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::time::Instant;
 
@@ -25,21 +25,21 @@ use super::{DatagramSnafu, ExternalProxySnafu, Forwarder, Result};
 const UDP_ASSOCIATION_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 enum UpstreamReader {
-    Proxy(Box<DatagramTunnelReader<AsyncReader<OwnedReadHalf>>>),
+    Proxy(Box<DatagramTunnelReader<AsyncReader<ReadHalf<ProxyStream>>>>),
     Socks5(DatagramRelayReader),
 }
 
 impl UpstreamReader {
-    async fn recv(&mut self) -> std::result::Result<Vec<u8>, ProxyError> {
+    async fn recv(&mut self) -> std::result::Result<std::borrow::Cow<'_, [u8]>, ProxyError> {
         match self {
-            Self::Proxy(reader) => reader.recv().await,
-            Self::Socks5(reader) => reader.recv().await,
+            Self::Proxy(reader) => reader.recv_ref().await.map(std::borrow::Cow::Borrowed),
+            Self::Socks5(reader) => reader.recv().await.map(std::borrow::Cow::Owned),
         }
     }
 }
 
 enum UpstreamWriter {
-    Proxy(Box<DatagramTunnelWriter<AsyncWriter<OwnedWriteHalf>>>),
+    Proxy(Box<DatagramTunnelWriter<AsyncWriter<WriteHalf<ProxyStream>>>>),
     Socks5(DatagramRelayWriter),
 }
 
@@ -185,14 +185,19 @@ impl UdpAssociation {
                 datagram_encryption = msg_key.is_some(),
                 "remote proxy server confirmed UDP association readiness"
             );
+            let msg_key = if stream.is_secure() {
+                None
+            } else {
+                msg_key.as_deref()
+            };
             let (read_half, write_half) = stream.into_split();
             (
                 UpstreamReader::Proxy(Box::new(
-                    DatagramTunnelReader::new(AsyncReader::new(read_half), msg_key.as_deref())
+                    DatagramTunnelReader::new(AsyncReader::new(read_half), msg_key)
                         .context(DatagramSnafu)?,
                 )),
                 UpstreamWriter::Proxy(Box::new(
-                    DatagramTunnelWriter::new(AsyncWriter::new(write_half), msg_key.as_deref())
+                    DatagramTunnelWriter::new(AsyncWriter::new(write_half), msg_key)
                         .context(DatagramSnafu)?,
                 )),
                 None,
@@ -277,10 +282,6 @@ impl UdpAssociation {
                         detail: "receive local SOCKS5 UDP packet",
                         source,
                     })?;
-                    if !self.accept_client_endpoint(source) {
-                        tracing::debug!(%source, "discarding SOCKS5 UDP packet from an unexpected client");
-                        continue;
-                    }
                     let packet = &local_buffer[..size];
                     let parsed = match parse_socks5_udp_packet(packet) {
                         Ok(parsed) => parsed,
@@ -289,6 +290,10 @@ impl UdpAssociation {
                             continue;
                         }
                     };
+                    if !self.accept_client_endpoint(source) {
+                        tracing::debug!(%source, "discarding SOCKS5 UDP packet from an unexpected client");
+                        continue;
+                    }
                     tracing::debug!(
                         direction = "client_to_upstream",
                         client = %source,

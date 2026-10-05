@@ -6,10 +6,12 @@ use proxy_client::client::{
     ClientConfig, ClientRuntimeConfig, run_client_with_listener_runtime_config,
 };
 use proxy_core::config::{DEFAULT_SECRET_KEY, runtime};
+use proxy_core::control::{ControlClient, ControlOp, ControlRequest, ControlResult};
 use proxy_core::datagram::{DatagramAddress, encode_socks5_udp_packet, parse_socks5_udp_packet};
 use proxy_core::metrics::MetricsStore;
 use proxy_core::nodes::NodeStore;
 use proxy_core::relay::ExternalProxyTarget;
+use proxy_core::secure_transport::{WireProtocol, set_wire_protocol};
 use proxy_server::{RelayManager, ServerConfig, run_server_with_listener};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
@@ -17,7 +19,16 @@ use tokio::time::{Duration, timeout};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
-async fn socks5_udp_associate_supports_plain_encrypted_and_chained_relays() {
+async fn local_proxy_supports_plain_encrypted_http_and_udp_with_chained_relays() {
+    for protocol in [WireProtocol::Legacy, WireProtocol::V3] {
+        timeout(Duration::from_secs(30), protocol_round_trips(protocol))
+            .await
+            .unwrap();
+    }
+}
+
+async fn protocol_round_trips(protocol: WireProtocol) {
+    set_wire_protocol(protocol);
     let echo_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let echo_addr = echo_socket.local_addr().unwrap();
     let echo_task = tokio::spawn(async move {
@@ -47,8 +58,9 @@ async fn socks5_udp_associate_supports_plain_encrypted_and_chained_relays() {
         relay: Arc::new(RelayManager::new(nodes.clone(), &state_dir)),
         nodes,
         admin_token: None,
-        require_control_encryption: false,
-        control_session_key: None,
+        require_control_encryption: true,
+        require_secure_transport: protocol == WireProtocol::V3,
+        control_session_key: Some(DEFAULT_SECRET_KEY.to_string()),
         self_node_id: None,
     };
     let server_cancel = CancellationToken::new();
@@ -58,6 +70,28 @@ async fn socks5_udp_associate_supports_plain_encrypted_and_chained_relays() {
         server_cancel.clone(),
         None,
     ));
+
+    let mut control = ControlClient::connect(
+        "127.0.0.1",
+        server_addr.port(),
+        Some(DEFAULT_SECRET_KEY.to_string()),
+    )
+    .await
+    .unwrap();
+    let response = control
+        .request(ControlRequest {
+            token: None,
+            op: ControlOp::Ping,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(response.result, Some(ControlResult::Pong)));
+    drop(control);
+    if protocol == WireProtocol::V3 {
+        let mut legacy = TcpStream::connect(server_addr).await.unwrap();
+        legacy.write_all(b"old!\0\0\0\x01").await.unwrap();
+        assert!(legacy.read_u8().await.is_err());
+    }
 
     // Exercise the original unencrypted data path first. UDP support shares
     // the connection setup with TCP, so both codec modes need end-to-end
@@ -85,6 +119,15 @@ async fn socks5_udp_associate_supports_plain_encrypted_and_chained_relays() {
         DatagramAddress::Ip(echo_addr),
         DatagramAddress::Ip(echo_addr),
         b"udp-through-plain-proxy",
+        false,
+    )
+    .await;
+    assert_udp_round_trip(
+        plain_addr,
+        DatagramAddress::Ip(echo_addr),
+        DatagramAddress::Ip(echo_addr),
+        b"udp-after-malformed-unpinned-packet",
+        true,
     )
     .await;
 
@@ -112,8 +155,12 @@ async fn socks5_udp_associate_supports_plain_encrypted_and_chained_relays() {
         DatagramAddress::Ip(echo_addr),
         DatagramAddress::Ip(echo_addr),
         b"udp-through-encrypted-proxy",
+        false,
     )
     .await;
+
+    assert_http_round_trip(plain_addr).await;
+    assert_http_round_trip(client_addr).await;
 
     let chained_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let chained_addr = chained_listener.local_addr().unwrap();
@@ -142,8 +189,64 @@ async fn socks5_udp_associate_supports_plain_encrypted_and_chained_relays() {
         DatagramAddress::Domain("127.0.0.1".to_string(), echo_addr.port()),
         DatagramAddress::Ip(echo_addr),
         b"udp-through-socks5-chain",
+        false,
     )
     .await;
+
+    if protocol == WireProtocol::V3 {
+        let relay_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay_listener.local_addr().unwrap();
+        let relay_dir = unique_temp_dir("v3-opaque-relay");
+        std::fs::create_dir_all(&relay_dir).unwrap();
+        let relay_nodes = Arc::new(NodeStore::new(relay_dir.join("nodes.json")));
+        let relay = Arc::new(RelayManager::new(relay_nodes.clone(), &relay_dir));
+        relay.add_target(proxy_core::relay::UpstreamTarget::node(
+            server_addr.to_string(),
+        ));
+        relay.set_enabled(true);
+        let relay_config = ServerConfig {
+            relay,
+            nodes: relay_nodes,
+            require_secure_transport: true,
+            ..ServerConfig::default()
+        };
+        let relay_cancel = CancellationToken::new();
+        let relay_task = tokio::spawn(run_server_with_listener(
+            relay_listener,
+            relay_config,
+            relay_cancel.clone(),
+            None,
+        ));
+        runtime::set_server_endpoint("127.0.0.1".to_string(), relay_addr.port());
+        assert_http_round_trip(client_addr).await;
+        assert_udp_round_trip(
+            client_addr,
+            DatagramAddress::Ip(echo_addr),
+            DatagramAddress::Ip(echo_addr),
+            b"v3 opaque relay",
+            false,
+        )
+        .await;
+        // Control stays on the intermediate relay, identified by its different authorization
+        // policy.
+        let mut control = ControlClient::connect("127.0.0.1", relay_addr.port(), None)
+            .await
+            .unwrap();
+        assert!(
+            control
+                .request(ControlRequest {
+                    token: None,
+                    op: ControlOp::Ping
+                })
+                .await
+                .unwrap()
+                .ok
+        );
+        drop(control);
+        relay_cancel.cancel();
+        relay_task.await.unwrap();
+        let _ = std::fs::remove_dir_all(relay_dir);
+    }
 
     chained_cancel.cancel();
     client_cancel.cancel();
@@ -196,11 +299,46 @@ async fn socks5_udp_associate_returns_command_not_supported_when_disabled() {
     task.await.unwrap();
 }
 
+async fn assert_http_round_trip(client_addr: std::net::SocketAddr) {
+    let destination = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = destination.local_addr().unwrap();
+    let echo = tokio::spawn(async move {
+        let (mut stream, _) = destination.accept().await.unwrap();
+        let (mut reader, mut writer) = stream.split();
+        tokio::io::copy(&mut reader, &mut writer).await.unwrap();
+    });
+    let mut stream = TcpStream::connect(client_addr).await.unwrap();
+    let request = format!(
+        "POST http://{target}/ HTTP/1.1\r\nHost: {target}\r\nContent-Length: 8\r\n\r\nbodydata"
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = vec![0; request.len()];
+    timeout(Duration::from_secs(3), stream.read_exact(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response, request.as_bytes());
+    // A later write must continue the existing encryption nonce sequence.
+    stream.write_all(b"later body").await.unwrap();
+    let mut later = [0; 10];
+    timeout(Duration::from_secs(3), stream.read_exact(&mut later))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&later, b"later body");
+    drop(stream);
+    timeout(Duration::from_secs(3), echo)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 async fn assert_udp_round_trip(
     client_addr: std::net::SocketAddr,
     destination: DatagramAddress,
     expected_source: DatagramAddress,
     payload: &[u8],
+    unspecified_port: bool,
 ) {
     let udp_client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut control = TcpStream::connect(client_addr).await.unwrap();
@@ -209,7 +347,10 @@ async fn assert_udp_round_trip(
     control.read_exact(&mut method).await.unwrap();
     assert_eq!(method, [0x05, 0x00]);
 
-    let udp_client_addr = udp_client.local_addr().unwrap();
+    let mut udp_client_addr = udp_client.local_addr().unwrap();
+    if unspecified_port {
+        udp_client_addr.set_port(0);
+    }
     let mut request = vec![0x05, 0x03, 0x00];
     proxy_core::datagram::encode_socks5_address(
         &DatagramAddress::Ip(udp_client_addr),
@@ -219,12 +360,16 @@ async fn assert_udp_round_trip(
     control.write_all(&request).await.unwrap();
     let relay_addr = read_socks5_reply(&mut control).await;
 
-    // A UDP association is pinned to the endpoint declared on its TCP control
-    // connection. A packet from a different source port must not be relayed.
+    // An explicit endpoint rejects other ports. A port-zero association must
+    // ignore malformed first packets without pinning their source endpoint.
     let unexpected_client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let request = encode_socks5_udp_packet(&destination, payload).unwrap();
+    let mut unexpected_request = request.clone();
+    if unspecified_port {
+        unexpected_request[2] = 1;
+    }
     unexpected_client
-        .send_to(&request, relay_addr)
+        .send_to(&unexpected_request, relay_addr)
         .await
         .unwrap();
     let mut ignored_response = [0u8; 2048];

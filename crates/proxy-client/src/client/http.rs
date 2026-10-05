@@ -1,11 +1,13 @@
 use std::borrow::Cow;
 
 use base64::Engine;
+use proxy_core::MyAsyncWriteExt;
+use proxy_core::codec::AsyncReaderWriterRef;
 use proxy_core::config::runtime;
 use proxy_core::relay::{ExternalProxyKind, ExternalProxyTarget};
+use proxy_core::secure_transport::ProxyStream;
 use snafu::{OptionExt, ResultExt, Snafu};
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
 
 use super::{
     ForwardContext, ForwarderProvider, HeaderContext, HttpProxySnafu, ProxyContext,
@@ -183,12 +185,23 @@ impl ForwarderProvider for HttpProxierProvider {
     // when it is https proxy we will decide start proxy or not
     async fn try_build_forwarder(self, mut context: ProxyContext<'_>) -> super::Result<Self::Item> {
         let (server_stream, need_proxy, msg_key) = self.get_server_stream(&mut context).await?;
+        let msg_key = if server_stream.is_secure() {
+            None
+        } else {
+            msg_key
+        };
+        let initial_request = if !self.has_ssl && need_proxy && msg_key.is_some() {
+            context.buffer.to_vec()
+        } else {
+            Vec::new()
+        };
 
         // Split streams using common helper
         let (client_reader, client_writer) = split_and_wrap(context.stream);
         let (server_reader, server_writer) = split_and_wrap(server_stream);
 
         Ok(TcpForwardImpl {
+            initial_request,
             context: ForwardContext {
                 need_proxy,
                 host: self.host,
@@ -211,7 +224,7 @@ impl HttpProxierProvider {
     async fn get_server_stream(
         &self,
         context: &mut ProxyContext<'_>,
-    ) -> super::Result<(TcpStream, bool, Option<Cow<'static, str>>)> {
+    ) -> super::Result<(ProxyStream, bool, Option<Cow<'static, str>>)> {
         // if we don't have ssl,only use proxy when host is part of `PROXY_KEYWORDS`
         if !self.has_ssl {
             // Compiled-in direct hosts win over the upstream proxy and over
@@ -261,6 +274,7 @@ impl HttpProxierProvider {
                         )
                         .await
                         .context(super::ExternalProxySnafu)?
+                        .into()
                     }
                 };
                 let request = if upstream_proxy.kind == ExternalProxyKind::Http {
@@ -336,14 +350,23 @@ impl HttpProxierProvider {
                     ),
                 }
             };
-            server_stream
-                .write_all(context.buffer)
-                .await
-                .with_context(|_| IoSnafu {
-                    uri: Some(self.get_uri()),
-                    detail: "http direct proxy first write error",
-                })
-                .context(HttpProxySnafu)?;
+            let msg_key = if server_stream.is_secure() {
+                None
+            } else {
+                msg_key
+            };
+            // An encrypted stream must send the initial HTTP header through
+            // the same codec and nonce sequence as the body that follows it.
+            if !need_proxy || msg_key.is_none() {
+                AsyncReaderWriterRef::new(&mut server_stream)
+                    .write_all(context.buffer)
+                    .await
+                    .with_context(|_| IoSnafu {
+                        uri: Some(self.get_uri()),
+                        detail: "http direct proxy first write error",
+                    })
+                    .context(HttpProxySnafu)?;
+            }
 
             Ok((server_stream, need_proxy, msg_key))
         } else {

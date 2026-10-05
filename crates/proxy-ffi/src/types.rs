@@ -123,6 +123,13 @@ pub struct ProxyConfigV5 {
     pub allow_lan: c_int,
 }
 
+/// Version 7 selects legacy (0) or zero-RTT v3 (3).
+#[repr(C)]
+pub struct ProxyConfigV7 {
+    pub base: ProxyConfigV5,
+    pub wire_protocol: c_int,
+}
+
 /// Result of latency test.
 #[repr(C)]
 pub struct LatencyResult {
@@ -202,6 +209,12 @@ mod tests {
                 );
             };
         }
+
+        assert_eq!(std::mem::offset_of!(ProxyConfigV7, base), 0);
+        assert_eq!(
+            std::mem::offset_of!(ProxyConfigV7, wire_protocol),
+            std::mem::size_of::<ProxyConfigV5>()
+        );
 
         assert_same_offset!(ProxyConfig, ProxyConfigV2, server_host);
         assert_same_offset!(ProxyConfig, ProxyConfigV2, server_port);
