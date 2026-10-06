@@ -677,7 +677,7 @@ mod tests {
         assert_eq!(dns_cache_key("Example.COM."), "example.com");
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn silent_external_proxies_release_the_connection_at_the_setup_deadline() {
         for scheme in ["http", "socks5h"] {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -692,8 +692,12 @@ mod tests {
             let (mut peer, _) = listener.accept().await.unwrap();
             let mut request = [0; 1024];
             assert!(peer.read(&mut request).await.unwrap() > 0);
+            // Real socket readiness must arrive before virtual time can skip
+            // ahead; otherwise an idle runtime can expire the handshake first.
+            tokio::time::pause();
             tokio::time::advance(EXTERNAL_PROXY_TIMEOUT).await;
             let error = client.await.unwrap().unwrap_err();
+            tokio::time::resume();
             assert!(error.to_string().contains("handshake exceeded 15 seconds"));
             let mut rest = Vec::new();
             peer.read_to_end(&mut rest).await.unwrap();
