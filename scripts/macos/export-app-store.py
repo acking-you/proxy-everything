@@ -21,9 +21,9 @@ def main():
     args = parser.parse_args()
     archive = args.archive.resolve()
     output = args.output.resolve()
-    app = archive / 'Products/Applications/CipherRelay Store.app'
+    app = archive / 'Products/Applications/CipherRelay.app'
     if not app.is_dir():
-        parser.error('Archive must contain CipherRelay Store.app.')
+        parser.error('Archive must contain CipherRelay.app.')
     info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
     if info.get('CFBundleIdentifier') != 'com.proxyui.proxyUi.store':
         parser.error('Refusing to export the direct-download application as a Store app.')

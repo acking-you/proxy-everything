@@ -49,7 +49,7 @@ $commands = @(
 & $env:ComSpec /d /c "`"$script`""
 if ($LASTEXITCODE -ne 0) { throw "Explicit MSVC build failed with exit code $LASTEXITCODE." }
 $bundle = Join-Path $buildDir "runner\$Configuration"
-foreach ($file in @("proxy_ui.exe", "http_proxy.dll", "wintun.dll", "flutter_windows.dll", "data\flutter_assets\AssetManifest.bin")) {
+foreach ($file in @("CipherRelay.exe", "http_proxy.dll", "wintun.dll", "flutter_windows.dll", "data\flutter_assets\AssetManifest.bin")) {
     if (-not (Test-Path -LiteralPath (Join-Path $bundle $file))) { throw "Incomplete Windows bundle: missing $file" }
 }
 Write-Host "Complete Windows bundle: $bundle"

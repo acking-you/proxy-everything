@@ -21,7 +21,7 @@ use crate::config::USE_LOCAL_GEOIP;
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
+        crate::util::http_client_builder()
             .no_proxy()
             .timeout(std::time::Duration::from_secs(2))
             .build()

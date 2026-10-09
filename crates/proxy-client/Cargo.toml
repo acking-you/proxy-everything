@@ -38,8 +38,8 @@ libc = "0.2"
 [target.'cfg(target_os = "windows")'.dependencies]
 png = "0.18"
 sysinfo = { workspace = true }
-winreg = "0.52"
-windows = { version = "0.61", features = [
+winreg = "0.56"
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
@@ -69,5 +69,5 @@ name = "http-proxy-tun-helper"
 path = "src/bin/tun_helper.rs"
 
 [dev-dependencies]
-etherparse = "0.20"
+etherparse = "0.21"
 proxy-server = { path = "../proxy-server" }

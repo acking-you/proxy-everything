@@ -102,7 +102,7 @@ client platform. Embedders using the FFI should likewise provide a stable
 `cache_dir`; leaving it null intentionally disables persistent client state.
 
 On Windows, keep `wintun.dll` in the same directory as
-`http-proxy-cli.exe` or `proxy_ui.exe`. The supported build and staging scripts
+`http-proxy-cli.exe` or `CipherRelay.exe`. The supported build and staging scripts
 place it there automatically.
 
 ### CLI

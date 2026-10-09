@@ -13,7 +13,7 @@ VPN 验证；没有开发描述文件的 `--unsigned` 产物仍只能用于构�
 产品统一使用 CipherRelay（密流）。直装版仍使用 `Runner` 目标和原有 Bundle ID
 `com.proxyui.proxyUi`，输出 `CipherRelay.app`。原有系统代理、管理员 TUN helper、
 LAN 访问、进程旁路及 Developer ID 签名/公证流程均保留。
-商店版使用 `RunnerStore` 目标，输出 `CipherRelay Store.app`，使用独立 Bundle ID
+商店版使用 `RunnerStore` 目标，输出 `CipherRelay.app`，使用独立 Bundle ID
 `com.proxyui.proxyUi.store`。两者的数据容器独立，可以并存。
 Dart 包名、FFI 库名、既有配置键和网络协议不随品牌名称修改。
 
@@ -31,7 +31,7 @@ python3 scripts/macos/build-app-store.py --architectures universal --unsigned
 它同时设置 Swift 编译条件与 Dart 的 `MAC_APP_STORE=true`，避免主程序与原生库能力不一致。
 `native/macos-app-store/`、`target/macos-app-store/` 和 Flutter `build/` 是生成目录。
 
-输出：`ui/flutter/build/macos-app-store/Build/Products/Release-appstore/CipherRelay Store.app`。
+输出：`ui/flutter/build/macos-app-store/Build/Products/Release-appstore/CipherRelay.app`。
 可用 `--architectures arm64` 缩短本机调试构建时间。
 
 开发签名需要团队拥有以下两个 App ID，均启用 Network Extensions，并使用允许共享

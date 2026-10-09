@@ -43,6 +43,7 @@ futures = { workspace = true }
 
 # Network
 reqwest = { workspace = true }
+rustls = { workspace = true }
 ureq = { workspace = true }
 tokio-socks = { workspace = true }
 uni-stream = { workspace = true }

@@ -68,9 +68,9 @@ try {
 
     $cargoProfile = if ($Configuration -eq "Release") { "release" } else { "debug" }
     $flutterExe = Join-Path $uiRoot `
-        "build\windows\$flutterArchitecture\runner\$Configuration\proxy_ui.exe"
+        "build\windows\$flutterArchitecture\runner\$Configuration\CipherRelay.exe"
     if ($usedExplicitToolchain) {
-        $flutterExe = Join-Path $uiRoot "build\windows\$flutterArchitecture-explicit-msvc\runner\$Configuration\proxy_ui.exe"
+        $flutterExe = Join-Path $uiRoot "build\windows\$flutterArchitecture-explicit-msvc\runner\$Configuration\CipherRelay.exe"
     }
     Write-Host "Rust binaries: $repoRoot\target\$cargoProfile"
     Write-Host "Flutter app: $flutterExe"

@@ -1,7 +1,7 @@
 # CipherRelay（密流）
 
 A self-hosted encrypted proxy with AES-256-GCM encryption and a cross-platform client.
-The source repository remains `proxy-everything`; existing protocol, binary and application identifiers remain compatible.
+The source repository remains `proxy-everything`; existing protocols, CLI binaries and application identifiers remain compatible.
 
 ```
 Client (local) ──► [encrypted] ──► Server (remote) ──► Internet
@@ -15,7 +15,7 @@ available in the source:
 | Edition | App bundle | Build target | Distribution |
 | --- | --- | --- | --- |
 | Direct download | `CipherRelay.app` | `Runner` | Developer ID signed and notarized DMG |
-| Mac App Store | `CipherRelay Store.app` | `appstore` / `RunnerStore` | Sandboxed app with Packet Tunnel extension; App Review required |
+| Mac App Store | `CipherRelay.app` | `appstore` / `RunnerStore` | Sandboxed app with Packet Tunnel extension; App Review required |
 
 The direct edition retains its system proxy, privileged TUN helper, LAN access
 and process bypass features. The store edition has its own bundle ID and data
@@ -23,10 +23,16 @@ container. See [Mac App Store development](docs/mac-app-store.md) for the build
 and capability differences. Store preparation does not mean Apple has approved
 the app.
 
-Existing bundle/package IDs, Dart imports, executable names on Windows/Linux,
-protocols and storage identifiers stay compatible. Repository URLs remain
-unchanged. On macOS, replace the previous direct-download app with
-`CipherRelay.app`; renaming does not migrate data between the two editions.
+All platforms display **CipherRelay**. Desktop executables are `CipherRelay.exe`
+on Windows and `CipherRelay` on Linux/macOS; Apple app bundles are
+`CipherRelay.app`. Existing bundle/package IDs, Dart imports, protocols, storage
+identifiers and Windows startup/single-instance keys remain unchanged.
+
+Release files use `cipherrelay-v<version>-<build>-<platform>-<architecture>`
+with their native extension. See the [client naming and packaging guide](ui/flutter/README.md#application-and-package-names).
+On macOS, replace the previous direct-download app with `CipherRelay.app`. The
+Store and direct editions retain separate IDs and settings; install them in
+separate folders if both editions are needed.
 
 ## Low-latency encrypted transport
 
@@ -247,10 +253,14 @@ cargo build --release --bin http-proxy-admin
 ## CipherRelay releases
 
 For a UI release with native changes, first dispatch `build-deploy.yaml` on the
-intended source branch with a new `release_version` (for example `0.4.30`).
-Manual runs publish the FFI libraries, including the macOS TUN helper, only
-after every native build succeeds. They skip server binaries and Docker image
-publication. Numeric tag pushes retain the full release workflow.
+intended source branch with a new `release_version` (for example `0.4.37`).
+Both manual runs and numeric tag pushes rebuild server, client, admin and TUI
+programs for all eight supported targets, plus twelve FFI archives including
+the macOS TUN helper. Publication requires all 44 archives to pass content and
+source-commit verification. Each archive includes `build-info.json`; the release
+includes `SHA256SUMS` and `release-manifest.json`. The UI workflow checks those
+hashes before staging native libraries. Only numeric tag pushes publish Docker
+images.
 
 Then dispatch `ui/flutter/.github/workflows/build.yaml` in
 `Proxy-UI/Proxy-UI-Flutter`, passing that native `lib_version`, a new UI
@@ -265,7 +275,7 @@ Prerequisites:
 - Rust MSVC toolchain selected by `rust-toolchain.toml`
 - Visual Studio 2022 Build Tools with Desktop development with C++
 - CMake
-- FVM 4.x; the Flutter submodule pins Flutter 3.38.6 in `.fvmrc`
+- FVM 4.x; the Flutter submodule pins Flutter 3.47.7 in `.fvmrc`
 
 Build the Rust command-line programs, FFI DLL, and Flutter Windows app together:
 

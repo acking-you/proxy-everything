@@ -95,6 +95,9 @@ fn packet_round_trips(with_echo: bool) {
     runtime.spawn(async move {
         while let Ok((mut stream, _)) = tcp_echo.accept().await {
             tokio::spawn(async move {
+                // Exercise a server-first protocol through the actual TUN,
+                // SOCKS listener and legacy/v3 forwarding paths.
+                stream.write_all(b"server-ready\r\n").await.unwrap();
                 let mut buf = [0; 4096];
                 while let Ok(n) = stream.read(&mut buf).await {
                     if n == 0 || stream.write_all(&buf[..n]).await.is_err() {
@@ -235,6 +238,17 @@ fn packet_round_trips(with_echo: bool) {
             .write(&mut packet, &[])
             .unwrap();
         send(&tunnel, &packet);
+        let greeting = receive(
+            &tunnel,
+            |parsed| matches!(&parsed.transport, Some(TransportSlice::Tcp(tcp)) if tcp.destination_port() == 43002 && tcp.payload() == b"server-ready\r\n"),
+        );
+        let parsed = SlicedPacket::from_ip(&greeting).unwrap();
+        let Some(TransportSlice::Tcp(tcp)) = parsed.transport else {
+            panic!("expected server greeting")
+        };
+        let ack = tcp
+            .sequence_number()
+            .wrapping_add(tcp.payload().len() as u32);
         let payload = b"packet-bridge-tcp-echo";
         packet.clear();
         PacketBuilder::ipv4([10, 77, 0, 2], [127, 0, 0, 1], 64)

@@ -9,6 +9,17 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
+/// Creates an HTTP client builder with the process TLS provider initialized.
+/// reqwest's `rustls-no-provider` mode requires explicit initialization; retain
+/// a provider already installed by an embedding application.
+pub fn http_client_builder() -> reqwest::ClientBuilder {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        // Another thread may install its provider between the check and call.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+    reqwest::Client::builder()
+}
+
 pub type TaskId = i64;
 const SIGNAL_TASK_ID: TaskId = -1;
 

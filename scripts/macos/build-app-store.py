@@ -84,8 +84,8 @@ def main():
     else:
         command += ['build']
     run(command)
-    app = output / ('CipherRelay.xcarchive/Products/Applications/CipherRelay Store.app' if args.archive else
-                    'Build/Products/' + args.configuration + '-appstore/CipherRelay Store.app')
+    app = output / ('CipherRelay.xcarchive/Products/Applications/CipherRelay.app' if args.archive else
+                    'Build/Products/' + args.configuration + '-appstore/CipherRelay.app')
     verification = ['python3', FLUTTER / 'scripts/macos/verify_store_bundle.py', app]
     if args.unsigned:
         verification.append('--unsigned')

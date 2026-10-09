@@ -196,7 +196,7 @@ async fn main() -> Result<()> {
             .with_context(|| format!("Failed to create config at '{}'", config_path.display()))?;
 
         let mut table = Table::new();
-        table.load_preset(presets::UTF8_BORDERS_ONLY);
+        table.load_style(presets::UTF8_BORDERS_ONLY);
         table.set_header(vec![
             Cell::new("Welcome to HTTP Proxy CLI!").fg(Color::Cyan),
         ]);
@@ -390,7 +390,7 @@ async fn main() -> Result<()> {
 
     let effective_auto_proxy = enable_auto_proxy && !upstream_mode;
     let mut table = Table::new();
-    table.load_preset(presets::UTF8_FULL);
+    table.load_style(presets::UTF8_FULL);
     table.set_header(vec![title, Cell::new("")]);
     table.add_row(vec![
         Cell::new("Local Proxy"),
@@ -451,7 +451,7 @@ async fn main() -> Result<()> {
 
     if !config_valid {
         let mut warn_table = Table::new();
-        warn_table.load_preset(presets::UTF8_HORIZONTAL_ONLY);
+        warn_table.load_style(presets::UTF8_HORIZONTAL_ONLY);
         warn_table.set_header(vec![Cell::new("⚠ WARNING").fg(Color::Yellow)]);
         warn_table.add_row(vec!["server_host not configured properly!"]);
         warn_table.add_row(vec![

@@ -41,7 +41,7 @@ The primary binaries are `http-proxy-server`, `http-proxy-cli`,
 ### Flutter and FVM
 
 - Flutter is managed exclusively with FVM.
-- `ui/flutter/.fvmrc` is the source of truth and currently pins Flutter 3.44.9.
+- `ui/flutter/.fvmrc` is the source of truth and currently pins Flutter 3.47.7.
 - Never use bare `flutter` or `dart` commands for this project. Use
   `fvm flutter ...` and `fvm dart ...` from `ui/flutter`.
 - Run `fvm install` after cloning or after the pinned SDK changes.
@@ -161,7 +161,7 @@ fvm flutter build apk --release --target-platform android-arm64 --split-per-abi
 ```
 
 - Rename or copy deliverables to an unambiguous ignored build location using
-  `proxy-ui-v<version-name>-<build-number>-<abi>-release.apk`. Report the absolute
+  `cipherrelay-v<version-name>-<build-number>-android-<abi>.apk`. Report the absolute
   path, ABI, `versionName`, effective `versionCode`, file size, SHA-256, and
   certificate verification result.
 - Never commit APKs, `ui/flutter/build/`, or `ui/flutter/native/`.
@@ -188,11 +188,11 @@ processes. Its complete bundle is under
   directory when possible; otherwise report the lock instead of terminating the
   user's process.
 - Verify that `ui/flutter/build/windows/<architecture>/runner/Release` contains
-  `proxy_ui.exe`, `http_proxy.dll`, `wintun.dll`, `flutter_windows.dll`, and the
+  `CipherRelay.exe`, `http_proxy.dll`, `wintun.dll`, `flutter_windows.dll`, and the
   required `data` and plugin files. A Windows release is the complete directory,
   not the executable alone.
 - Package that directory as
-  `ui/flutter/build/packages/proxy-ui-v<version-name>-<build-number>-windows-<architecture>.zip`.
+  `ui/flutter/build/packages/cipherrelay-v<version-name>-<build-number>-windows-<architecture>.zip`.
   Keep one containing application directory in the archive. Inspect the archive
   contents, then report the absolute path, version, architecture, size, and
   SHA-256. Do not commit the ZIP or other generated artifacts.
@@ -302,7 +302,7 @@ cargo fmt -p proxy-core -p proxy-client -p proxy-server -p proxy-tui -p proxy-ff
   proxy settings even on expected error paths.
 - For Flutter changes, run analyze and tests with FVM. For Windows integration
   changes, also build the Windows desktop bundle and verify `http_proxy.dll` is
-  next to `proxy_ui.exe`.
+  next to `CipherRelay.exe`.
 
 ## Logging and Security
 

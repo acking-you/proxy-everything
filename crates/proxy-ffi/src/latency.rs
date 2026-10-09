@@ -71,7 +71,7 @@ pub unsafe extern "C" fn proxy_test_latency(
         let mut guard = handle.http_client.lock().unwrap();
         if guard.is_none() {
             let proxy_url = format!("http://127.0.0.1:{}", handle.local_port);
-            match reqwest::Client::builder()
+            match proxy_core::util::http_client_builder()
                 .proxy(reqwest::Proxy::all(&proxy_url).expect("valid proxy URL"))
                 .build()
             {
