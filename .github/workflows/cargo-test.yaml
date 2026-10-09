@@ -33,6 +33,11 @@ jobs:
         run: cargo clippy -p proxy-core -p proxy-client -p proxy-server -p proxy-tui -p proxy-ffi --all-targets --all-features --no-deps --locked -- -D warnings
       - name: cargo test
         run: cargo test --workspace --locked
+      - name: Check iOS FFI compatibility
+        if: matrix.os == 'macos-latest'
+        run: |
+          rustup target add aarch64-apple-ios
+          cargo check -p proxy-ffi --target aarch64-apple-ios --locked
       - name: Test release completeness checks
         if: matrix.os == 'ubuntu-latest'
         run: python3 -m unittest discover -s scripts/release -p 'test_*.py'

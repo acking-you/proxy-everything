@@ -78,7 +78,9 @@ tokio = { workspace = true, features = [
 
 # Descriptor-limit policy (see src/rlimit.rs)
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+# nix 0.31 still references iOS system-control types removed by libc 0.2.190.
+# Keep the latest compatible bindings until nix restricts those APIs to macOS.
+libc = "=0.2.189"
 
 [features]
 # Store builds never disclose lookup targets or download a GeoIP database.
