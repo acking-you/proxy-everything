@@ -33,6 +33,7 @@ pub struct Config {
     pub tun: Option<bool>,
     /// Opt into synthetic DNS addresses. Missing values use proxied real DNS.
     pub tun_fake_ip: Option<bool>,
+    pub tun_dns_server: Option<std::net::IpAddr>,
     /// Send non-DNS UDP directly when SOCKS5 UDP is disabled. Defaults to true.
     pub tun_udp_direct_fallback: Option<bool>,
     /// Executable names routed outside the TUN. The client executable is always added.

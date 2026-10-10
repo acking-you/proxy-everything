@@ -38,14 +38,20 @@ pub struct PacketTunnelConfig {
     pub udp_enabled: bool,
     #[serde(default)]
     pub udp_direct_fallback: bool,
-    #[serde(default)]
+    #[serde(default = "legacy_fake_ip")]
     pub tun_fake_ip: bool,
+    #[serde(default = "super::tun::default_dns_server")]
+    pub tun_dns_server: std::net::IpAddr,
     #[serde(default)]
     pub reverse_geo: bool,
     #[serde(default)]
     pub need_codec_ips: Option<String>,
     #[serde(default)]
     pub force_codec: bool,
+}
+
+fn legacy_fake_ip() -> bool {
+    true
 }
 
 impl PacketTunnelConfig {
@@ -231,6 +237,7 @@ impl PacketTunnelRuntime {
                 ArgDns::OverTcp
             },
             virtual_dns_portals: vec![VIRTUAL_DNS.parse().expect("constant IPv4 address")],
+            dns_addr: config.tun_dns_server,
             ipv6_enabled: true,
             icmp_echo: true,
             udp_strategy: if config.udp_enabled {
@@ -382,6 +389,19 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
+
+    #[test]
+    fn old_packet_configs_keep_fake_ip_and_explicit_dns_policy_round_trips() {
+        let mut value =
+            serde_json::json!({"serverHost": "proxy.test", "serverPort": 1081, "localPort": 0});
+        let old: PacketTunnelConfig = serde_json::from_value(value.clone()).unwrap();
+        assert!(old.tun_fake_ip);
+        value["tunFakeIp"] = false.into();
+        value["tunDnsServer"] = "10.20.30.53".into();
+        let current: PacketTunnelConfig = serde_json::from_value(value).unwrap();
+        assert!(!current.tun_fake_ip);
+        assert_eq!(current.tun_dns_server.to_string(), "10.20.30.53");
+    }
 
     fn ipv4(marker: u8) -> Vec<u8> {
         let mut packet = vec![0; 20];

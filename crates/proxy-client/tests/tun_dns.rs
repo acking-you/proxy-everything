@@ -14,6 +14,131 @@ const PORTAL: [u8; 4] = [10, 77, 0, 1];
 const QUERY: &[u8] =
     b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x04test\x00\x00\x01\x00\x01";
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_listener_forces_dns_through_remote_without_forcing_other_traffic() {
+    use proxy_client::client::auto_proxy::PROXY_CACHE;
+    use proxy_client::client::{ClientConfig, run_client_with_listener};
+    use proxy_core::crypto::Aes256GcmCryption;
+    use proxy_core::protocol::ProxyHeader;
+    use tokio_util::task::TaskTracker;
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let dir = TempDir(std::env::temp_dir().join(format!(
+            "proxy-dns-routing-{}-{}", std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        )));
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let remote = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = local.local_addr().unwrap();
+        proxy_core::config::runtime::init_config(
+            "127.0.0.1".into(),
+            remote.local_addr().unwrap().port(),
+            true,
+            vec![],
+            None,
+        );
+        let cancel = CancellationToken::new();
+        let _guard = cancel.clone().drop_guard();
+        let tracker = TaskTracker::new();
+        tracker.spawn(run_client_with_listener::<false>(
+            local,
+            cancel.clone(),
+            Some(tracker.clone()),
+            Some(ClientConfig {
+                enable_auto_proxy: true,
+                enable_udp: false,
+                cache_dir: Some(dir.0.clone()),
+            }),
+        ));
+
+        for resolver in ["127.0.0.2", "::1"] {
+            // Model an auto-proxy direct decision. Every real socket remains
+            // loopback; the remote endpoint only decodes and answers the query.
+            PROXY_CACHE.insert(resolver.to_owned(), false);
+            let peer = async {
+                for _ in 0..2 {
+                    let (mut stream, _) = remote.accept().await.unwrap();
+                    let mut prefix = [0; 8];
+                    stream.read_exact(&mut prefix).await.unwrap();
+                    let length = u32::from_be_bytes(prefix[4..].try_into().unwrap()) as usize;
+                    assert!(length < 4096);
+                    let mut header = vec![0; length];
+                    stream.read_exact(&mut header).await.unwrap();
+                    let mut cipher = Aes256GcmCryption::try_new_with_default_key().unwrap();
+                    let header: ProxyHeader =
+                        serde_json::from_slice(cipher.decrypt_with_tag(&mut header).unwrap())
+                            .unwrap();
+                    assert_eq!(header.host, resolver);
+                    assert_eq!(header.port, 53);
+                    assert!(header.key.is_none());
+                    let length = stream.read_u16().await.unwrap() as usize;
+                    let mut answer = vec![0; length];
+                    stream.read_exact(&mut answer).await.unwrap();
+                    assert_eq!(answer, QUERY);
+                    answer[2..4].copy_from_slice(&[0x81, 0x80]);
+                    stream.write_u16(length as u16).await.unwrap();
+                    stream.write_all(&answer).await.unwrap();
+                }
+            };
+            let args = Args {
+                setup: false,
+                proxy: ArgProxy::try_from(format!("socks5://{local_addr}").as_str()).unwrap(),
+                dns: ArgDns::OverTcp,
+                dns_addr: resolver.parse().unwrap(),
+                udp_strategy: ArgUdpStrategy::Block,
+                ..Args::default()
+            };
+            let (mut host, device) = tokio::io::duplex(65536);
+            let tunnel_cancel = cancel.child_token();
+            let tunnel = tracker.spawn(tun2proxy::run_with_system_managed_network(
+                device,
+                1500,
+                args,
+                tunnel_cancel.clone(),
+                None,
+            ));
+            let application = async {
+                assert_eq!(udp_dns(&mut host).await[3], 0x80);
+                let mut framed = (QUERY.len() as u16).to_be_bytes().to_vec();
+                framed.extend_from_slice(QUERY);
+                assert_eq!(
+                    tcp_exchange(&mut host, PORTAL, 53, 43001, &framed).await[5],
+                    0x80
+                );
+            };
+            tokio::join!(peer, application);
+            tunnel_cancel.cancel();
+            tunnel.await.unwrap().unwrap();
+            PROXY_CACHE.remove(resolver);
+        }
+
+        // A non-DNS connection to the same direct-cached host still uses the
+        // direct listener, rather than globally forcing all TUN destinations.
+        let direct = TcpListener::bind("127.0.0.2:0").await.unwrap();
+        PROXY_CACHE.insert("127.0.0.2".into(), false);
+        let mut stream = tokio::net::TcpStream::connect(local_addr).await.unwrap();
+        stream.write_all(&[5, 1, 0]).await.unwrap();
+        let mut method = [0; 2];
+        stream.read_exact(&mut method).await.unwrap();
+        let mut request = vec![5, 1, 0, 1, 127, 0, 0, 2];
+        request.extend_from_slice(&direct.local_addr().unwrap().port().to_be_bytes());
+        stream.write_all(&request).await.unwrap();
+        let (_direct_stream, _) = direct.accept().await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), remote.accept())
+                .await
+                .is_err()
+        );
+        PROXY_CACHE.remove("127.0.0.2");
+        cancel.cancel();
+        tracker.close();
+        tracker.wait().await;
+    })
+    .await
+    .expect("real listener DNS routing timed out");
+}
+
 struct TempDir(PathBuf);
 impl Drop for TempDir {
     fn drop(&mut self) {
@@ -78,13 +203,21 @@ async fn tcp_exchange(
         .write(&mut bytes, payload)
         .unwrap();
     stream.write_all(&bytes).await.unwrap();
+    let mut received = Vec::new();
     loop {
         let reply = packet(stream).await;
         if let Some(TransportSlice::Tcp(tcp)) = SlicedPacket::from_ip(&reply).unwrap().transport
             && tcp.destination_port() == source_port
             && !tcp.payload().is_empty()
         {
-            return tcp.payload().to_vec();
+            received.extend_from_slice(tcp.payload());
+            if port != 53
+                || (received.len() >= 2
+                    && received.len()
+                        >= 2 + u16::from_be_bytes([received[0], received[1]]) as usize)
+            {
+                return received;
+            }
         }
     }
 }
@@ -186,10 +319,14 @@ async fn disabling_fake_ip_proxies_udp_and_tcp_dns_and_preserves_cached_domains(
                     assert_eq!(query, QUERY);
                     query[2] = 0x81;
                     query[3] = 0x80;
-                    query[7] = 1;
+                    query[7] = 2;
                     query.extend_from_slice(
                         b"\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04\xcb\x00\x71\x07",
                     );
+                    // Both UDP and native TCP replies must strip AAAA when
+                    // no IPv6 capture routes exist, while keeping the A answer.
+                    query.extend_from_slice(b"\xc0\x0c\x00\x1c\x00\x01\x00\x00\x00\x3c\x00\x10");
+                    query.extend_from_slice(&std::net::Ipv6Addr::LOCALHOST.octets());
                     stream.write_u16(query.len() as u16).await.unwrap();
                     stream.write_all(&query).await.unwrap();
                 } else {

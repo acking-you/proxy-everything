@@ -2,6 +2,7 @@
 
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::future::Future;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -62,6 +63,7 @@ pub struct ProxyHandle {
     udp_enabled: AtomicBool,
     tun_udp_direct_fallback: AtomicBool,
     tun_fake_ip: AtomicBool,
+    tun_dns_server: Mutex<IpAddr>,
     /// Retained so an out-of-process TUN session can persist its own fake-IP
     /// mappings; the in-process state is loaded from here at startup.
     cache_dir: Mutex<Option<PathBuf>>,
@@ -111,7 +113,8 @@ pub extern "C" fn proxy_create() -> *mut ProxyHandle {
         last_error: Arc::new(Mutex::new(None)),
         udp_enabled: AtomicBool::new(true),
         tun_udp_direct_fallback: AtomicBool::new(true),
-        tun_fake_ip: AtomicBool::new(true),
+        tun_fake_ip: AtomicBool::new(false),
+        tun_dns_server: Mutex::new(proxy_client::client::tun::DEFAULT_TUN_DNS_SERVER),
         cache_dir: Mutex::new(None),
         #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
         system_proxy_guard: Arc::new(Mutex::new(None)),
@@ -387,6 +390,43 @@ pub unsafe extern "C" fn proxy_start_v8(
     start_with_protocol(handle, &config.base.base, protocol, config.tun_fake_ip != 0)
 }
 
+/// Set the resolver IP used by the next TUN session before starting the proxy.
+/// Null resets the documented default. The caller retains ownership of `server`.
+///
+/// # Safety
+/// `handle` must come from `proxy_create`; `server` must be null or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_set_tun_dns_server(
+    handle: *mut ProxyHandle,
+    server: *const c_char,
+) -> ProxyResult {
+    if handle.is_null() {
+        return ProxyResult::InvalidParam;
+    }
+    let handle = unsafe { &*handle };
+    if handle.running.load(Ordering::Acquire) {
+        return ProxyResult::AlreadyRunning;
+    }
+    let server = if server.is_null() {
+        proxy_client::client::tun::DEFAULT_TUN_DNS_SERVER
+    } else {
+        let Ok(value) = unsafe { CStr::from_ptr(server) }.to_str() else {
+            return ProxyResult::InvalidParam;
+        };
+        let Ok(server) = value.trim().parse::<IpAddr>() else {
+            return ProxyResult::InvalidParam;
+        };
+        server
+    };
+    match handle.tun_dns_server.lock() {
+        Ok(mut value) => {
+            *value = server;
+            ProxyResult::Ok
+        }
+        Err(_) => ProxyResult::RuntimeError,
+    }
+}
+
 fn start_with_protocol(
     handle: *mut ProxyHandle,
     config: &ProxyConfigV5,
@@ -567,6 +607,10 @@ fn proxy_start_inner(
         session_key.clone(),
     );
 
+    let dns_server = match handle.tun_dns_server.lock() {
+        Ok(server) => *server,
+        Err(_) => return ProxyResult::RuntimeError,
+    };
     let tun_config = if enable_tun {
         match TunConfig::new(tun_bypass_processes) {
             Ok(config) => Some(
@@ -574,6 +618,7 @@ fn proxy_start_inner(
                     .with_udp_enabled(enable_udp)
                     .with_udp_direct_fallback(tun_udp_direct_fallback)
                     .with_fake_ip(tun_fake_ip)
+                    .with_dns_server(dns_server)
                     .with_virtual_dns_state(handle.tun_virtual_dns.clone())
                     .with_remote_endpoint(server_host.clone(), server_port),
             ),
@@ -880,11 +925,16 @@ pub unsafe extern "C" fn proxy_start_tun(
         );
         return ProxyResult::RuntimeError;
     };
+    let dns_server = match handle.tun_dns_server.lock() {
+        Ok(server) => *server,
+        Err(_) => return ProxyResult::RuntimeError,
+    };
     let config = match TunConfig::new(processes) {
         Ok(config) => config
             .with_udp_enabled(handle.udp_enabled.load(Ordering::Acquire))
             .with_udp_direct_fallback(handle.tun_udp_direct_fallback.load(Ordering::Acquire))
             .with_fake_ip(handle.tun_fake_ip.load(Ordering::Acquire))
+            .with_dns_server(dns_server)
             .with_virtual_dns_state(handle.tun_virtual_dns.clone())
             .with_remote_endpoint(remote_host.clone(), remote_port),
         Err(error) => {
@@ -997,11 +1047,16 @@ pub unsafe extern "C" fn proxy_start_android_tun(
     }
     let owned_fd = unsafe { OwnedFd::from_raw_fd(duplicated) };
 
+    let dns_server = match handle.tun_dns_server.lock() {
+        Ok(server) => *server,
+        Err(_) => return ProxyResult::RuntimeError,
+    };
     let config = match TunConfig::new(Vec::<String>::new()) {
         Ok(config) => config
             .with_udp_enabled(handle.udp_enabled.load(Ordering::Acquire))
             .with_udp_direct_fallback(handle.tun_udp_direct_fallback.load(Ordering::Acquire))
             .with_fake_ip(handle.tun_fake_ip.load(Ordering::Acquire))
+            .with_dns_server(dns_server)
             .with_ipv6_enabled(true)
             .with_mtu(mtu)
             .with_virtual_dns_state(handle.tun_virtual_dns.clone()),
@@ -1613,6 +1668,46 @@ pub unsafe extern "C" fn proxy_is_running(handle: *const ProxyHandle) -> c_int {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dns_resolver_setter_validates_and_preserves_existing_policy() {
+        let handle = proxy_create();
+        assert!(!handle.is_null());
+        unsafe {
+            assert!(!(*handle).tun_fake_ip.load(Ordering::Acquire));
+            for server in ["10.20.30.53", "2001:db8::53"] {
+                let server = CString::new(server).unwrap();
+                assert_eq!(
+                    proxy_set_tun_dns_server(handle, server.as_ptr()),
+                    ProxyResult::Ok
+                );
+                assert_eq!(
+                    (*handle).tun_dns_server.lock().unwrap().to_string(),
+                    server.to_str().unwrap()
+                );
+            }
+            let invalid = CString::new("resolver.example").unwrap();
+            assert_eq!(
+                proxy_set_tun_dns_server(handle, invalid.as_ptr()),
+                ProxyResult::InvalidParam
+            );
+            assert_eq!(
+                (*handle).tun_dns_server.lock().unwrap().to_string(),
+                "2001:db8::53"
+            );
+            assert_eq!(
+                proxy_set_tun_dns_server(handle, ptr::null()),
+                ProxyResult::Ok
+            );
+            (*handle).running.store(true, Ordering::Release);
+            assert_eq!(
+                proxy_set_tun_dns_server(handle, ptr::null()),
+                ProxyResult::AlreadyRunning
+            );
+            (*handle).running.store(false, Ordering::Release);
+            proxy_destroy(handle);
+        }
+    }
 
     #[cfg(feature = "mac-app-store")]
     #[test]

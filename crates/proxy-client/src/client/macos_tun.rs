@@ -53,8 +53,10 @@ pub struct HelperConfig {
     pub ipv6_enabled: bool,
     pub udp_enabled: bool,
     pub udp_direct_fallback: bool,
-    #[serde(default)]
+    #[serde(default = "legacy_fake_ip")]
     pub fake_ip: bool,
+    #[serde(default = "super::tun::default_dns_server")]
+    pub dns_server: std::net::IpAddr,
     /// Directory for the helper's own virtual-DNS persistence.
     pub cache_dir: Option<String>,
     /// Process names whose traffic bypasses the proxy, already normalized and
@@ -64,6 +66,10 @@ pub struct HelperConfig {
     /// that omits it, and vice versa.
     #[serde(default)]
     pub bypass_processes: Vec<String>,
+}
+
+fn legacy_fake_ip() -> bool {
+    true
 }
 
 /// Messages the helper sends back over the socket.
@@ -390,6 +396,7 @@ async fn drive_helper_session(
         udp_enabled: config.udp_enabled,
         udp_direct_fallback: config.udp_direct_fallback,
         fake_ip: config.fake_ip,
+        dns_server: config.dns_server,
         cache_dir: config
             .cache_dir
             .as_ref()
@@ -563,6 +570,28 @@ pub fn requires_privileged_helper() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_helper_configs_keep_fake_ip_but_explicit_policy_wins() {
+        let legacy = serde_json::json!({
+            "local_port": 1080, "mtu": 1500, "ipv6_enabled": false,
+            "udp_enabled": false, "udp_direct_fallback": false
+        });
+        let config: HelperConfig = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(config.fake_ip);
+        assert_eq!(config.dns_server, super::super::tun::DEFAULT_TUN_DNS_SERVER);
+        for enabled in [false, true] {
+            let mut current = legacy.clone();
+            current["fake_ip"] = enabled.into();
+            current["dns_server"] = "10.20.30.53".into();
+            let config: HelperConfig = serde_json::from_value(current).unwrap();
+            assert_eq!(config.fake_ip, enabled);
+            assert_eq!(config.dns_server.to_string(), "10.20.30.53");
+            let round_trip: HelperConfig =
+                serde_json::from_value(serde_json::to_value(config).unwrap()).unwrap();
+            assert_eq!(round_trip.fake_ip, enabled);
+        }
+    }
 
     #[test]
     fn shell_quoting_survives_paths_with_quotes_and_spaces() {

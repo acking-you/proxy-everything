@@ -173,6 +173,7 @@ fn packet_round_trips(with_echo: bool) {
                 udp_enabled: true,
                 udp_direct_fallback: false,
                 tun_fake_ip: true,
+                tun_dns_server: proxy_client::client::tun::DEFAULT_TUN_DNS_SERVER,
                 reverse_geo: false,
                 need_codec_ips: None,
                 force_codec: encrypted,

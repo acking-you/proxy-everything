@@ -26,6 +26,12 @@ use tun2proxy::{ArgDns, ArgProxy, ArgUdpStrategy, Args, ProcessBypass};
 // giving the embedded client enough headroom for a full-device workload.
 const EMBEDDED_TUN_MAX_SESSIONS: usize = 1024;
 
+pub const DEFAULT_TUN_DNS_SERVER: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8));
+
+pub fn default_dns_server() -> IpAddr {
+    DEFAULT_TUN_DNS_SERVER
+}
+
 // Halved from ipstack's 16 KiB default. Every admitted session holds one for
 // its whole life, and `tcp_timeout` deliberately keeps idle sessions around for
 // ten minutes, so this buffer multiplies by the concurrent session count rather
@@ -203,6 +209,8 @@ pub struct TunConfig {
     pub virtual_dns_state: TunVirtualDnsState,
     /// Allocate synthetic DNS addresses only when explicitly enabled.
     pub fake_ip: bool,
+    /// Resolver for the TUN DNS portal, reached through the remote proxy.
+    pub dns_server: IpAddr,
     pub ipv6_enabled: bool,
     pub mtu: u16,
     /// Require a successful end-to-end SOCKS5 UDP readiness check before
@@ -225,6 +233,7 @@ impl TunConfig {
             bypass: TunBypassController::new(user_processes)?,
             virtual_dns_state: TunVirtualDnsState::default(),
             fake_ip: false,
+            dns_server: DEFAULT_TUN_DNS_SERVER,
             ipv6_enabled: false,
             mtu: tun2proxy::DEFAULT_MTU,
             udp_enabled: true,
@@ -261,6 +270,11 @@ impl TunConfig {
         } else {
             ArgDns::OverTcp
         }
+    }
+
+    pub fn with_dns_server(mut self, server: IpAddr) -> Self {
+        self.dns_server = server;
+        self
     }
 
     /// Proxy non-DNS UDP through SOCKS5 when enabled. When disabled, keep DNS
@@ -718,6 +732,7 @@ async fn run_with_ready_inner(
         // Real DNS answers still travel through the proxy, even when ordinary
         // UDP is disabled. Fake-IP allocation is an explicit opt-in.
         dns: config.dns_mode(),
+        dns_addr: config.dns_server,
         udp_strategy: tun_udp_strategy(config.udp_enabled, config.udp_direct_fallback),
         ipv6_enabled: config.ipv6_enabled,
         mtu: config.mtu,

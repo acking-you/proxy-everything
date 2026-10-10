@@ -22,6 +22,7 @@ Without `--set-system-proxy`, manually configure system proxy to `127.0.0.1:<loc
 | `--udp <true\|false>` | Enable SOCKS5 UDP ASSOCIATE (default: `true`) |
 | `--tun` | Capture device traffic with a local TUN interface |
 | `--tun-fake-ip true` | Opt into virtual DNS; default is real DNS answers through the proxy |
+| `--tun-dns-server <IP>` | Resolver for the TUN DNS portal (default: `8.8.8.8`), reached from the proxy server |
 | `--tun-udp-direct-fallback <true\|false>` | Send UDP directly when proxy UDP is off; `false` blocks it (default: `true`) |
 | `--tun-bypass-process <name>` | Bypass TUN for an executable name (repeatable) |
 | `--tun-list-processes` | List running Windows executable names and exit |
@@ -98,6 +99,24 @@ restarting the local proxy connection, not just toggling TUN. Android exposes
 its DNS portal at `172.19.0.2`, outside the
 `198.18.0.0/15` fake-IP pool, so its opportunistic private-DNS probe cannot
 collide with an allocated application hostname.
+
+Set **TUN DNS resolver IP** in the GUI or `--tun-dns-server` in the CLI to use a
+private or enterprise resolver instead of the displayed `8.8.8.8` default. The
+resolver must accept DNS over TCP on port 53 and be reachable from the remote
+proxy server; the client does not silently select the host's physical DNS.
+This setting supplies the resolver behind private TUN DNS portals; explicitly
+addressed public resolvers keep their destination. Restart the proxy connection
+after changing it. TCP DNS CONNECT requests always use the configured upstream,
+even under reverse-geo or direct-cache rules; non-DNS destinations still follow
+auto-proxy policy. IPv4-only TUN sessions remove AAAA records from both UDP and
+TCP DNS replies, including fragmented TCP replies.
+
+Native embedders can call the additive `proxy_set_tun_dns_server` before startup;
+it accepts a literal IPv4/IPv6 address (null resets the default), rejects invalid
+input and refuses changes while the listener runs. Existing configuration
+struct layouts are unchanged. New UI settings default Fake-IP off, while old
+macOS helper/packet-provider messages without a DNS-policy field retain their
+historical Fake-IP behavior; current callers send the choice explicitly.
 
 The Flutter client supplies a stable private application-support directory on
 Android, iOS, Windows, macOS, and Linux. The CLI uses its existing
