@@ -2888,7 +2888,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-client"
-version = "0.4.37"
+version = "0.4.38"
 dependencies = [
  "anyhow",
  "async-broadcast",
@@ -2925,7 +2925,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-core"
-version = "0.4.37"
+version = "0.4.38"
 dependencies = [
  "arc-swap",
  "async-broadcast",
@@ -2963,7 +2963,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-ffi"
-version = "0.4.37"
+version = "0.4.38"
 dependencies = [
  "libc",
  "proxy-client",
@@ -2979,7 +2979,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-server"
-version = "0.4.37"
+version = "0.4.38"
 dependencies = [
  "anyhow",
  "clap",
@@ -3001,7 +3001,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-tui"
-version = "0.4.37"
+version = "0.4.38"
 dependencies = [
  "chrono",
  "clap",

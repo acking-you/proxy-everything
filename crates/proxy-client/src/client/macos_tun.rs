@@ -53,6 +53,8 @@ pub struct HelperConfig {
     pub ipv6_enabled: bool,
     pub udp_enabled: bool,
     pub udp_direct_fallback: bool,
+    #[serde(default)]
+    pub fake_ip: bool,
     /// Directory for the helper's own virtual-DNS persistence.
     pub cache_dir: Option<String>,
     /// Process names whose traffic bypasses the proxy, already normalized and
@@ -387,6 +389,7 @@ async fn drive_helper_session(
         ipv6_enabled: config.ipv6_enabled,
         udp_enabled: config.udp_enabled,
         udp_direct_fallback: config.udp_direct_fallback,
+        fake_ip: config.fake_ip,
         cache_dir: config
             .cache_dir
             .as_ref()

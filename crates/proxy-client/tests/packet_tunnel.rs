@@ -172,6 +172,7 @@ fn packet_round_trips(with_echo: bool) {
                 auto_proxy: false,
                 udp_enabled: true,
                 udp_direct_fallback: false,
+                tun_fake_ip: true,
                 reverse_geo: false,
                 need_codec_ips: None,
                 force_codec: encrypted,

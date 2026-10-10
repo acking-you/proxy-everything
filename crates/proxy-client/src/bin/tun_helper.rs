@@ -360,6 +360,7 @@ mod macos {
         let mut tun_config = TunConfig::new(config.bypass_processes.clone())?
             .with_udp_enabled(config.udp_enabled)
             .with_udp_direct_fallback(config.udp_direct_fallback)
+            .with_fake_ip(config.fake_ip)
             .with_ipv6_enabled(config.ipv6_enabled)
             .with_mtu(config.mtu)
             .with_virtual_dns_state(virtual_dns);

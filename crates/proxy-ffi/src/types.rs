@@ -130,6 +130,13 @@ pub struct ProxyConfigV7 {
     pub wire_protocol: c_int,
 }
 
+/// V8 adds opt-in Fake-IP DNS. Zero uses real answers through proxied TCP DNS.
+#[repr(C)]
+pub struct ProxyConfigV8 {
+    pub base: ProxyConfigV7,
+    pub tun_fake_ip: c_int,
+}
+
 /// Result of latency test.
 #[repr(C)]
 pub struct LatencyResult {
@@ -210,6 +217,11 @@ mod tests {
             };
         }
 
+        assert_eq!(std::mem::offset_of!(ProxyConfigV8, base), 0);
+        assert_eq!(
+            std::mem::offset_of!(ProxyConfigV8, tun_fake_ip),
+            std::mem::size_of::<ProxyConfigV7>()
+        );
         assert_eq!(std::mem::offset_of!(ProxyConfigV7, base), 0);
         assert_eq!(
             std::mem::offset_of!(ProxyConfigV7, wire_protocol),

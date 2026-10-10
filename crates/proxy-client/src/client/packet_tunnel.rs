@@ -39,6 +39,8 @@ pub struct PacketTunnelConfig {
     #[serde(default)]
     pub udp_direct_fallback: bool,
     #[serde(default)]
+    pub tun_fake_ip: bool,
+    #[serde(default)]
     pub reverse_geo: bool,
     #[serde(default)]
     pub need_codec_ips: Option<String>,
@@ -223,7 +225,11 @@ impl PacketTunnelRuntime {
                     io::Error::new(io::ErrorKind::InvalidInput, "invalid loopback proxy")
                 })?,
             setup: false,
-            dns: ArgDns::Virtual,
+            dns: if config.tun_fake_ip {
+                ArgDns::Virtual
+            } else {
+                ArgDns::OverTcp
+            },
             virtual_dns_portals: vec![VIRTUAL_DNS.parse().expect("constant IPv4 address")],
             ipv6_enabled: true,
             icmp_echo: true,
