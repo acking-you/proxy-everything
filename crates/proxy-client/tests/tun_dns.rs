@@ -115,13 +115,15 @@ async fn real_listener_forces_dns_through_remote_without_forcing_other_traffic()
 
         // A non-DNS connection to the same direct-cached host still uses the
         // direct listener, rather than globally forcing all TUN destinations.
-        let direct = TcpListener::bind("127.0.0.2:0").await.unwrap();
-        PROXY_CACHE.insert("127.0.0.2".into(), false);
+        // macOS does not assign 127.0.0.2 to lo0 without an explicit alias.
+        let direct = TcpListener::bind("[::1]:0").await.unwrap();
+        PROXY_CACHE.insert("::1".into(), false);
         let mut stream = tokio::net::TcpStream::connect(local_addr).await.unwrap();
         stream.write_all(&[5, 1, 0]).await.unwrap();
         let mut method = [0; 2];
         stream.read_exact(&mut method).await.unwrap();
-        let mut request = vec![5, 1, 0, 1, 127, 0, 0, 2];
+        let mut request = vec![5, 1, 0, 4];
+        request.extend_from_slice(&std::net::Ipv6Addr::LOCALHOST.octets());
         request.extend_from_slice(&direct.local_addr().unwrap().port().to_be_bytes());
         stream.write_all(&request).await.unwrap();
         let (_direct_stream, _) = direct.accept().await.unwrap();
@@ -130,7 +132,7 @@ async fn real_listener_forces_dns_through_remote_without_forcing_other_traffic()
                 .await
                 .is_err()
         );
-        PROXY_CACHE.remove("127.0.0.2");
+        PROXY_CACHE.remove("::1");
         cancel.cancel();
         tracker.close();
         tracker.wait().await;
