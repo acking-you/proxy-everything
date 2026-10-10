@@ -60,6 +60,12 @@ struct Cli {
     /// [optional] Capture all device TCP/UDP traffic through a local TUN interface
     #[arg(long)]
     tun: bool,
+    /// Use Fake-IP DNS in TUN mode (default: real DNS through the proxy)
+    #[arg(long, action = clap::ArgAction::Set)]
+    tun_fake_ip: Option<bool>,
+    /// Resolver IP for the TUN DNS portal, reached through the remote proxy.
+    #[arg(long)]
+    tun_dns_server: Option<std::net::IpAddr>,
     /// [optional] Send TUN UDP directly when SOCKS5 UDP is disabled; false blocks it
     #[arg(long, value_name = "DIRECT")]
     tun_udp_direct_fallback: Option<bool>,
@@ -94,6 +100,8 @@ impl Cli {
             auto_proxy: self.auto_proxy,
             udp: self.udp,
             tun: self.tun.then_some(true),
+            tun_fake_ip: self.tun_fake_ip,
+            tun_dns_server: self.tun_dns_server,
             tun_udp_direct_fallback: self.tun_udp_direct_fallback,
             tun_bypass_processes: (!self.tun_bypass_processes.is_empty())
                 .then(|| self.tun_bypass_processes.clone()),
@@ -137,6 +145,8 @@ impl Cli {
             || self.auto_proxy.is_some()
             || self.udp.is_some()
             || self.tun
+            || self.tun_fake_ip.is_some()
+            || self.tun_dns_server.is_some()
             || self.tun_udp_direct_fallback.is_some()
             || !self.tun_bypass_processes.is_empty()
             || self.set_system_proxy
@@ -491,6 +501,12 @@ async fn main() -> Result<()> {
             .context("Failed to prepare mandatory TUN process bypass")?
             .with_udp_enabled(enable_udp)
             .with_udp_direct_fallback(tun_udp_direct_fallback)
+            .with_fake_ip(cli.tun_fake_ip.or(config.tun_fake_ip).unwrap_or(false))
+            .with_dns_server(
+                cli.tun_dns_server
+                    .or(config.tun_dns_server)
+                    .unwrap_or(proxy_client::client::tun::DEFAULT_TUN_DNS_SERVER),
+            )
             .with_virtual_dns_state(virtual_dns);
         Some(match tun_endpoint {
             Some((host, port)) => config.with_remote_endpoint(host, port),

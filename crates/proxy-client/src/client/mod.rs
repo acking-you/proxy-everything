@@ -355,6 +355,12 @@ pub async fn resolve_server_connection(
 ) -> Result<ServerConnection> {
     use proxy_core::config::runtime;
 
+    // Captured DNS uses this same listener, including independently started TUN
+    // sessions. Never let geo, cache or direct-host rules send a DNS CONNECT
+    // outside the configured upstream. Other destinations retain their policy.
+    let sender = if port == 53 { None } else { sender };
+    let honor_forced_direct = honor_forced_direct && port != 53;
+
     // Ahead of the upstream proxy and of every keyword or geo rule: these hosts
     // are compiled in as direct, so no configuration can route them elsewhere.
     if honor_forced_direct && proxy_core::config::is_forced_direct_host(host) {

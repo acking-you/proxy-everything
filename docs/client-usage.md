@@ -21,6 +21,8 @@ Without `--set-system-proxy`, manually configure system proxy to `127.0.0.1:<loc
 | `-m, --msg-key` | Enable random message key |
 | `--udp <true\|false>` | Enable SOCKS5 UDP ASSOCIATE (default: `true`) |
 | `--tun` | Capture device traffic with a local TUN interface |
+| `--tun-fake-ip true` | Opt into virtual DNS; default is real DNS answers through the proxy |
+| `--tun-dns-server <IP>` | Resolver for the TUN DNS portal (default: `8.8.8.8`), reached from the proxy server |
 | `--tun-udp-direct-fallback <true\|false>` | Send UDP directly when proxy UDP is off; `false` blocks it (default: `true`) |
 | `--tun-bypass-process <name>` | Bypass TUN for an executable name (repeatable) |
 | `--tun-list-processes` | List running Windows executable names and exit |
@@ -87,11 +89,34 @@ capture policy by application package name.
 The local port is a protocol-multiplexed HTTP/SOCKS5 listener, but tun2proxy
 deliberately uses its SOCKS5 endpoint because SOCKS5 preserves both TCP and UDP
 semantics. A successful local listener bind is therefore a prerequisite for
-starting TUN. TUN mode uses virtual DNS so resolver traffic is answered inside
-the tunnel and the original domain is forwarded to the proxy instead of adding
-a direct DNS route. Android exposes that resolver at `172.19.0.2`, outside the
+starting TUN. By default, captured DNS queries (UDP or TCP on port 53) are sent
+over TCP through the proxy and return real addresses. This also works when
+ordinary UDP forwarding is disabled. Fake-IP is optional: enable **Fake-IP DNS**
+in the GUI configuration or pass `--tun-fake-ip true` to the CLI to allocate
+virtual addresses and forward the original domain. Missing settings in older
+configurations default to disabled. Changing this setting requires stopping and
+restarting the local proxy connection, not just toggling TUN. Android exposes
+its DNS portal at `172.19.0.2`, outside the
 `198.18.0.0/15` fake-IP pool, so its opportunistic private-DNS probe cannot
 collide with an allocated application hostname.
+
+Set **TUN DNS resolver IP** in the GUI or `--tun-dns-server` in the CLI to use a
+private or enterprise resolver instead of the displayed `8.8.8.8` default. The
+resolver must accept DNS over TCP on port 53 and be reachable from the remote
+proxy server; the client does not silently select the host's physical DNS.
+This setting supplies the resolver behind private TUN DNS portals; explicitly
+addressed public resolvers keep their destination. Restart the proxy connection
+after changing it. TCP DNS CONNECT requests always use the configured upstream,
+even under reverse-geo or direct-cache rules; non-DNS destinations still follow
+auto-proxy policy. IPv4-only TUN sessions remove AAAA records from both UDP and
+TCP DNS replies, including fragmented TCP replies.
+
+Native embedders can call the additive `proxy_set_tun_dns_server` before startup;
+it accepts a literal IPv4/IPv6 address (null resets the default), rejects invalid
+input and refuses changes while the listener runs. Existing configuration
+struct layouts are unchanged. New UI settings default Fake-IP off, while old
+macOS helper/packet-provider messages without a DNS-policy field retain their
+historical Fake-IP behavior; current callers send the choice explicitly.
 
 The Flutter client supplies a stable private application-support directory on
 Android, iOS, Windows, macOS, and Linux. The CLI uses its existing
@@ -100,6 +125,21 @@ restored from those locations before capture starts, so cached fake-IP answers
 remain valid across process restarts and in-place upgrades on every supported
 client platform. Embedders using the FFI should likewise provide a stable
 `cache_dir`; leaving it null intentionally disables persistent client state.
+Disabling Fake-IP keeps the existing reverse mappings available for applications
+that still hold cached fake addresses; new DNS answers do not allocate fake IPs.
+The additive `proxy_start_v8` ABI carries this policy explicitly. Existing V1–V7
+callers retain their historical virtual-DNS behavior.
+
+Windows keeps `%APPDATA%\com.proxyui\proxy_ui` as its permanent storage path,
+regardless of the CipherRelay display name. If that directory has any existing
+data, it remains authoritative and is never merged with
+`%APPDATA%\com.proxyui\CipherRelay`. Two independent Fake-IP journals can map
+the same address to different domains, so merging them would corrupt cached
+answers. Only an empty legacy directory can receive a copy of the branded
+installation’s preferences and cache files together; the source stays intact.
+Keep the existing directories as backups when trying an upgrade. If both have
+been used, cached answers created by the discarded generation may need to expire
+or the affected application may need to be restarted.
 
 On Windows, keep `wintun.dll` in the same directory as
 `http-proxy-cli.exe` or `CipherRelay.exe`. The supported build and staging scripts
@@ -223,7 +263,10 @@ recreated.
 
 Normal cancellation first cancels and drains the TUN TCP, UDP, UdpGW, and
 socket-transfer tasks, then restores routes, interface settings, and DNS
-through the setup guard.
+through the setup guard. On Windows a retained Wintun session keeps the adapter
+alive until that restoration finishes, including when forwarding fails or the
+outer task is cancelled. Releasing the adapter first makes restoration fail
+with Windows error 1168 (interface not found).
 This prevents old relays from surviving a node hot switch while network state
 is already being replaced. A hard process termination or machine crash can
 still prevent user-space cleanup; after such an event, inspect and remove only
@@ -274,12 +317,13 @@ does not control multicast egress. Without the multicast-specific binding, an
 SSDP packet such as `239.255.255.250:1900` can return through Wintun, create a
 new proxy-ui UDP socket, and amplify into a self-sustaining relay loop.
 
-TUN TCP continues to work with `--udp false`. By default, virtual DNS remains
-inside the TUN resolver while other captured UDP is relayed directly instead
+TUN TCP continues to work with `--udp false`. DNS still uses the proxy’s TCP
+path (or the virtual resolver when Fake-IP is enabled), while other captured UDP
+is relayed directly instead
 of being sent to the local SOCKS5 listener. This matches the practical fallback
 used when a selected outbound cannot carry UDP, but it means non-DNS UDP
 bypasses the configured proxy. Add `--tun-udp-direct-fallback false` to block
-captured non-DNS UDP instead. Virtual DNS remains available in strict mode so
+captured non-DNS UDP instead. Both DNS modes remain available in strict mode so
 TCP applications can still resolve hostnames, including through DNS-over-TCP
 on port 53. Embedders can declare local DNS portal addresses with repeatable
 `--virtual-dns-portal`; opportunistic TLS probes to port 853 on those exact
