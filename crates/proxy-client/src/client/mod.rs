@@ -217,6 +217,8 @@ pub struct HeaderContext<'a> {
 }
 
 pub struct ProxyContext<'a> {
+    /// Limit untrusted client input, not the outbound TCP connection.
+    handshake_deadline: tokio::time::Instant,
     /// header buffer for response [only http proxy use]
     buffer: &'a [u8],
     #[cfg(feature = "auto-proxy")]
@@ -690,12 +692,9 @@ fn get_provider<T: ProxierProviderType>(header: HeaderContext<'_>) -> Option<T::
 async fn handle_proxy(
     proxy_context: ProxyContext<'_>,
     provider: impl ForwarderProvider,
-    deadline: tokio::time::Instant,
     permit: tokio::sync::SemaphorePermit<'_>,
 ) -> Result<()> {
-    let proxier = tokio::time::timeout_at(deadline, provider.try_build_forwarder(proxy_context))
-        .await
-        .map_err(|_| setup_timeout())??;
+    let proxier = provider.try_build_forwarder(proxy_context).await?;
     drop(permit);
     proxier.forward().await
 }
@@ -755,6 +754,7 @@ pub async fn handle_client(mut context: ClientProxyContext) -> Result<()> {
         msg_key: context.msg_key.as_deref(),
     };
     let proxy_context = ProxyContext {
+        handshake_deadline: deadline,
         buffer: header,
         #[cfg(feature = "auto-proxy")]
         sender: context.sender.as_ref(),
@@ -768,7 +768,7 @@ pub async fn handle_client(mut context: ClientProxyContext) -> Result<()> {
     macro_rules! start_proxy_with_provider {
         ($header_context:expr,$proxy_context:expr,$provider_type:ty) => {
             if let Some(p) = get_provider::<$provider_type>($header_context) {
-                return handle_proxy($proxy_context, p, deadline, permit).await;
+                return handle_proxy($proxy_context, p, permit).await;
             }
         };
 
@@ -1043,6 +1043,113 @@ pub async fn start_client<const NEED_CODEC: bool>(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn a_client_that_stalls_after_socks_greeting_still_times_out() {
+        let (mut client, stream) = tcp_pair().await;
+        let task = tokio::spawn(super::handle_client(super::ClientProxyContext {
+            stream,
+            msg_key: None,
+            #[cfg(feature = "auto-proxy")]
+            sender: None,
+            force_proxy: true,
+            upstream_proxy: None,
+            honor_forced_direct: false,
+            enable_udp: false,
+        }));
+        client.write_all(&[5, 1, 0]).await.unwrap();
+        let mut greeting = [0; 2];
+        client.read_exact(&mut greeting).await.unwrap();
+        assert_eq!(greeting, [5, 0]);
+        tokio::time::pause();
+        tokio::time::advance(super::CLIENT_SETUP_TIMEOUT).await;
+        assert!(
+            task.await
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("handshake timed out")
+        );
+        tokio::time::resume();
+    }
+
+    #[tokio::test]
+    async fn client_input_deadline_does_not_cancel_outbound_setup() {
+        struct SlowConnect;
+        impl super::Forwarder for SlowConnect {
+            async fn forward(self) -> super::Result<()> {
+                Ok(())
+            }
+        }
+        impl super::ForwarderProvider for SlowConnect {
+            type Item = Self;
+
+            fn try_new(_: super::HeaderContext<'_>) -> super::Result<Self> {
+                Ok(Self)
+            }
+
+            async fn try_build_forwarder(self, _: super::ProxyContext<'_>) -> super::Result<Self> {
+                tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                Ok(self)
+            }
+        }
+        let (_client, stream) = tcp_pair().await;
+        tokio::time::pause();
+        let context = super::ProxyContext {
+            handshake_deadline: tokio::time::Instant::now() + super::CLIENT_SETUP_TIMEOUT,
+            buffer: b"",
+            #[cfg(feature = "auto-proxy")]
+            sender: None,
+            force_proxy: true,
+            upstream_proxy: None,
+            honor_forced_direct: false,
+            enable_udp: false,
+            stream,
+        };
+        let slots = tokio::sync::Semaphore::new(1);
+        super::handle_proxy(context, SlowConnect, slots.acquire().await.unwrap())
+            .await
+            .unwrap();
+        assert_eq!(slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn upstream_failure_returns_http_and_socks_failure_replies() {
+        for socks in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let upstream =
+                ExternalProxyTarget::parse(&format!("http://{}", listener.local_addr().unwrap()))
+                    .unwrap();
+            let (client, token) = start_client_for_test(upstream).await;
+            let peer = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let _ = read_until_headers_end(&mut stream).await;
+                stream
+                    .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+                    .await
+                    .unwrap();
+            });
+            let mut stream = TcpStream::connect(client).await.unwrap();
+            if socks {
+                stream
+                    .write_all(&[5, 1, 0, 5, 1, 0, 1, 127, 0, 0, 1, 0, 80])
+                    .await
+                    .unwrap();
+                let mut response = [0; 12];
+                stream.read_exact(&mut response).await.unwrap();
+                assert_eq!(&response[..4], &[5, 0, 5, 1]);
+            } else {
+                stream
+                    .write_all(b"CONNECT example.test:443 HTTP/1.1\r\n\r\n")
+                    .await
+                    .unwrap();
+                let (response, _) = read_until_headers_end(&mut stream).await;
+                assert!(response.starts_with("HTTP/1.1 502"));
+            }
+            peer.await.unwrap();
+            token.cancel();
+        }
+    }
+
     async fn tcp_pair() -> (TcpStream, TcpStream) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let (writer, reader) = tokio::join!(

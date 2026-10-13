@@ -5,6 +5,135 @@ ProxyUI `34f9189`. It covers connection setup, TCP/UDP forwarding, Windows
 physical egress recovery, native resource ownership, and UI lifecycle/status.
 It does not establish the cause of any particular past Wi-Fi outage.
 
+## Windows follow-up against the working v1.2.15 release (2026-10-14)
+
+The comparison baseline is the published UI **v1.2.15+38**, native **0.4.30**,
+with tun2proxy **a718098**. The affected published UI **v1.2.23+53** uses native
+**0.4.38** and tun2proxy **c38e108**. The embedded revision strings in both
+downloaded Windows DLLs confirm these TUN revisions.
+The older process still running during investigation logged revision `980f7c3`,
+so it was not used as a substitute for the actual v1.2.15 release baseline.
+
+- **Confirmed regression in automatic egress refresh:** native 0.4.31 added
+  periodic Windows egress discovery and stopped pinning `args.bind_interface`
+  to the initial physical interface. Device creation only copied its actual
+  name into route setup, leaving `args.tun` unset for the forwarding runtime.
+  Refresh then failed to exclude the created adapter's LUID: its `/1` route
+  could win, followed by heuristic physical-interface fallback. Pass the
+  actual device name to both consumers. Tests cover automatic naming and
+  selection with competing capture/physical routes. The reported logs show
+  fallback to the expected WLAN, so this defect alone does **not** establish
+  the cause of the complete outage.
+- **Changed TCP deadline:** v1.2.15 waited for the OS connect result; 0.4.31+
+  applies three seconds per address within an eight-second overall budget.
+  The reported `TCP address timed out` is generated here, before wire-protocol
+  negotiation. Transient loss or slow route recovery can therefore fail sooner.
+  A packet capture was not taken; neither retransmission loss nor a route loop
+  was established. The subsequent audit removed these two added limits and
+  separated the local client's 15-second input deadline from outbound dialing.
+  TUN setup now uses its existing configured TCP timeout (600 seconds by
+  default), rather than imposing another hidden ten-second limit while waiting
+  for the local SOCKS reply. DNS lookup, external-proxy negotiation, control
+  requests and health probes retain their own separately scoped deadlines.
+- **Loopback versus upstream:** both published DLLs passed HTTP and SOCKS5
+  requests through the same three endpoints (12 requests, all HTTP 200), using
+  separate ephemeral loopback ports, TUN/system proxy disabled and no persistent
+  cache. Six additional socket-scoped physical-interface TCP probes succeeded.
+  The existing old TUN remained active, so these are baseline/protocol checks,
+  not verification of the new TUN's routes or the GUI executable's firewall
+  treatment. Preferences, routes, system proxy and the existing process were
+  unchanged by these checks.
+- **Startup status:** four affected starts logged roughly 0.35–0.69 seconds
+  from native TUN startup to adapter/route readiness. Those timestamps do not
+  cover all UI, elevation and queued-operation delays. Readiness currently
+  certifies adapter/route setup, not an end-to-end usable upstream connection.
+- **DNS mode:** failures appeared with both proxied real DNS and Fake-IP.
+  Cached `198.19.*` addresses can persist after Fake-IP is disabled; retained
+  reverse mappings are intentional upgrade compatibility, not evidence that
+  new Fake-IP allocation is still enabled.
+
+The Windows refresh path is platform-specific; macOS uses its helper and
+different route/interface APIs. This explains why macOS success does not
+validate Windows egress selection, but is not itself proof of an outage cause.
+Live adapter activation, capture/return routing and GUI startup latency remain
+unverified: this investigation must not disconnect the user's running TUN.
+
+Initial follow-up verification passed 84 tun2proxy tests, 252 workspace tests (seven
+existing ignored cases), strict tun2proxy and first-party Clippy, Rust formatting,
+Flutter analysis (existing informational diagnostics), 108 regular Flutter
+tests plus the separately enabled release-DLL ABI test (two macOS store tests
+remain skipped), and an offline font-rendering check. The supported Windows
+Release build produced a complete bundle with freshly built `http_proxy.dll`,
+`wintun.dll`, plugins and the Windows-only Noto Sans SC asset/license. Its DLL
+also passed six isolated HTTP/SOCKS requests across the same endpoints. The
+Chinese font covers all 473 CJK characters used by the UI translation; previews
+at 100%, 125%, 150% and 200% include both themes and log fallback. This is not a
+live TUN acceptance test and no replacement release was published.
+
+## Full audit follow-up (2026-10-14, unreleased source changes)
+
+Three passes cover the v1.2.15 comparison and current implementation, failure /
+cancellation paths after repair, and final compatibility/build verification.
+These are review passes in this task, not independent external approvals.
+The fixes retain the existing wire formats, versioned FFI layouts, application
+identity, saved settings and explicit Fake-IP selection.
+
+| Confirmed defect | Repair and regression coverage |
+| --- | --- |
+| A single IP is abandoned after three seconds; outer client/TUN deadlines also truncate its TCP retries | Outbound dialing follows the OS retry policy and caller cancellation; a simulated 20-second connection succeeds, while an incomplete SOCKS input still expires and releases its setup slot |
+| HTTP authority parsing splits IPv6 colons and includes a query in a host without a slash | Parse bracketed IPv6 and authority boundaries; reject malformed ports/authorities; retain the entire original URI in parse errors |
+| CONNECT reports success before opening the upstream; SOCKS upstream errors only close the stream | Send CONNECT 200 only after upstream setup, otherwise 502; SOCKS sends a failure reply; loopback tests cover both |
+| Timed-out TUN cleanup loses its completion receiver and allows overlapping starts | Keep ownership across timeout, refuse replacement until completion, and distinguish a closed worker channel from confirmed cleanup |
+| A failed route/DNS restore is logged but the FFI stop still reports success | Preserve a typed teardown error through the in-process native runner and stop channel; retain the listener and bypass state on failure |
+| Combined FFI start bypasses the separately owned TUN lifecycle; reused listener handles can race old cleanup | Both TUN entry points share readiness/teardown; join the listener and its tracked connections before reuse |
+| Destruction or failed startup can abort route restoration | Cancel TUN, await its cleanup, then release the listener/runtime; fake-worker tests never create an adapter |
+| Desktop Quit exits even when stop fails, and idle UI snapshots can skip pending native cleanup | Always ask the owning service to stop; propagate failures and cancel exit; a later successful cleanup permits exit |
+| An optional malformed list discards otherwise usable saved configuration | Parse each optional list defensively without losing the saved endpoint; preserve data and show startup migration errors instead of a blank window |
+| Disposal during asynchronous initialization can resume the elevation/start workflow or notify dead listeners | Guard initialization, starts and callbacks after disposal; regression uses a fake service |
+| FFI logs silently truncate at 8 KiB and a later message can overwrite structured fields | Preserve complete admitted messages and every structured field; bound total queued bytes/count instead; HTTP logs keep method/URI/version and SOCKS logs keep the command/destination |
+
+Review also covered virtual-DNS journal recovery, process/loopback bypass,
+TCP/UDP framing, secure/legacy compatibility and desktop/mobile release
+collection. Existing tests for these paths remain enabled. Server relay,
+control-plane and health-probe deadlines are separate policies; this repair
+does not indiscriminately remove every timeout in the repository.
+
+The existing legacy cryptographic limitation described below remains a
+deployment migration requirement; changing its bytes or silently selecting v3
+would break compatibility with older servers. No live TUN, route, DNS, system
+proxy, active executable or saved preference was intentionally changed by this
+audit. Real Windows TUN activation and macOS/mobile runtime acceptance still
+require a separate test window.
+
+Final Windows verification for these source changes:
+
+- `cargo test --workspace`: **266 passed, seven existing ignored tests**.
+- `cargo test --manifest-path deps/tun2proxy/Cargo.toml`: **85 passed**.
+- Strict first-party and tun2proxy Clippy with `-D warnings`, and their Rust
+  formatting checks passed.
+- `fvm flutter analyze --no-fatal-infos`: passed, with 26 existing informational
+  tray API deprecations. `fvm flutter test --no-pub`: **112 passed, three skipped**;
+  enabling the rebuilt DLL separately passed the native V8/V7 ABI test, leaving
+  only the two platform-specific Store skips unexercised.
+- Native release, desktop collection and macOS packaging unit tests: **16 passed**.
+  They use fixtures/mocks and do not publish or notarize a release.
+- Supported offline Windows Release build passed. The complete bundle includes
+  the fresh native DLL, Wintun, Flutter runtime/plugins and the Windows-only
+  Noto Sans SC font/license. Native staging and bundle DLL hashes match:
+  `c0da2e75e685fd7de3bcf04047bbd21c75c30bd59d986be426dfb55ca3e00826`.
+- The rebuilt DLL passed **six HTTP/SOCKS requests** across the same three nodes
+  and **30 stop/restart cycles on one handle/port**, including cancellation of
+  an admitted SOCKS client. These use ephemeral loopback listeners, no TUN,
+  no system proxy and no persistent cache. They do not validate new TUN routes.
+- Before/after snapshots match for the old process (PID 47136 and its start
+  time), preferences SHA-256, IPv4 route table and system-proxy settings.
+
+Build/test logs and isolated probe results are under the ignored local
+`target/audit-20261014/` directory. The verification bundle retains the current
+source version **1.2.23+53 / native 0.4.38**; it is not a newly versioned release
+or an upgrade package. These source changes are proposed for review without a
+new tag or release upload.
+
 ## Corrected behavior
 
 | Failure | Change | Owning source |
@@ -21,7 +150,7 @@ It does not establish the cause of any particular past Wi-Fi outage.
 | Direct process bypass retains an obsolete interface or DHCP DNS snapshot | Refresh Windows egress off the forwarding executor; new sessions use the latest snapshot | tun2proxy `lib.rs`, `direct.rs` |
 | A failed forwarding direction waits for its peer until idle expiry | Propagate errors, cancel the opposite pump, reset failed or capacity-rejected TCP sessions; preserve normal EOF half-close behavior | tun2proxy `lib.rs` |
 | Cancelled server sessions leak active-connection counts | Use a drop guard | `crates/proxy-server/src/server/connection.rs` |
-| Native warning storms or a stalled UI accumulate callback work/strings | Bound warning rate, message size, and outstanding native allocations; report suppression | `crates/proxy-ffi/src/logging.rs` |
+| Native warning storms or a stalled UI accumulate callback work/strings | Bound warning rate and total queued bytes/count; preserve complete accepted messages and report suppression | `crates/proxy-ffi/src/logging.rs` |
 | Stop, latency checks and destruction overlap across Dart isolates | Serialize handle borrowers and defer off-thread destruction until borrowers return | UI `native_operation_queue.dart`, `proxy_service.dart` |
 | Queued native logs call a closed Dart callback | Retain a single callback for the UI isolate lifetime | UI `proxy_service.dart` |
 | UI remains connected when the worker dies without emitting a log | Independently reconcile native status once per second; retain a surviving TUN's visible stop control | UI `proxy_provider.dart` |
@@ -33,15 +162,16 @@ It does not establish the cause of any particular past Wi-Fi outage.
 - DNS: 4,096 cached hostnames, five-minute TTL, three-second lookup budget,
   eight OS lookups at once, same-host coalescing and a two-second refresh floor.
   A timed-out OS call may continue, but it continues to occupy its slot.
-- TCP address selection: eight seconds including DNS, three seconds per
-  address, 250 ms initial stagger, at most two live attempts. Immediate failure
-  advances immediately. External SOCKS5/HTTP setup has a 15-second total budget.
-- Local handshake: 15 seconds, at most 256 pending setups, HTTP headers capped
+- TCP address selection: OS TCP retries, 250 ms initial stagger, at most two
+  live attempts. Immediate failure advances immediately; caller cancellation
+  drops all attempts. External SOCKS5/HTTP negotiation has a 15-second budget
+  after its TCP connection is established.
+- Local client input: 15 seconds, at most 256 pending setups, HTTP headers capped
   at 32 KiB. Relay incoming headers: ten seconds, at most 512 pending headers.
 - TUN: the existing one-second interface monitor also reconciles owned bypass
   routes. A separate sequential two-second egress lookup updates new sessions.
-  TCP connect/proxy negotiation has a ten-second deadline after handler creation;
-  this is not a ten-second bound on all process lookup or DNS work.
+  TCP connect/proxy negotiation uses the existing configured TCP timeout
+  (600 seconds by default) after handler creation, not an additional ten seconds.
 - Route recovery installs a replacement before deleting its owned predecessor.
   Offline state retains the loop barrier. Failed deletion retains both ownership
   records for cleanup. Preexisting replacements never become teardown-owned.
@@ -49,7 +179,10 @@ It does not establish the cause of any particular past Wi-Fi outage.
 - Process discovery uses one blocking lookup per matcher, with asynchronous
   waiters. Established sessions retain their pinned process identity.
 - Native logs: 512 ordinary plus 64 warning/error callbacks per second, with a
-  suppression summary; at most 1,024 pending strings, each at most 8 KiB.
+  suppression summary; at most 1,024 pending strings totaling at most 8 MiB.
+  Accepted messages are complete, including their original request URI and
+  error context. Embedded NULs are escaped for the C-string ABI. Queue overflow
+  is reported as dropped entries rather than silently truncating a message.
   Rust's matching free function releases each allocation and its slot.
 
 Existing TCP sessions cannot migrate between physical network paths. Recovery

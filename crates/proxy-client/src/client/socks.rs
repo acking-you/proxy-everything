@@ -114,11 +114,21 @@ impl ForwarderProvider for SocksProxierProvider {
         self,
         mut proxy_context: super::ProxyContext<'_>,
     ) -> super::Result<Self::Item> {
-        match read_request(&mut proxy_context.stream)
-            .await
-            .context(SocksProxySnafu)?
-        {
+        let request = tokio::time::timeout_at(
+            proxy_context.handshake_deadline,
+            read_request(&mut proxy_context.stream),
+        )
+        .await
+        .map_err(|_| super::setup_timeout())?
+        .context(SocksProxySnafu)?;
+        match request {
             SocksRequest::Echo { host, ipv6 } => {
+                tracing::info!(
+                    host,
+                    ipv6,
+                    command = "ECHO",
+                    "received SOCKS5 proxy request"
+                );
                 if !proxy_context
                     .stream
                     .peer_addr()
@@ -151,11 +161,17 @@ impl ForwarderProvider for SocksProxierProvider {
                 Ok(SocksForwarder::Echo(Box::new(forwarder)))
             }
             SocksRequest::Connect { host, port } => {
+                tracing::info!(
+                    host,
+                    port,
+                    command = "CONNECT",
+                    "received SOCKS5 proxy request"
+                );
                 let ServerConnection {
                     stream: server_stream,
                     need_proxy,
                     msg_key,
-                } = resolve_server_connection(
+                } = match resolve_server_connection(
                     host.as_str(),
                     port,
                     proxy_context.sender,
@@ -163,7 +179,16 @@ impl ForwarderProvider for SocksProxierProvider {
                     proxy_context.upstream_proxy,
                     proxy_context.honor_forced_direct,
                 )
-                .await?;
+                .await
+                {
+                    Ok(connection) => connection,
+                    Err(error) => {
+                        // General server failure (RFC 1928); never signal a
+                        // successful tunnel when opening the upstream failed.
+                        let _ = response_with_code(&mut proxy_context.stream, 0x01).await;
+                        return Err(error);
+                    }
+                };
                 response(&mut proxy_context.stream)
                     .await
                     .context(SocksProxySnafu)?;
@@ -190,6 +215,11 @@ impl ForwarderProvider for SocksProxierProvider {
                 }))
             }
             SocksRequest::UdpAssociate { client_addr } => {
+                tracing::info!(
+                    ?client_addr,
+                    command = "UDP ASSOCIATE",
+                    "received SOCKS5 proxy request"
+                );
                 if !proxy_context.enable_udp {
                     tracing::warn!(
                         transport = "udp",

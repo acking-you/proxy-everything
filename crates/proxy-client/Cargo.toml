@@ -69,5 +69,6 @@ name = "http-proxy-tun-helper"
 path = "src/bin/tun_helper.rs"
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 etherparse = "0.21"
 proxy-server = { path = "../proxy-server" }
