@@ -89,15 +89,43 @@ fn rewrite_proxy_authorization(buffer: &[u8], proxy: &ExternalProxyTarget) -> Ve
 }
 
 fn extract_host_uri(uri: &str, default_port: u16) -> Result<(&str, u16)> {
-    let mut parts = uri.split(':');
-    let host = parts.next().context(HostSnafu { uri })?;
-    let port = match parts.next() {
-        Some(port_str) => port_str
-            .trim()
+    // IPv6 authorities are bracketed; splitting every colon silently corrupts
+    // both IPv6 destinations and malformed host:port:extra requests.
+    let invalid = || HttpProxyError::Host {
+        uri: uri.to_string(),
+    };
+    let invalid_port = || HttpProxyError::Port {
+        uri: uri.to_string(),
+    };
+    let (host, port) = if let Some(bracketed) = uri.strip_prefix('[') {
+        let (host, tail) = bracketed.split_once(']').ok_or_else(invalid)?;
+        host.parse::<std::net::Ipv6Addr>().map_err(|_| invalid())?;
+        let port = if tail.is_empty() {
+            None
+        } else {
+            Some(tail.strip_prefix(':').ok_or_else(invalid)?)
+        };
+        (host, port)
+    } else {
+        let (host, port) = uri
+            .split_once(':')
+            .map_or((uri, None), |(host, port)| (host, Some(port)));
+        if host.is_empty()
+            || host
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control() || "@/\\?#[]".contains(c))
+        {
+            return Err(invalid());
+        }
+        (host, port)
+    };
+    let port = match port {
+        Some(port) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => port
             .parse::<u16>()
-            .map_err(|_| HttpProxyError::Port {
-                uri: uri.to_string(),
-            })?,
+            .ok()
+            .filter(|p| *p != 0)
+            .ok_or_else(invalid_port)?,
+        Some(_) => return Err(invalid_port()),
         None => default_port,
     };
     Ok((host, port))
@@ -105,25 +133,30 @@ fn extract_host_uri(uri: &str, default_port: u16) -> Result<(&str, u16)> {
 
 /// may http/https
 fn extract_host_from_raw_uri(uri: &str) -> Result<(&str, u16)> {
-    let url = uri.trim().strip_prefix(HTTP_SCHEMA);
-    let (url, port) = match url {
-        Some(v) => (v, HTTP_PORT),
-        None => {
-            // try https parse
-            tracing::warn!(
-                "Uri(`{}`) not use proxy and not a http request,we try to parsing with https",
-                uri
-            );
-            (
-                uri.trim()
-                    .strip_prefix(HTTPS_SCHEMA)
-                    .context(HostSnafu { uri })?,
-                HTTPS_PORT,
-            )
-        }
+    let (url, port) = if let Some(url) = uri.trim().strip_prefix(HTTP_SCHEMA) {
+        (url, HTTP_PORT)
+    } else {
+        tracing::warn!(
+            "Uri(`{}`) not use proxy and not a http request,we try to parsing with https",
+            uri
+        );
+        (
+            uri.trim()
+                .strip_prefix(HTTPS_SCHEMA)
+                .context(HostSnafu { uri })?,
+            HTTPS_PORT,
+        )
     };
-    let url = url.find('/').map(|i| &url[..i]).unwrap_or(url);
-    extract_host_uri(url, port)
+    let url = url.find(['/', '?', '#']).map(|i| &url[..i]).unwrap_or(url);
+    extract_host_uri(url, port).map_err(|error| match error {
+        HttpProxyError::Host { .. } => HttpProxyError::Host {
+            uri: uri.to_string(),
+        },
+        HttpProxyError::Port { .. } => HttpProxyError::Port {
+            uri: uri.to_string(),
+        },
+        error => error,
+    })
 }
 
 fn extract_host_from_connect_uri(uri: &str) -> Result<(&str, u16)> {
@@ -156,10 +189,11 @@ impl ForwarderProvider for HttpProxierProvider {
                 })
                 .context(HttpProxySnafu)?;
             let uri = parts.next().context(UriSnafu).context(HttpProxySnafu)?;
-            let _version = parts
+            let version = parts
                 .next()
                 .context(VersionSnafu { uri })
                 .context(HttpProxySnafu)?;
+            tracing::info!(method, uri, version, "received HTTP proxy request");
             let method = method.to_ascii_lowercase();
             let has_ssl = method == "connect";
             let (host, port) = if has_ssl {
@@ -370,7 +404,30 @@ impl HttpProxierProvider {
 
             Ok((server_stream, need_proxy, msg_key))
         } else {
-            // HTTPS CONNECT: respond with 200 OK first
+            // Use unified server connection resolution for HTTPS
+            let ServerConnection {
+                stream,
+                need_proxy,
+                msg_key,
+            } = match resolve_server_connection(
+                self.host.as_str(),
+                self.port,
+                context.sender,
+                self.msg_key.clone(),
+                context.upstream_proxy,
+                context.honor_forced_direct,
+            )
+            .await
+            {
+                Ok(connection) => connection,
+                Err(error) => {
+                    let _ = context.stream.write_all(
+                        b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    ).await;
+                    return Err(error);
+                }
+            };
+
             context
                 .stream
                 .write_all(b"HTTP/1.1 200 OK\r\n\r\n")
@@ -381,22 +438,63 @@ impl HttpProxierProvider {
                 })
                 .context(HttpProxySnafu)?;
 
-            // Use unified server connection resolution for HTTPS
-            let ServerConnection {
-                stream,
-                need_proxy,
-                msg_key,
-            } = resolve_server_connection(
-                self.host.as_str(),
-                self.port,
-                context.sender,
-                self.msg_key.clone(),
-                context.upstream_proxy,
-                context.honor_forced_direct,
-            )
-            .await?;
-
             Ok((stream, need_proxy, msg_key))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_errors_preserve_the_original_request_uri() {
+        for uri in [
+            "http://host:bad/full/path?q=1",
+            "https://[bad]:443/path",
+            "unsupported://host/path",
+        ] {
+            assert!(
+                extract_host_from_raw_uri(uri)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(uri)
+            );
+        }
+    }
+
+    #[test]
+    fn authorities_preserve_ipv6_and_reject_ambiguous_destinations() {
+        assert_eq!(
+            extract_host_from_connect_uri("[::1]:8443").unwrap(),
+            ("::1", 8443)
+        );
+        assert_eq!(
+            extract_host_from_connect_uri("example.test").unwrap(),
+            ("example.test", 443)
+        );
+        assert_eq!(
+            extract_host_from_raw_uri("http://[::1]:8080/?a=1").unwrap(),
+            ("::1", 8080)
+        );
+        assert_eq!(
+            extract_host_from_raw_uri("http://example.test?q=1").unwrap(),
+            ("example.test", 80)
+        );
+        for invalid in [
+            "",
+            ":443",
+            "host:443:extra",
+            "::1",
+            "[::1]oops",
+            "[bad]:443",
+            "host:0",
+            "host:65536",
+            "user:secret@host",
+            "host: 443",
+            "host/path",
+        ] {
+            assert!(extract_host_from_connect_uri(invalid).is_err(), "{invalid}");
         }
     }
 }

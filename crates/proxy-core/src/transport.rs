@@ -22,9 +22,7 @@ const DNS_CACHE_CAPACITY: u64 = 4096;
 const DNS_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const DNS_TIMEOUT: Duration = Duration::from_secs(3);
 const DNS_REFRESH_FLOOR: Duration = Duration::from_secs(2);
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 const EXTERNAL_PROXY_TIMEOUT: Duration = Duration::from_secs(15);
-const ADDRESS_TIMEOUT: Duration = Duration::from_secs(3);
 const ADDRESS_STAGGER: Duration = Duration::from_millis(250);
 static DNS_SLOTS: Semaphore = Semaphore::const_new(8);
 
@@ -176,30 +174,22 @@ pub async fn resolve_host(host: &str) -> std::io::Result<IpAddr> {
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "Empty DNS record"))
 }
 
-/// Connect to every resolved address in resolver preference order, refreshing
-/// the cache once when all cached candidates fail.
+/// Connect using the OS TCP retry policy, refreshing DNS once if all addresses
+/// fail. Dropping this future cancels all outstanding sockets. A caller's
+/// protocol handshake deadline must not truncate TCP's SYN retransmissions.
 pub async fn connect_tcp_host(host: &str, port: u16) -> std::io::Result<TcpStream> {
-    tokio::time::timeout(CONNECT_TIMEOUT, async {
-        let addresses = resolve_host_addresses(host).await?;
-        match race_addresses(&addresses, port, connect_socket).await {
-            Ok(stream) => Ok(stream),
-            Err(error) if host.parse::<IpAddr>().is_err() => {
-                let refreshed = resolve_addresses(host, true).await?;
-                if refreshed == addresses {
-                    return Err(error);
-                }
-                race_addresses(&refreshed, port, connect_socket).await
+    let addresses = resolve_host_addresses(host).await?;
+    match race_addresses(&addresses, port, connect_socket).await {
+        Ok(stream) => Ok(stream),
+        Err(error) if host.parse::<IpAddr>().is_err() => {
+            let refreshed = resolve_addresses(host, true).await?;
+            if refreshed == addresses {
+                return Err(error);
             }
-            Err(error) => Err(error),
+            race_addresses(&refreshed, port, connect_socket).await
         }
-    })
-    .await
-    .map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "TCP connection budget exhausted",
-        )
-    })?
+        Err(error) => Err(error),
+    }
 }
 
 async fn connect_socket(address: SocketAddr) -> std::io::Result<TcpStream> {
@@ -237,10 +227,7 @@ where
     loop {
         if pending.is_empty() || (pending.len() < 2 && Instant::now() >= next_start) {
             if let Some(ip) = remaining.next() {
-                pending.push(tokio::time::timeout(
-                    ADDRESS_TIMEOUT,
-                    connect(SocketAddr::new(ip, port)),
-                ));
+                pending.push(connect(SocketAddr::new(ip, port)));
                 next_start = Instant::now() + ADDRESS_STAGGER;
             } else if pending.is_empty() {
                 return Err(last_error);
@@ -249,9 +236,8 @@ where
         tokio::select! {
             result = pending.next(), if !pending.is_empty() => {
                 match result {
-                    Some(Ok(Ok(stream))) => return Ok(stream),
-                    Some(Ok(Err(error))) => last_error = error,
-                    Some(Err(_)) => last_error = std::io::Error::new(std::io::ErrorKind::TimedOut, "TCP address timed out"),
+                    Some(Ok(stream)) => return Ok(stream),
+                    Some(Err(error)) => last_error = error,
                     None => {}
                 }
                 next_start = Instant::now();
@@ -489,18 +475,20 @@ pub async fn get_tcp_external_proxy_stream(
     port: u16,
     detail: &'static str,
 ) -> Result<TcpStream> {
+    let stream = get_tcp_stream(proxy.host.as_str(), proxy.port, detail).await?;
     tokio::time::timeout(
         EXTERNAL_PROXY_TIMEOUT,
-        negotiate_external_proxy(proxy, host, port, detail),
+        negotiate_external_proxy(stream, proxy, host, port, detail),
     )
     .await
     .map_err(|_| TransportError::ExternalProxy {
         proxy: proxy.display_url(),
-        detail: "proxy connection and handshake exceeded 15 seconds".to_string(),
+        detail: "external proxy handshake exceeded 15 seconds".to_string(),
     })?
 }
 
 async fn negotiate_external_proxy(
+    stream: TcpStream,
     proxy: &ExternalProxyTarget,
     host: &str,
     port: u16,
@@ -508,7 +496,7 @@ async fn negotiate_external_proxy(
 ) -> Result<TcpStream> {
     match proxy.kind {
         ExternalProxyKind::Socks5 => {
-            let proxy_stream = get_tcp_stream(proxy.host.as_str(), proxy.port, detail).await?;
+            let proxy_stream = stream;
             let target_host = if proxy.remote_dns {
                 host.to_string()
             } else {
@@ -542,7 +530,7 @@ async fn negotiate_external_proxy(
             Ok(socks_stream.into_inner())
         }
         ExternalProxyKind::Http => {
-            let mut stream = get_tcp_stream(proxy.host.as_str(), proxy.port, detail).await?;
+            let mut stream = stream;
             let authority = if host.parse::<std::net::Ipv6Addr>().is_ok() {
                 format!("[{host}]:{port}")
             } else {
@@ -790,12 +778,24 @@ mod tests {
             }
         });
         assert!(
-            tokio::time::timeout(CONNECT_TIMEOUT, attempt)
+            tokio::time::timeout(Duration::from_secs(30), attempt)
                 .await
                 .is_err()
         );
         assert_eq!(peak.load(Ordering::SeqCst), 2);
         assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_single_ip_can_connect_after_the_former_nested_deadlines() {
+        let ip = "127.0.0.1".parse().unwrap();
+        let connected = race_addresses(&[ip], 80, |address| async move {
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            Ok(address)
+        })
+        .await
+        .unwrap();
+        assert_eq!(connected, SocketAddr::new(ip, 80));
     }
 
     async fn start_echo_server() -> String {

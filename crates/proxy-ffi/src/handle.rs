@@ -23,6 +23,7 @@ use proxy_core::util::error_report;
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use crate::logging::send_log;
 use crate::types::{
@@ -49,6 +50,7 @@ const PRIVILEGED_TUN_READY_TIMEOUT: std::time::Duration = std::time::Duration::f
 pub struct ProxyHandle {
     pub(crate) runtime: Runtime,
     pub(crate) cancel_token: Option<CancellationToken>,
+    listener_task: Option<tokio::task::JoinHandle<()>>,
     pub(crate) running: Arc<AtomicBool>,
     pub(crate) local_port: u16,
     pub(crate) http_client: Mutex<Option<reqwest::Client>>,
@@ -79,7 +81,37 @@ struct TunOutboundPolicy {
 #[derive(Default)]
 struct TunLifecycle {
     cancel_token: Option<CancellationToken>,
-    stopped: Option<tokio::sync::oneshot::Receiver<()>>,
+    stopped: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
+    failure: Option<String>,
+}
+
+impl TunLifecycle {
+    async fn stop(&mut self, timeout: Option<std::time::Duration>) -> Result<bool, String> {
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
+        let active = self.cancel_token.is_some() || self.stopped.is_some();
+        if let Some(token) = &self.cancel_token {
+            token.cancel();
+        }
+        if let Some(stopped) = &mut self.stopped {
+            let result = match timeout {
+                Some(timeout) => tokio::time::timeout(timeout, stopped).await.map_err(|_| {
+                    "Timed out waiting for TUN route and DNS cleanup to finish".to_string()
+                })?,
+                None => stopped.await,
+            };
+            self.stopped = None;
+            if let Err(message) = result.unwrap_or_else(|_| {
+                Err("TUN worker ended without confirming route and DNS cleanup".to_string())
+            }) {
+                self.failure = Some(message.clone());
+                return Err(message);
+            }
+        }
+        self.cancel_token = None;
+        Ok(active)
+    }
 }
 
 /// Create a new proxy handle.
@@ -100,6 +132,7 @@ pub extern "C" fn proxy_create() -> *mut ProxyHandle {
     Box::into_raw(Box::new(ProxyHandle {
         runtime,
         cancel_token: None,
+        listener_task: None,
         running: Arc::new(AtomicBool::new(false)),
         local_port: 0,
         http_client: Mutex::new(None),
@@ -527,6 +560,10 @@ fn proxy_start_inner(
         return ProxyResult::AlreadyRunning;
     }
 
+    if unsafe { proxy_stop(handle) } == ProxyResult::RuntimeError {
+        return ProxyResult::RuntimeError;
+    }
+
     // Parse config
     let server_host = match unsafe { CStr::from_ptr(config.server_host) }.to_str() {
         Ok(s) => s.to_string(),
@@ -642,7 +679,10 @@ fn proxy_start_inner(
             cache_dir,
         },
         upstream_proxy: None,
-        tun: tun_config.clone(),
+        // All FFI entry points use the same owned TUN lifecycle below. Passing
+        // this into the listener would spawn a detached TUN task that stop and
+        // destroy cannot wait for.
+        tun: None,
         force_proxy: Some(Arc::clone(&handle.force_proxy)),
     };
 
@@ -690,12 +730,6 @@ fn proxy_start_inner(
     let _ = set_system_proxy;
 
     let cancel_token = CancellationToken::new();
-    if let Ok(mut lifecycle) = handle.tun_lifecycle.lock() {
-        if let Some(token) = lifecycle.cancel_token.take() {
-            token.cancel();
-        }
-        lifecycle.stopped = None;
-    }
     handle.cancel_token = Some(cancel_token.clone());
     handle.running.store(true, Ordering::SeqCst);
     handle.local_port = local_port;
@@ -707,8 +741,8 @@ fn proxy_start_inner(
     if let Ok(mut endpoint) = handle.remote_endpoint.lock() {
         *endpoint = Some((server_host.clone(), server_port));
     }
-    handle.force_proxy.store(enable_tun, Ordering::Release);
-    handle.tun_running.store(enable_tun, Ordering::Release);
+    handle.force_proxy.store(false, Ordering::Release);
+    handle.tun_running.store(false, Ordering::Release);
     let running_flag = Arc::clone(&handle.running);
     let tun_bypass_cleanup = Arc::clone(&handle.tun_bypass);
     let tun_running_cleanup = Arc::clone(&handle.tun_running);
@@ -719,11 +753,17 @@ fn proxy_start_inner(
         *http_client = None;
     }
     if let Ok(mut tun_bypass) = handle.tun_bypass.lock() {
-        *tun_bypass = tun_config.map(|config| config.bypass);
+        *tun_bypass = None;
     }
 
+    let ready_message = format!(
+        "TUN ready: device traffic -> socks5://127.0.0.1:{local_port}; remote endpoint \
+         {server_host}:{server_port} bypasses TUN"
+    );
+
     // Spawn proxy task using existing client logic
-    handle.runtime.spawn(async move {
+    handle.listener_task = Some(handle.runtime.spawn(async move {
+        let connections = TaskTracker::new();
         tracing::info!(
             local_port,
             remote_host = %server_host,
@@ -744,7 +784,7 @@ fn proxy_start_inner(
             run_client_with_listener_runtime_config::<true>(
                 listener,
                 cancel_token,
-                None,
+                Some(connections.clone()),
                 Some(client_config),
             )
             .await;
@@ -752,12 +792,14 @@ fn proxy_start_inner(
             run_client_with_listener_runtime_config::<false>(
                 listener,
                 cancel_token,
-                None,
+                Some(connections.clone()),
                 Some(client_config),
             )
             .await;
         }
 
+        connections.close();
+        connections.wait().await;
         if let Ok(mut tun_bypass) = tun_bypass_cleanup.lock() {
             *tun_bypass = None;
         }
@@ -769,8 +811,17 @@ fn proxy_start_inner(
         }
         running_flag.store(false, Ordering::SeqCst);
         tracing::info!("Proxy stopped");
-    });
+    }));
 
+    if let Some(config) = tun_config {
+        let result = start_configured_tun(handle, config, ready_message);
+        if result != ProxyResult::Ok {
+            // Stop a partial combined start through the same ordered cleanup.
+            // A cleanup failure retains the listener so callers can retry.
+            let _ = unsafe { proxy_stop(handle) };
+        }
+        return result;
+    }
     ProxyResult::Ok
 }
 
@@ -951,6 +1002,14 @@ pub unsafe extern "C" fn proxy_start_tun(
          {remote_host}:{remote_port} bypasses TUN",
         handle.local_port
     );
+    start_configured_tun(handle, config, ready_message)
+}
+
+fn start_configured_tun(
+    handle: &ProxyHandle,
+    config: TunConfig,
+    ready_message: String,
+) -> ProxyResult {
     // Desktop TUN keeps the user's auto-proxy setting. This process is always in
     // the TUN bypass list, so a direct socket it opens is relayed out through the
     // physical interface rather than looping back into this listener, and the
@@ -1103,17 +1162,8 @@ where
         + 'static,
     RunnerFuture: Future<Output = io::Result<usize>> + Send + 'static,
 {
-    let (previous, stopped) = match handle.tun_lifecycle.lock() {
-        Ok(mut lifecycle) => (lifecycle.cancel_token.take(), lifecycle.stopped.take()),
-        Err(_) => return ProxyResult::RuntimeError,
-    };
-    if let Some(previous) = previous {
-        previous.cancel();
-    }
-    if let Some(stopped) = stopped {
-        let _ = handle.runtime.block_on(async {
-            tokio::time::timeout(std::time::Duration::from_secs(5), stopped).await
-        });
+    if stop_tun_runtime(handle, Some(std::time::Duration::from_secs(5))).is_err() {
+        return ProxyResult::RuntimeError;
     }
     let Some(proxy_token) = handle.cancel_token.as_ref() else {
         handle.force_proxy.store(false, Ordering::Release);
@@ -1165,12 +1215,16 @@ where
     handle.runtime.spawn(async move {
         let ready_running = Arc::clone(&running);
         let ready_generation = Arc::clone(&generation_state);
+        let ready_cancel = shutdown_token.clone();
         let readiness_task = tokio::spawn(async move {
             let readiness = setup_receiver.await.unwrap_or_else(|_| {
                 Err("TUN setup task ended without reporting readiness".to_string())
             });
             let setup_succeeded = readiness.is_ok();
-            if setup_succeeded && ready_generation.load(Ordering::Acquire) == generation {
+            if setup_succeeded
+                && !ready_cancel.is_cancelled()
+                && ready_generation.load(Ordering::Acquire) == generation
+            {
                 ready_running.store(true, Ordering::Release);
             }
             let _ = caller_sender.send(readiness);
@@ -1179,10 +1233,19 @@ where
 
         let result = runner(local_port, config, shutdown_token, Some(setup_sender)).await;
         let setup_succeeded = readiness_task.await.unwrap_or(false);
+        let cleanup_error = result
+            .as_ref()
+            .err()
+            .filter(|error| {
+                error.get_ref().is_some_and(|inner| {
+                    inner.is::<proxy_client::client::tun::TunNetworkTeardownError>()
+                })
+            })
+            .map(ToString::to_string);
         // A stop followed immediately by a new start can leave the old async
         // task finishing after the replacement has begun. Only the current
         // generation may clear shared state for loop prevention.
-        if generation_state.load(Ordering::Acquire) == generation {
+        if cleanup_error.is_none() && generation_state.load(Ordering::Acquire) == generation {
             running.store(false, Ordering::Release);
             force_proxy.store(false, Ordering::Release);
             if let Ok(mut bypass) = bypass_cleanup.lock() {
@@ -1193,7 +1256,9 @@ where
             Ok(sessions) => {
                 tracing::info!(remaining_sessions = sessions, "TUN traffic capture stopped")
             }
-            Err(error) if setup_succeeded => {
+            Err(error)
+                if setup_succeeded && generation_state.load(Ordering::Acquire) == generation =>
+            {
                 let message = format!("TUN traffic capture failed after startup: {error}");
                 match last_error.lock() {
                     Ok(mut current) => *current = Some(message.clone()),
@@ -1203,7 +1268,7 @@ where
             }
             Err(error) => tracing::error!(%error, "TUN traffic capture setup failed"),
         }
-        let _ = stopped_sender.send(());
+        let _ = stopped_sender.send(cleanup_error.map_or(Ok(()), Err));
     });
 
     let readiness = handle
@@ -1256,19 +1321,13 @@ fn explain_tun_permission_error(error: &str) -> Option<String> {
 }
 
 fn fail_tun_start(handle: &ProxyHandle, error: &str) -> ProxyResult {
-    handle.tun_generation.fetch_add(1, Ordering::AcqRel);
-    if let Ok(mut lifecycle) = handle.tun_lifecycle.lock()
-        && let Some(token) = lifecycle.cancel_token.take()
-    {
-        token.cancel();
-    }
-    handle.tun_running.store(false, Ordering::Release);
-    handle.force_proxy.store(false, Ordering::Release);
-    if let Ok(mut bypass) = handle.tun_bypass.lock() {
-        *bypass = None;
-    }
     let detail = explain_tun_permission_error(error).unwrap_or_else(|| error.to_string());
-    record_error(handle, &format!("Failed to start TUN mode: {detail}"));
+    let cleanup = stop_tun_runtime(handle, Some(std::time::Duration::from_secs(5)));
+    let message = match cleanup {
+        Ok(_) => format!("Failed to start TUN mode: {detail}"),
+        Err(cleanup) => format!("Failed to start TUN mode: {detail}; {cleanup}"),
+    };
+    record_error(handle, &message);
     ProxyResult::RuntimeError
 }
 
@@ -1297,33 +1356,17 @@ pub unsafe extern "C" fn proxy_stop_tun(handle: *mut ProxyHandle) -> ProxyResult
         return ProxyResult::InvalidParam;
     }
     let handle = unsafe { &*handle };
-    let (token, stopped) = match handle.tun_lifecycle.lock() {
-        Ok(mut lifecycle) => (lifecycle.cancel_token.take(), lifecycle.stopped.take()),
-        Err(_) => return ProxyResult::RuntimeError,
-    };
-    let Some(token) = token else {
-        return ProxyResult::NotRunning;
-    };
-    handle.tun_generation.fetch_add(1, Ordering::AcqRel);
-    token.cancel();
-    handle.tun_running.store(false, Ordering::Release);
-    handle.force_proxy.store(false, Ordering::Release);
-    if let Ok(mut bypass) = handle.tun_bypass.lock() {
-        *bypass = None;
+    match stop_tun_runtime(handle, Some(std::time::Duration::from_secs(5))) {
+        Ok(false) => ProxyResult::NotRunning,
+        Ok(true) => {
+            send_log(
+                2,
+                "TUN cleanup finished; local proxy listener remains active",
+            );
+            ProxyResult::Ok
+        }
+        Err(_) => ProxyResult::RuntimeError,
     }
-    if let Some(stopped) = stopped
-        && handle
-            .runtime
-            .block_on(async {
-                tokio::time::timeout(std::time::Duration::from_secs(5), stopped).await
-            })
-            .is_err()
-    {
-        send_log(3, "Timed out waiting for TUN route cleanup to finish");
-        return ProxyResult::RuntimeError;
-    }
-    send_log(2, "TUN stop requested; local proxy listener remains active");
-    ProxyResult::Ok
 }
 
 /// Check whether TUN adapter and route setup has completed successfully.
@@ -1410,25 +1453,28 @@ pub extern "C" fn proxy_relaunch_elevated_for_tun() -> ProxyResult {
 /// Teardown is what puts the system resolver and default route back. Returning
 /// before it completes lets the caller exit the process while a privileged helper
 /// is still mid-restore, which leaves the machine pointing at the tunnel's DNS.
-/// The timeout matches `proxy_stop_tun`, which has always waited here.
-fn await_tun_teardown(
+/// A timed-out receiver stays owned by the handle, so another stop can wait for
+/// the same worker and a restart cannot overlap its route restoration.
+fn stop_tun_runtime(
     handle: &ProxyHandle,
-    stopped: Option<tokio::sync::oneshot::Receiver<()>>,
-) -> bool {
-    let Some(stopped) = stopped else {
-        return true;
+    timeout: Option<std::time::Duration>,
+) -> Result<bool, String> {
+    let result = match handle.tun_lifecycle.lock() {
+        Ok(mut lifecycle) => handle.runtime.block_on(lifecycle.stop(timeout)),
+        Err(_) => Err("TUN lifecycle lock poisoned".to_string()),
     };
-    let finished = handle
-        .runtime
-        .block_on(async { tokio::time::timeout(std::time::Duration::from_secs(5), stopped).await })
-        .is_ok();
-    if !finished {
-        send_log(
-            3,
-            "Timed out waiting for TUN route and DNS cleanup to finish",
-        );
+    match &result {
+        Ok(_) => {
+            handle.tun_generation.fetch_add(1, Ordering::AcqRel);
+            handle.tun_running.store(false, Ordering::Release);
+            handle.force_proxy.store(false, Ordering::Release);
+            if let Ok(mut bypass) = handle.tun_bypass.lock() {
+                *bypass = None;
+            }
+        }
+        Err(error) => record_error(handle, error),
     }
-    finished
+    result
 }
 
 /// Stop the proxy.
@@ -1446,40 +1492,35 @@ pub unsafe extern "C" fn proxy_stop(handle: *mut ProxyHandle) -> ProxyResult {
 
     let handle = unsafe { &mut *handle };
 
-    if !handle.running.load(Ordering::SeqCst) {
-        // The listener is already down, but TUN may not be: cancel it and still
-        // wait, so this path also restores routes and DNS before returning.
-        let stopped = match handle.tun_lifecycle.lock() {
-            Ok(mut lifecycle) => {
-                if let Some(tun_token) = lifecycle.cancel_token.take() {
-                    tun_token.cancel();
-                }
-                lifecycle.stopped.take()
-            }
-            Err(_) => None,
-        };
-        handle.tun_generation.fetch_add(1, Ordering::AcqRel);
-        await_tun_teardown(handle, stopped);
-        handle.tun_running.store(false, Ordering::Release);
-        handle.force_proxy.store(false, Ordering::Release);
-        return ProxyResult::NotRunning;
+    // Keep the listener and bypass policy alive until TUN has restored routes.
+    // A timeout is a retryable stop failure, never permission to destroy them.
+    if stop_tun_runtime(handle, Some(std::time::Duration::from_secs(5))).is_err() {
+        return ProxyResult::RuntimeError;
     }
 
-    if let Some(token) = handle.cancel_token.take() {
-        let stopped = match handle.tun_lifecycle.lock() {
-            Ok(mut lifecycle) => {
-                if let Some(tun_token) = lifecycle.cancel_token.take() {
-                    tun_token.cancel();
-                }
-                lifecycle.stopped.take()
-            }
-            Err(_) => None,
-        };
-        handle.tun_generation.fetch_add(1, Ordering::AcqRel);
-        // Cancel TUN first and let it finish: it owns the system routes and DNS,
-        // and its relays forward into the listener cancelled just below.
-        await_tun_teardown(handle, stopped);
+    if let Some(token) = &handle.cancel_token {
         token.cancel();
+    }
+    let mut worker_failed = false;
+    if let Some(task) = &mut handle.listener_task {
+        match handle
+            .runtime
+            .block_on(async { tokio::time::timeout(std::time::Duration::from_secs(5), task).await })
+        {
+            Err(_) => {
+                record_error(handle, "Timed out waiting for the local listener to stop");
+                return ProxyResult::RuntimeError;
+            }
+            Ok(Err(error)) => {
+                record_error(handle, &format!("Local listener task failed: {error}"));
+                worker_failed = true;
+            }
+            Ok(Ok(())) => {}
+        }
+        handle.listener_task = None;
+    }
+
+    if handle.cancel_token.take().is_some() {
         handle.running.store(false, Ordering::SeqCst);
         handle.tun_running.store(false, Ordering::Release);
         handle.force_proxy.store(false, Ordering::Release);
@@ -1501,7 +1542,11 @@ pub unsafe extern "C" fn proxy_stop(handle: *mut ProxyHandle) -> ProxyResult {
             }
         }
 
-        ProxyResult::Ok
+        if worker_failed {
+            ProxyResult::RuntimeError
+        } else {
+            ProxyResult::Ok
+        }
     } else {
         ProxyResult::NotRunning
     }
@@ -1636,11 +1681,9 @@ pub unsafe extern "C" fn proxy_get_last_error(handle: *const ProxyHandle) -> *mu
 pub unsafe extern "C" fn proxy_destroy(handle: *mut ProxyHandle) {
     if !handle.is_null() {
         let handle = unsafe { Box::from_raw(handle) };
-        if let Ok(lifecycle) = handle.tun_lifecycle.lock()
-            && let Some(token) = &lifecycle.cancel_token
-        {
-            token.cancel();
-        }
+        // Destruction cannot return a retryable error through this ABI. Wait
+        // for the cancelled worker before dropping the runtime it cleans up on.
+        let _ = stop_tun_runtime(&handle, None);
         if let Some(token) = &handle.cancel_token {
             token.cancel();
         }
@@ -1668,6 +1711,189 @@ pub unsafe extern "C" fn proxy_is_running(handle: *const ProxyHandle) -> c_int {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn timed_out_tun_cleanup_retains_ownership_until_retry_finishes() {
+        let token = CancellationToken::new();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let mut lifecycle = TunLifecycle {
+            cancel_token: Some(token.clone()),
+            stopped: Some(receiver),
+            ..Default::default()
+        };
+        assert!(
+            lifecycle
+                .stop(Some(std::time::Duration::from_secs(5)))
+                .await
+                .is_err()
+        );
+        assert!(token.is_cancelled());
+        assert!(lifecycle.stopped.is_some());
+        assert!(lifecycle.cancel_token.is_some());
+        sender.send(Ok(())).unwrap();
+        assert!(lifecycle.stop(None).await.unwrap());
+        assert!(!lifecycle.stop(None).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_closed_worker_channel_never_claims_successful_cleanup() {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        drop(sender);
+        let mut lifecycle = TunLifecycle {
+            stopped: Some(receiver),
+            ..Default::default()
+        };
+        assert!(lifecycle.stop(None).await.is_err());
+        assert!(lifecycle.stop(None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_network_restore_error_blocks_replacement_and_is_not_reported_as_stopped() {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let mut lifecycle = TunLifecycle {
+            stopped: Some(receiver),
+            ..Default::default()
+        };
+        sender
+            .send(Err("route restoration failed".to_string()))
+            .unwrap();
+        assert_eq!(
+            lifecycle.stop(None).await.unwrap_err(),
+            "route restoration failed"
+        );
+        assert_eq!(
+            lifecycle.stop(None).await.unwrap_err(),
+            "route restoration failed"
+        );
+    }
+
+    #[test]
+    fn destruction_keeps_the_listener_alive_until_tun_cleanup_finishes() {
+        let pointer = proxy_create();
+        assert!(!pointer.is_null());
+        let handle = unsafe { &mut *pointer };
+        let proxy_token = CancellationToken::new();
+        let tun_token = proxy_token.child_token();
+        handle.cancel_token = Some(proxy_token.clone());
+        handle.running.store(true, Ordering::Release);
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        *handle.tun_lifecycle.lock().unwrap() = TunLifecycle {
+            cancel_token: Some(tun_token.clone()),
+            stopped: Some(receiver),
+            ..Default::default()
+        };
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let worker_cleaned = Arc::clone(&cleaned);
+        let worker_proxy = proxy_token.clone();
+        handle.runtime.spawn(async move {
+            tun_token.cancelled().await;
+            assert!(!worker_proxy.is_cancelled());
+            worker_cleaned.store(true, Ordering::Release);
+            sender.send(Ok(())).unwrap();
+        });
+        unsafe { proxy_destroy(pointer) };
+        assert!(cleaned.load(Ordering::Acquire));
+        assert!(proxy_token.is_cancelled());
+    }
+
+    #[test]
+    fn failed_start_waits_for_the_cancelled_tun_worker_to_finish() {
+        let pointer = proxy_create();
+        assert!(!pointer.is_null());
+        let handle = unsafe { &mut *pointer };
+        handle.cancel_token = Some(CancellationToken::new());
+        handle.local_port = 12345;
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let worker_cleaned = Arc::clone(&cleaned);
+        let result = start_tun_runtime(
+            handle,
+            TunConfig::new(Vec::new()).unwrap(),
+            TunOutboundPolicy { force_proxy: true },
+            move |_, _, cancel, ready| async move {
+                ready
+                    .unwrap()
+                    .send(Err("simulated setup failure".to_string()))
+                    .unwrap();
+                cancel.cancelled().await;
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                worker_cleaned.store(true, Ordering::Release);
+                Err(io::Error::other("simulated setup failure"))
+            },
+            std::time::Duration::from_secs(1),
+            "unused".to_string(),
+        );
+        assert_eq!(result, ProxyResult::RuntimeError);
+        assert!(cleaned.load(Ordering::Acquire));
+        assert!(!handle.force_proxy.load(Ordering::Acquire));
+        unsafe { proxy_destroy(pointer) };
+    }
+
+    #[test]
+    fn stop_joins_the_listener_before_its_handle_can_be_reused() {
+        let pointer = proxy_create();
+        assert!(!pointer.is_null());
+        let handle = unsafe { &mut *pointer };
+        let token = CancellationToken::new();
+        handle.cancel_token = Some(token.clone());
+        handle.running.store(true, Ordering::Release);
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let worker_cleaned = Arc::clone(&cleaned);
+        handle.listener_task = Some(handle.runtime.spawn(async move {
+            token.cancelled().await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            worker_cleaned.store(true, Ordering::Release);
+        }));
+        assert_eq!(unsafe { proxy_stop(pointer) }, ProxyResult::Ok);
+        assert!(cleaned.load(Ordering::Acquire));
+        assert!(unsafe { &*pointer }.listener_task.is_none());
+        unsafe { proxy_destroy(pointer) };
+    }
+
+    #[test]
+    fn network_cleanup_failure_reaches_ffi_without_cancelling_the_listener() {
+        let pointer = proxy_create();
+        assert!(!pointer.is_null());
+        let handle = unsafe { &mut *pointer };
+        let listener = CancellationToken::new();
+        handle.cancel_token = Some(listener.clone());
+        handle.local_port = 12345;
+        handle.running.store(true, Ordering::Release);
+        assert_eq!(
+            start_tun_runtime(
+                handle,
+                TunConfig::new(Vec::new()).unwrap(),
+                TunOutboundPolicy { force_proxy: true },
+                |_, _, cancel, ready| async move {
+                    ready.unwrap().send(Ok(())).unwrap();
+                    cancel.cancelled().await;
+                    Err(io::Error::other(
+                        proxy_client::client::tun::TunNetworkTeardownError {
+                            cleanup: io::Error::other("simulated route restoration failure"),
+                            forwarding: None,
+                        },
+                    ))
+                },
+                std::time::Duration::from_secs(1),
+                "simulated ready".to_string(),
+            ),
+            ProxyResult::Ok
+        );
+        assert_eq!(unsafe { proxy_stop(pointer) }, ProxyResult::RuntimeError);
+        assert!(!listener.is_cancelled());
+        let handle = unsafe { &*pointer };
+        assert!(handle.tun_running.load(Ordering::Acquire));
+        assert!(handle.force_proxy.load(Ordering::Acquire));
+        assert!(
+            handle
+                .last_error
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .contains("simulated route restoration failure")
+        );
+        unsafe { proxy_destroy(pointer) };
+    }
 
     #[test]
     fn dns_resolver_setter_validates_and_preserves_existing_policy() {

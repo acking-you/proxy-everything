@@ -1,6 +1,6 @@
 //! Logging system for FFI interface.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::ffi::{CString, c_char, c_int};
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
@@ -16,10 +16,15 @@ static CALLBACK_RATE_LIMITER: Mutex<CallbackRateLimiter> = Mutex::new(CallbackRa
 
 const MAX_CALLBACK_EVENTS_PER_SECOND: u32 = 512;
 const MAX_CRITICAL_EVENTS_PER_SECOND: u32 = 64;
-const MAX_CALLBACK_MESSAGE_BYTES: usize = 8192;
+const MAX_PENDING_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PENDING_CALLBACKS: usize = 1024;
-static LOG_ALLOCATIONS: LazyLock<Mutex<HashSet<usize>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
+#[derive(Default)]
+struct LogAllocations {
+    messages: HashMap<usize, usize>,
+    bytes: usize,
+}
+static LOG_ALLOCATIONS: LazyLock<Mutex<LogAllocations>> =
+    LazyLock::new(|| Mutex::new(LogAllocations::default()));
 static LOG_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 #[derive(Debug)]
@@ -99,15 +104,18 @@ fn allocate_log_message(message: &str) -> Option<*mut c_char> {
     let mut pending = LOG_ALLOCATIONS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    if pending.len() >= MAX_PENDING_CALLBACKS {
+    // Bound total queued memory without silently truncating individual errors
+    // or request URIs. Escape embedded NULs for the C-string callback ABI.
+    let message = message.replace('\0', "\\0");
+    let bytes = message.len() + 1;
+    if pending.messages.len() >= MAX_PENDING_CALLBACKS
+        || bytes > MAX_PENDING_MESSAGE_BYTES.saturating_sub(pending.bytes)
+    {
         return None;
     }
-    let mut end = message.len().min(MAX_CALLBACK_MESSAGE_BYTES);
-    while !message.is_char_boundary(end) {
-        end -= 1;
-    }
-    let message = CString::new(&message[..end]).ok()?.into_raw();
-    pending.insert(message as usize);
+    let message = CString::new(message).ok()?.into_raw();
+    pending.messages.insert(message as usize, bytes);
+    pending.bytes += bytes;
     Some(message)
 }
 
@@ -153,10 +161,13 @@ pub extern "C" fn proxy_set_log_level(level: c_int) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn proxy_free_string(s: *mut c_char) {
     if !s.is_null() {
-        LOG_ALLOCATIONS
+        let mut pending = LOG_ALLOCATIONS
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(&(s as usize));
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(bytes) = pending.messages.remove(&(s as usize)) {
+            pending.bytes -= bytes;
+        }
+        drop(pending);
         unsafe { drop(CString::from_raw(s)) };
     }
 }
@@ -188,11 +199,7 @@ where
 
         let mut visitor = MessageVisitor::default();
         event.record(&mut visitor);
-        let message = format!(
-            "[{}] {}",
-            event.metadata().target(),
-            visitor.message.unwrap_or_default()
-        );
+        let message = format!("[{}] {}", event.metadata().target(), visitor.finish());
         send_log(level, &message);
     }
 }
@@ -200,26 +207,33 @@ where
 #[derive(Default)]
 struct MessageVisitor {
     message: Option<String>,
+    fields: Vec<String>,
+}
+
+impl MessageVisitor {
+    fn finish(self) -> String {
+        self.message
+            .into_iter()
+            .chain(self.fields)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 impl tracing::field::Visit for MessageVisitor {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         if field.name() == "message" {
             self.message = Some(format!("{:?}", value));
-        } else if self.message.is_none() {
-            self.message = Some(format!("{}: {:?}", field.name(), value));
-        } else if let Some(msg) = self.message.take() {
-            self.message = Some(format!("{}, {}: {:?}", msg, field.name(), value));
+        } else {
+            self.fields.push(format!("{}: {:?}", field.name(), value));
         }
     }
 
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
         if field.name() == "message" {
             self.message = Some(value.to_string());
-        } else if self.message.is_none() {
-            self.message = Some(format!("{}: {}", field.name(), value));
-        } else if let Some(msg) = self.message.take() {
-            self.message = Some(format!("{}, {}: {}", msg, field.name(), value));
+        } else {
+            self.fields.push(format!("{}: {}", field.name(), value));
         }
     }
 }
@@ -252,19 +266,56 @@ pub extern "C" fn proxy_init_logging() {
 mod tests {
     #[test]
     fn a_stalled_ui_cannot_accumulate_unbounded_native_log_strings() {
+        let original = format!("{}\0request-tail", "界".repeat(4000));
+        let full = super::allocate_log_message(&original).unwrap();
+        let value = unsafe { std::ffi::CStr::from_ptr(full) };
+        assert_eq!(value.to_str().unwrap(), original.replace('\0', "\\0"));
+        unsafe { super::proxy_free_string(full) };
         let mut pointers = Vec::new();
         for _ in 0..super::MAX_PENDING_CALLBACKS {
-            pointers.push(super::allocate_log_message(&"界".repeat(4000)).unwrap());
+            pointers.push(super::allocate_log_message("queued").unwrap());
         }
         assert!(super::allocate_log_message("overflow").is_none());
-        let value = unsafe { std::ffi::CStr::from_ptr(pointers[0]) };
-        assert!(value.to_str().is_ok());
-        assert!(value.to_bytes().len() <= super::MAX_CALLBACK_MESSAGE_BYTES);
         for pointer in pointers {
             unsafe { super::proxy_free_string(pointer) };
         }
+        let full =
+            super::allocate_log_message(&"x".repeat(super::MAX_PENDING_MESSAGE_BYTES - 1)).unwrap();
+        assert!(super::allocate_log_message("overflow").is_none());
+        unsafe { super::proxy_free_string(full) };
         let recovered = super::allocate_log_message("recovered").unwrap();
         unsafe { super::proxy_free_string(recovered) };
+    }
+
+    #[test]
+    fn structured_fields_survive_a_message_recorded_after_them() {
+        use tracing_subscriber::prelude::*;
+        #[derive(Clone)]
+        struct Capture(std::sync::Arc<Mutex<String>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let mut visitor = MessageVisitor::default();
+                event.record(&mut visitor);
+                *self.0.lock().unwrap() = visitor.finish();
+            }
+        }
+        let output = std::sync::Arc::new(Mutex::new(String::new()));
+        let subscriber = tracing_subscriber::registry().with(Capture(output.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(
+                peer = "127.0.0.1:1234",
+                message = "CONNECT example.test:443",
+                port = 443
+            );
+        });
+        let output = output.lock().unwrap();
+        assert!(output.contains("peer: 127.0.0.1:1234"));
+        assert!(output.contains("CONNECT example.test:443"));
+        assert!(output.contains("port: 443"));
     }
 
     #[test]

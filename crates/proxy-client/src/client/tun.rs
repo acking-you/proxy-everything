@@ -18,8 +18,10 @@ use std::os::fd::{IntoRawFd, OwnedFd};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
-pub use tun2proxy::VirtualDnsState as TunVirtualDnsState;
 use tun2proxy::{ArgDns, ArgProxy, ArgUdpStrategy, Args, ProcessBypass};
+pub use tun2proxy::{
+    NetworkTeardownError as TunNetworkTeardownError, VirtualDnsState as TunVirtualDnsState,
+};
 
 // Desktop browsers and Android applications can create hundreds of concurrent
 // TCP and QUIC flows. Keep tun2proxy's standalone default conservative while
