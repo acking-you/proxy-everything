@@ -101,19 +101,27 @@ pub(crate) fn send_log(level: c_int, message: &str) {
 }
 
 fn allocate_log_message(message: &str) -> Option<*mut c_char> {
+    // Escape embedded NULs for the C-string callback ABI. The copy is made
+    // before taking the global lock so concurrent loggers only contend on the
+    // bookkeeping below.
+    let message = if message.contains('\0') {
+        CString::new(message.replace('\0', "\\0"))
+    } else {
+        CString::new(message)
+    }
+    .ok()?;
+    let bytes = message.as_bytes_with_nul().len();
     let mut pending = LOG_ALLOCATIONS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     // Bound total queued memory without silently truncating individual errors
-    // or request URIs. Escape embedded NULs for the C-string callback ABI.
-    let message = message.replace('\0', "\\0");
-    let bytes = message.len() + 1;
+    // or request URIs.
     if pending.messages.len() >= MAX_PENDING_CALLBACKS
         || bytes > MAX_PENDING_MESSAGE_BYTES.saturating_sub(pending.bytes)
     {
         return None;
     }
-    let message = CString::new(message).ok()?.into_raw();
+    let message = message.into_raw();
     pending.messages.insert(message as usize, bytes);
     pending.bytes += bytes;
     Some(message)
@@ -207,25 +215,39 @@ where
 #[derive(Default)]
 struct MessageVisitor {
     message: Option<String>,
-    fields: Vec<String>,
+    /// Structured fields already joined with `, `: one buffer per event rather
+    /// than one allocation per field.
+    fields: String,
 }
 
 impl MessageVisitor {
+    fn begin_field(&mut self) {
+        if !self.fields.is_empty() {
+            self.fields.push_str(", ");
+        }
+    }
+
     fn finish(self) -> String {
-        self.message
-            .into_iter()
-            .chain(self.fields)
-            .collect::<Vec<_>>()
-            .join(", ")
+        match self.message {
+            Some(mut message) if !self.fields.is_empty() => {
+                message.push_str(", ");
+                message.push_str(&self.fields);
+                message
+            }
+            Some(message) => message,
+            None => self.fields,
+        }
     }
 }
 
 impl tracing::field::Visit for MessageVisitor {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write;
         if field.name() == "message" {
             self.message = Some(format!("{:?}", value));
         } else {
-            self.fields.push(format!("{}: {:?}", field.name(), value));
+            self.begin_field();
+            let _ = write!(self.fields, "{}: {:?}", field.name(), value);
         }
     }
 
@@ -233,7 +255,10 @@ impl tracing::field::Visit for MessageVisitor {
         if field.name() == "message" {
             self.message = Some(value.to_string());
         } else {
-            self.fields.push(format!("{}: {}", field.name(), value));
+            self.begin_field();
+            self.fields.push_str(field.name());
+            self.fields.push_str(": ");
+            self.fields.push_str(value);
         }
     }
 }

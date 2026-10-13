@@ -37,6 +37,10 @@ const LAN_LISTEN_HOST: &str = "0.0.0.0";
 /// How long to wait for adapter and route setup that needs no user interaction.
 const TUN_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
+/// How long a stop waits for TUN route/DNS restoration or the listener task.
+/// Expiry is a retryable stop failure; ownership of the worker is retained.
+const STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// How long to wait when setup is gated on an authorization prompt.
 ///
 /// The macOS helper cannot report readiness until the user has answered the
@@ -756,10 +760,11 @@ fn proxy_start_inner(
         *tun_bypass = None;
     }
 
-    let ready_message = format!(
-        "TUN ready: device traffic -> socks5://127.0.0.1:{local_port}; remote endpoint \
-         {server_host}:{server_port} bypasses TUN"
-    );
+    // Built before `server_host` moves into the listener task.
+    let tun_start = tun_config.map(|config| {
+        let ready_message = tun_ready_message(local_port, &server_host, server_port);
+        (config, ready_message)
+    });
 
     // Spawn proxy task using existing client logic
     handle.listener_task = Some(handle.runtime.spawn(async move {
@@ -813,7 +818,7 @@ fn proxy_start_inner(
         tracing::info!("Proxy stopped");
     }));
 
-    if let Some(config) = tun_config {
+    if let Some((config, ready_message)) = tun_start {
         let result = start_configured_tun(handle, config, ready_message);
         if result != ProxyResult::Ok {
             // Stop a partial combined start through the same ordered cleanup.
@@ -997,12 +1002,15 @@ pub unsafe extern "C" fn proxy_start_tun(
         }
     };
 
-    let ready_message = format!(
-        "TUN ready: device traffic -> socks5://127.0.0.1:{}; remote endpoint \
-         {remote_host}:{remote_port} bypasses TUN",
-        handle.local_port
-    );
+    let ready_message = tun_ready_message(handle.local_port, &remote_host, remote_port);
     start_configured_tun(handle, config, ready_message)
+}
+
+fn tun_ready_message(local_port: u16, remote_host: &str, remote_port: u16) -> String {
+    format!(
+        "TUN ready: device traffic -> socks5://127.0.0.1:{local_port}; remote endpoint \
+         {remote_host}:{remote_port} bypasses TUN"
+    )
 }
 
 fn start_configured_tun(
@@ -1162,7 +1170,7 @@ where
         + 'static,
     RunnerFuture: Future<Output = io::Result<usize>> + Send + 'static,
 {
-    if stop_tun_runtime(handle, Some(std::time::Duration::from_secs(5))).is_err() {
+    if stop_tun_runtime(handle, Some(STOP_TIMEOUT)).is_err() {
         return ProxyResult::RuntimeError;
     }
     let Some(proxy_token) = handle.cancel_token.as_ref() else {
@@ -1322,7 +1330,7 @@ fn explain_tun_permission_error(error: &str) -> Option<String> {
 
 fn fail_tun_start(handle: &ProxyHandle, error: &str) -> ProxyResult {
     let detail = explain_tun_permission_error(error).unwrap_or_else(|| error.to_string());
-    let cleanup = stop_tun_runtime(handle, Some(std::time::Duration::from_secs(5)));
+    let cleanup = stop_tun_runtime(handle, Some(STOP_TIMEOUT));
     let message = match cleanup {
         Ok(_) => format!("Failed to start TUN mode: {detail}"),
         Err(cleanup) => format!("Failed to start TUN mode: {detail}; {cleanup}"),
@@ -1356,7 +1364,7 @@ pub unsafe extern "C" fn proxy_stop_tun(handle: *mut ProxyHandle) -> ProxyResult
         return ProxyResult::InvalidParam;
     }
     let handle = unsafe { &*handle };
-    match stop_tun_runtime(handle, Some(std::time::Duration::from_secs(5))) {
+    match stop_tun_runtime(handle, Some(STOP_TIMEOUT)) {
         Ok(false) => ProxyResult::NotRunning,
         Ok(true) => {
             send_log(
@@ -1494,7 +1502,7 @@ pub unsafe extern "C" fn proxy_stop(handle: *mut ProxyHandle) -> ProxyResult {
 
     // Keep the listener and bypass policy alive until TUN has restored routes.
     // A timeout is a retryable stop failure, never permission to destroy them.
-    if stop_tun_runtime(handle, Some(std::time::Duration::from_secs(5))).is_err() {
+    if stop_tun_runtime(handle, Some(STOP_TIMEOUT)).is_err() {
         return ProxyResult::RuntimeError;
     }
 
@@ -1505,7 +1513,7 @@ pub unsafe extern "C" fn proxy_stop(handle: *mut ProxyHandle) -> ProxyResult {
     if let Some(task) = &mut handle.listener_task {
         match handle
             .runtime
-            .block_on(async { tokio::time::timeout(std::time::Duration::from_secs(5), task).await })
+            .block_on(async { tokio::time::timeout(STOP_TIMEOUT, task).await })
         {
             Err(_) => {
                 record_error(handle, "Timed out waiting for the local listener to stop");
@@ -1721,12 +1729,7 @@ mod tests {
             stopped: Some(receiver),
             ..Default::default()
         };
-        assert!(
-            lifecycle
-                .stop(Some(std::time::Duration::from_secs(5)))
-                .await
-                .is_err()
-        );
+        assert!(lifecycle.stop(Some(STOP_TIMEOUT)).await.is_err());
         assert!(token.is_cancelled());
         assert!(lifecycle.stopped.is_some());
         assert!(lifecycle.cancel_token.is_some());

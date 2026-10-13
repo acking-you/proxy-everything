@@ -483,12 +483,15 @@ pub async fn get_tcp_external_proxy_stream(
     .await
     .map_err(|_| TransportError::ExternalProxy {
         proxy: proxy.display_url(),
-        detail: "external proxy handshake exceeded 15 seconds".to_string(),
+        detail: format!(
+            "external proxy handshake exceeded {} seconds",
+            EXTERNAL_PROXY_TIMEOUT.as_secs()
+        ),
     })?
 }
 
 async fn negotiate_external_proxy(
-    stream: TcpStream,
+    mut stream: TcpStream,
     proxy: &ExternalProxyTarget,
     host: &str,
     port: u16,
@@ -496,7 +499,6 @@ async fn negotiate_external_proxy(
 ) -> Result<TcpStream> {
     match proxy.kind {
         ExternalProxyKind::Socks5 => {
-            let proxy_stream = stream;
             let target_host = if proxy.remote_dns {
                 host.to_string()
             } else {
@@ -510,7 +512,7 @@ async fn negotiate_external_proxy(
             };
             let socks_stream = match (&proxy.username, &proxy.password) {
                 (Some(username), Some(password)) => Socks5Stream::connect_with_password_and_socket(
-                    proxy_stream,
+                    stream,
                     (target_host.as_str(), port),
                     username,
                     password,
@@ -520,7 +522,7 @@ async fn negotiate_external_proxy(
                     proxy: proxy.display_url(),
                     detail: e.to_string(),
                 })?,
-                _ => Socks5Stream::connect_with_socket(proxy_stream, (target_host.as_str(), port))
+                _ => Socks5Stream::connect_with_socket(stream, (target_host.as_str(), port))
                     .await
                     .map_err(|e| TransportError::ExternalProxy {
                         proxy: proxy.display_url(),
@@ -530,7 +532,6 @@ async fn negotiate_external_proxy(
             Ok(socks_stream.into_inner())
         }
         ExternalProxyKind::Http => {
-            let mut stream = stream;
             let authority = if host.parse::<std::net::Ipv6Addr>().is_ok() {
                 format!("[{host}]:{port}")
             } else {

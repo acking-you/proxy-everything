@@ -88,16 +88,22 @@ fn rewrite_proxy_authorization(buffer: &[u8], proxy: &ExternalProxyTarget) -> Ve
     rewritten
 }
 
-fn extract_host_uri(uri: &str, default_port: u16) -> Result<(&str, u16)> {
+/// Parse `authority` as `host[:port]`. Errors name `request_uri`, the full
+/// request target the authority was taken from.
+fn extract_host_uri<'a>(
+    authority: &'a str,
+    request_uri: &str,
+    default_port: u16,
+) -> Result<(&'a str, u16)> {
     // IPv6 authorities are bracketed; splitting every colon silently corrupts
     // both IPv6 destinations and malformed host:port:extra requests.
     let invalid = || HttpProxyError::Host {
-        uri: uri.to_string(),
+        uri: request_uri.to_string(),
     };
     let invalid_port = || HttpProxyError::Port {
-        uri: uri.to_string(),
+        uri: request_uri.to_string(),
     };
-    let (host, port) = if let Some(bracketed) = uri.strip_prefix('[') {
+    let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
         let (host, tail) = bracketed.split_once(']').ok_or_else(invalid)?;
         host.parse::<std::net::Ipv6Addr>().map_err(|_| invalid())?;
         let port = if tail.is_empty() {
@@ -107,9 +113,9 @@ fn extract_host_uri(uri: &str, default_port: u16) -> Result<(&str, u16)> {
         };
         (host, port)
     } else {
-        let (host, port) = uri
+        let (host, port) = authority
             .split_once(':')
-            .map_or((uri, None), |(host, port)| (host, Some(port)));
+            .map_or((authority, None), |(host, port)| (host, Some(port)));
         if host.is_empty()
             || host
                 .chars()
@@ -147,20 +153,12 @@ fn extract_host_from_raw_uri(uri: &str) -> Result<(&str, u16)> {
             HTTPS_PORT,
         )
     };
-    let url = url.find(['/', '?', '#']).map(|i| &url[..i]).unwrap_or(url);
-    extract_host_uri(url, port).map_err(|error| match error {
-        HttpProxyError::Host { .. } => HttpProxyError::Host {
-            uri: uri.to_string(),
-        },
-        HttpProxyError::Port { .. } => HttpProxyError::Port {
-            uri: uri.to_string(),
-        },
-        error => error,
-    })
+    let authority = url.find(['/', '?', '#']).map_or(url, |i| &url[..i]);
+    extract_host_uri(authority, uri, port)
 }
 
 fn extract_host_from_connect_uri(uri: &str) -> Result<(&str, u16)> {
-    extract_host_uri(uri, HTTPS_PORT)
+    extract_host_uri(uri, uri, HTTPS_PORT)
 }
 
 pub struct HttpProxierProvider {
