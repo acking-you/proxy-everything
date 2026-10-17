@@ -222,7 +222,7 @@ impl TunBypassController {
         host: &str,
         port: u16,
         udp_enabled: bool,
-    ) -> io::Result<()> {
+    ) -> io::Result<tun2proxy::WindowsPreparedBypass> {
         let started = std::time::Instant::now();
         tracing::info!(
             host,
@@ -238,57 +238,59 @@ impl TunBypassController {
             ?addresses,
             "preparing live TUN upstream switch"
         );
-        self.upstream_routes
-            .add_addresses(addresses.to_vec())
+        let prepared = self
+            .upstream_routes
+            .prepare_addresses(addresses.to_vec())
             .await?;
-        if udp_enabled {
+        let probe = async {
             tracing::info!(
                 host,
                 port,
-                phase = "udp_preflight",
+                phase = "connect",
                 "preparing live TUN upstream switch"
             );
-            tokio::time::timeout(
-                std::time::Duration::from_secs(12),
-                super::udp::connect_native_udp(host, port),
-            )
+            let stream = proxy_core::transport::connect_tcp_addresses(&addresses, port).await?;
+            tracing::info!(host, port, local = ?stream.local_addr().ok(), peer = ?stream.peer_addr().ok(), "live TUN upstream TCP reachability confirmed");
+            if udp_enabled {
+                tracing::info!(
+                    host,
+                    port,
+                    phase = "udp_preflight",
+                    "preparing live TUN upstream switch"
+                );
+                let session = proxy_core::session::NativeSession::from_tcp_stream(
+                    "",
+                    0,
+                    proxy_core::ProxyTransport::UdpAssociate,
+                    stream,
+                )
+                .await
+                .map_err(io::Error::other)?;
+                super::udp::confirm_native_udp(session, host, port)
+                    .await
+                    .map_err(io::Error::other)?;
+            }
+            Ok::<_, io::Error>(())
+        };
+        // This is a UI reachability probe, not the relay's TCP retry policy.
+        // Never publish a node whose probe failed or outlived this operation.
+        let seconds = if udp_enabled { 12 } else { 5 };
+        tokio::time::timeout(std::time::Duration::from_secs(seconds), probe)
             .await
             .map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::TimedOut,
-                    "new upstream UDP readiness probe exceeded 12 seconds",
+                    format!("new upstream readiness probe exceeded {seconds} seconds"),
                 )
-            })?
-            .map_err(io::Error::other)?;
-            tracing::info!(
-                host,
-                port,
-                elapsed_ms = started.elapsed().as_millis(),
-                "live TUN upstream bypass and UDP readiness confirmed"
-            );
-            return Ok(());
-        }
+            })??;
         tracing::info!(
             host,
             port,
-            phase = "connect",
-            "preparing live TUN upstream switch"
+            udp_enabled,
+            elapsed_ms = started.elapsed().as_millis(),
+            "live TUN upstream preparation confirmed"
         );
-        // This is a UI reachability probe, not the relay's TCP retry policy.
-        // Never publish a node whose probe failed or outlived this operation.
-        let stream = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            proxy_core::transport::connect_tcp_addresses(&addresses, port),
-        )
-        .await
-        .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::TimedOut,
-                "new upstream TCP reachability probe exceeded 5 seconds",
-            )
-        })??;
-        tracing::info!(host, port, local = ?stream.local_addr().ok(), peer = ?stream.peer_addr().ok(), elapsed_ms = started.elapsed().as_millis(), "live TUN upstream bypass and TCP reachability confirmed");
-        Ok(())
+        Ok(prepared)
     }
 }
 

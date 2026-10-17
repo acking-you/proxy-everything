@@ -305,8 +305,11 @@ and checks reachability before atomically publishing the new upstream. Route
 confirmation has a five-second deadline; TCP reachability has a separate
 five-second deadline, or a twelve-second UDP association preflight when SOCKS5
 UDP is enabled. These bounds apply to the UI switch, not ordinary relay TCP
-connections. A failed preparation keeps the previous upstream active and
-reports its stage/error. The FFI work runs off the UI thread and is serialized
+connections. Both probes connect only to the addresses whose bypasses were
+prepared, including the TCP connection carrying the UDP association. A failed
+preparation keeps the previous upstream active, rolls back newly created
+provisional routes, and reports its stage/error. Failed route removals remain
+owned and are retried by the worker. The FFI work runs off the UI thread and is serialized
 with start/stop and handle destruction.
 
 Existing connections stay on their original node until they reconnect; new

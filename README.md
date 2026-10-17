@@ -172,7 +172,8 @@ for resolver order, platform differences and upgrade behavior.
 Windows setup leaves every existing default route untouched and captures IPv4
 with two owned `/1` routes. Windows node switching installs the new upstream's
 physical host routes before publishing its address, preserving the TUN adapter,
-DNS, and established connections. Shutdown cancels managed TUN sessions before
+DNS, and established connections. Failed probes roll back their provisional
+routes and retain the old upstream. Shutdown cancels managed TUN sessions before
 restoring owned routes and the previous DNS state; the cleanup path never
 performs a broad deletion of `0.0.0.0/0`.
 

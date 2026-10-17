@@ -877,7 +877,7 @@ pub unsafe extern "C" fn proxy_switch_upstream(
         _ => return ProxyResult::InvalidParam,
     };
     #[cfg(windows)]
-    if handle.tun_running.load(Ordering::Acquire) {
+    let prepared = if handle.tun_running.load(Ordering::Acquire) {
         let bypass = handle
             .tun_bypass
             .lock()
@@ -891,20 +891,23 @@ pub unsafe extern "C" fn proxy_switch_upstream(
             return ProxyResult::RuntimeError;
         };
         let generation = handle.tun_generation.load(Ordering::Acquire);
-        if let Err(error) = handle.runtime.block_on(bypass.prepare_upstream(
+        let prepared = match handle.runtime.block_on(bypass.prepare_upstream(
             &server_host,
             server_port,
             handle.udp_enabled.load(Ordering::Acquire),
         )) {
-            record_error(
-                handle,
-                &format!(
-                    "Live upstream switch failed; previous upstream retained: {}",
-                    error_report(&error)
-                ),
-            );
-            return ProxyResult::RuntimeError;
-        }
+            Ok(prepared) => prepared,
+            Err(error) => {
+                record_error(
+                    handle,
+                    &format!(
+                        "Live upstream switch failed; previous upstream retained: {}",
+                        error_report(&error)
+                    ),
+                );
+                return ProxyResult::RuntimeError;
+            }
+        };
         if !handle.tun_running.load(Ordering::Acquire)
             || handle.tun_generation.load(Ordering::Acquire) != generation
         {
@@ -914,7 +917,10 @@ pub unsafe extern "C" fn proxy_switch_upstream(
             );
             return ProxyResult::RuntimeError;
         }
-    }
+        Some(prepared)
+    } else {
+        None
+    };
     let mut endpoint = match handle.remote_endpoint.lock() {
         Ok(endpoint) => endpoint,
         Err(_) => {
@@ -923,6 +929,17 @@ pub unsafe extern "C" fn proxy_switch_upstream(
         }
     };
     let previous = endpoint.clone();
+
+    #[cfg(windows)]
+    if let Some(prepared) = prepared
+        && let Err(error) = prepared.commit()
+    {
+        record_error(
+            handle,
+            &format!("Failed to commit upstream bypass: {}", error_report(&error)),
+        );
+        return ProxyResult::RuntimeError;
+    }
 
     // Client connection paths load this host/port pair from one ArcSwap
     // snapshot, so accepts racing this call see either complete generation.

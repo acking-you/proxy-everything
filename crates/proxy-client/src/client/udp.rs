@@ -29,7 +29,7 @@ pub(super) async fn connect_native_udp(
     host: &str,
     port: u16,
 ) -> Result<(ProxyStream, Option<std::borrow::Cow<'static, str>>)> {
-    let (mut stream, msg_key) = proxy_core::session::NativeSession::connect(
+    let session = proxy_core::session::NativeSession::connect(
         "",
         0,
         host,
@@ -37,8 +37,16 @@ pub(super) async fn connect_native_udp(
         proxy_core::ProxyTransport::UdpAssociate,
     )
     .await
-    .context(TransportSnafu)?
-    .into_parts();
+    .context(TransportSnafu)?;
+    confirm_native_udp(session, host, port).await
+}
+
+pub(super) async fn confirm_native_udp(
+    session: proxy_core::session::NativeSession,
+    host: &str,
+    port: u16,
+) -> Result<(ProxyStream, Option<std::borrow::Cow<'static, str>>)> {
+    let (mut stream, msg_key) = session.into_parts();
     let ready = match tokio::time::timeout(UDP_ASSOCIATION_SETUP_TIMEOUT, stream.read_u8()).await {
         Err(_) => {
             return Err(super::ClientError::Datagram {

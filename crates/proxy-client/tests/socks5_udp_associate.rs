@@ -70,6 +70,25 @@ async fn protocol_round_trips(protocol: WireProtocol) {
         None,
     ));
 
+    // A live-switch probe must negotiate on the socket whose bypass was already
+    // prepared, without another hostname lookup or connection. Exercise that
+    // entry point against both supported wire protocols and the real server.
+    let prepared_socket = TcpStream::connect(server_addr).await.unwrap();
+    let session = proxy_core::session::NativeSession::from_tcp_stream(
+        "",
+        0,
+        proxy_core::ProxyTransport::UdpAssociate,
+        prepared_socket,
+    )
+    .await
+    .unwrap();
+    let (mut probe, _) = session.into_parts();
+    assert_eq!(
+        probe.read_u8().await.unwrap(),
+        proxy_core::datagram::UDP_ASSOCIATION_READY
+    );
+    drop(probe);
+
     let mut control = ControlClient::connect(
         "127.0.0.1",
         server_addr.port(),
