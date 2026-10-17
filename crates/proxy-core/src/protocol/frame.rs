@@ -1,4 +1,4 @@
-//! Shared legacy-compatible message framing for control and datagram streams.
+//! Shared legacy-compatible message framing for TCP, control and datagrams.
 
 use super::{current_checksum_key, encode_data_size, validate_data_size};
 use crate::crypto::{Decryptor, Encryptor};
@@ -20,9 +20,9 @@ fn io_error(source: std::io::Error) -> ProxyError {
 }
 
 /// Cancellation-safe, bounded message reader using the existing wire framing.
-pub struct FrameReader<R> {
+pub struct FrameReader<R, D = Aes256GcmDecryptor> {
     reader: R,
-    decryptor: Option<Aes256GcmDecryptor>,
+    decryptor: Option<D>,
     checksum_key: u32,
     limit: usize,
     prefix: [u8; PREFIX_LEN],
@@ -30,6 +30,7 @@ pub struct FrameReader<R> {
     body_read: usize,
     buffer: Vec<u8>,
     failed: bool,
+    small_frames: u8,
 }
 
 impl<R: MyAsyncReadExt + Send + Unpin> FrameReader<R> {
@@ -40,17 +41,24 @@ impl<R: MyAsyncReadExt + Send + Unpin> FrameReader<R> {
             .map(|key| Aes256GcmDecryptor::try_new(key.as_bytes()))
             .transpose()
             .map_err(|_| protocol_error("invalid frame decryption key"))?;
-        Ok(Self {
+        Ok(Self::with_decryptor(reader, decryptor, limit))
+    }
+}
+
+impl<R: MyAsyncReadExt + Send + Unpin, D: Decryptor + Send + Unpin> FrameReader<R, D> {
+    pub fn with_decryptor(reader: R, decryptor: Option<D>, limit: usize) -> Self {
+        Self {
             reader,
             decryptor,
             checksum_key: current_checksum_key(),
-            limit,
+            limit: limit.min(super::MAX_DATA_SIZE as usize),
             prefix: [0; PREFIX_LEN],
             prefix_read: 0,
             body_read: 0,
             buffer: Vec::new(),
             failed: false,
-        })
+            small_frames: 0,
+        }
     }
 
     /// Progress belongs to this reader, so dropping the future is harmless.
@@ -92,6 +100,15 @@ impl<R: MyAsyncReadExt + Send + Unpin> FrameReader<R> {
                     return Err(protocol_error("invalid message frame size"));
                 }
                 self.buffer.resize(size, 0);
+                if size < self.buffer.capacity() / 4 {
+                    self.small_frames += 1;
+                    if self.small_frames == 8 {
+                        self.buffer.shrink_to(size.max(512));
+                        self.small_frames = 0;
+                    }
+                } else {
+                    self.small_frames = 0;
+                }
             }
         }
         while self.body_read < self.buffer.len() {

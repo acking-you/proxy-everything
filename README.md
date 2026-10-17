@@ -34,6 +34,20 @@ On macOS, replace the previous direct-download app with `CipherRelay.app`. The
 Store and direct editions retain separate IDs and settings; install them in
 separate folders if both editions are needed.
 
+## Encrypted native sessions
+
+New clients always encrypt native TCP, UDP and ICMP payloads, including HTTPS
+handshakes and node probes, using the existing legacy protocol by default.
+Existing nodes do not need an upgrade for this policy. The old encryption
+toggle and per-IP codec selection have been removed; old saved values are
+ignored. Direct destinations and external HTTP/SOCKS upstreams keep their own
+protocols. See [compatibility and architecture](docs/network-resilience.md#encrypted-native-sessions-and-compatibility).
+
+The workspace separates `proxy-crypto` (configuration-free crypto and generic
+v3 records), `proxy-core` (wire format, native sessions and shared forwarding),
+and the client/server/FFI frontends. Forwarding uses static trait dispatch and
+preserves error sources through to connection traces.
+
 ## Low-latency encrypted transport
 
 Native **0.4.34** and UI **1.2.20+46** provide v3 encryption with **no additional

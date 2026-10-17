@@ -23,6 +23,12 @@ use snafu::Snafu;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum ProxyError {
+    /// Direction context added without discarding the underlying error chain.
+    #[snafu(display("Relay failed in {direction}"))]
+    Relay {
+        direction: &'static str,
+        source: Box<ProxyError>,
+    },
     // ========== I/O Errors ==========
     /// General I/O error with context information.
     #[snafu(display("IO error [{context}]: {detail}"))]
@@ -256,6 +262,7 @@ impl ProxyError {
         };
 
         match self {
+            ProxyError::Relay { source, .. } => source.is_expected_disconnect(),
             ProxyError::Io { source, .. }
             | ProxyError::ProtocolIo { source, .. }
             | ProxyError::CodecRead { source } => is_expected(source.kind()),

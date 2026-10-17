@@ -9,5 +9,5 @@ pub mod client;
 // Re-export main types
 pub use client::{
     ClientConfig, ClientError, ClientRuntimeConfig, Forwarder, ForwarderProvider, HeaderContext,
-    ProxierProviderType, ProxyContext, Result,
+    ProxyContext, Result,
 };

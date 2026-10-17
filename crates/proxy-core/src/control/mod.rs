@@ -246,6 +246,9 @@ impl ControlClient {
         server_port: u16,
         session_key: Option<String>,
     ) -> Result<Self> {
+        // Explicit keys still authenticate against configured historical nodes.
+        // Without one, encrypt the session using the same legacy header field.
+        let session_key = Some(session_key.unwrap_or_else(crate::config::gen_random_key));
         let msg_key = session_key.clone().map(Cow::Owned);
         let connect_fut = get_tcp_proxy_stream(
             CONTROL_HOST,

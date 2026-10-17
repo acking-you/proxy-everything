@@ -76,6 +76,11 @@ pub enum TransportError {
     EmptyDNSRecord,
     #[snafu(display("External proxy `{proxy}` error: {detail}"))]
     ExternalProxy { proxy: String, detail: String },
+    #[snafu(display("SOCKS5 upstream `{proxy}` handshake failed"))]
+    SocksProxy {
+        proxy: String,
+        source: tokio_socks::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, TransportError>;
@@ -315,7 +320,7 @@ pub async fn get_tcp_proxy_stream_with_protocol(
         transport: ProxyTransport::Tcp,
     };
     get_proxy_stream(
-        proxy_header,
+        &proxy_header,
         proxy_server,
         proxy_server_port,
         detail,
@@ -325,64 +330,8 @@ pub async fn get_tcp_proxy_stream_with_protocol(
     .await
 }
 
-/// Establishes a framed UDP-association tunnel through the proxy server.
-pub async fn get_udp_proxy_stream(
-    proxy_server: &str,
-    proxy_server_port: u16,
-    msg_key: Option<Cow<'static, str>>,
-    detail: &'static str,
-) -> Result<ProxyStream> {
-    let proxy_header = ProxyHeader {
-        host: String::new(),
-        port: 0,
-        key: msg_key,
-        transport: ProxyTransport::UdpAssociate,
-    };
-    get_proxy_stream(
-        proxy_header,
-        proxy_server,
-        proxy_server_port,
-        detail,
-        "udp-associate",
-        WireProtocol::configured().context(IoSnafu {
-            uri: None,
-            detail: "select wire protocol",
-        })?,
-    )
-    .await
-}
-
-/// Establish an ICMP Echo stream. Existing proxy paths remain legacy-compatible;
-/// this additional transport requires an Echo-capable final server.
-pub async fn get_icmp_proxy_stream(
-    host: &str,
-    ipv6: bool,
-    proxy_server: &str,
-    proxy_server_port: u16,
-    msg_key: Option<Cow<'static, str>>,
-) -> Result<ProxyStream> {
-    let header = ProxyHeader {
-        host: host.to_owned(),
-        port: if ipv6 { 6 } else { 4 },
-        key: msg_key,
-        transport: ProxyTransport::IcmpEcho,
-    };
-    get_proxy_stream(
-        header,
-        proxy_server,
-        proxy_server_port,
-        "ICMP Echo",
-        host,
-        WireProtocol::configured().context(IoSnafu {
-            uri: None,
-            detail: "select Echo wire protocol",
-        })?,
-    )
-    .await
-}
-
-async fn get_proxy_stream(
-    proxy_header: ProxyHeader,
+pub(crate) async fn get_proxy_stream(
+    proxy_header: &ProxyHeader,
     proxy_server: &str,
     proxy_server_port: u16,
     detail: &'static str,
@@ -397,7 +346,8 @@ async fn get_proxy_stream(
         proxy_server_port,
         target = uri,
         transport = ?proxy_header.transport,
-        session_encrypted = proxy_header.key.is_some(),
+        wire_protocol = ?protocol,
+        session_encrypted = protocol == WireProtocol::V3 || proxy_header.key.is_some(),
         "opening proxy transport connection"
     );
     let mut proxy_server_stream = get_tcp_stream(proxy_server, proxy_server_port, detail).await?;
@@ -533,15 +483,15 @@ async fn negotiate_external_proxy(
                     password,
                 )
                 .await
-                .map_err(|e| TransportError::ExternalProxy {
+                .map_err(|source| TransportError::SocksProxy {
                     proxy: proxy.display_url(),
-                    detail: e.to_string(),
+                    source,
                 })?,
                 _ => Socks5Stream::connect_with_socket(stream, (target_host.as_str(), port))
                     .await
-                    .map_err(|e| TransportError::ExternalProxy {
+                    .map_err(|source| TransportError::SocksProxy {
                         proxy: proxy.display_url(),
-                        detail: e.to_string(),
+                        source,
                     })?,
             };
             Ok(socks_stream.into_inner())
@@ -640,40 +590,6 @@ pub async fn read_http_header(
         header.extend_from_slice(&chunk[..consume]);
     }
     Ok(())
-}
-
-/// Select the session key for application TCP traffic through a native proxy.
-///
-/// Even TLS needs this outer layer: its ClientHello contains a visible SNI and
-/// TCP may place it in a separate segment, regardless of write boundaries or
-/// Nagle. The existing legacy `ProxyHeader.key` and data frames are understood
-/// by historical servers; no new wire version or configuration migration is
-/// needed. Direct connections and external HTTP/SOCKS proxies must not use it.
-pub fn tcp_session_key(configured: Option<Cow<'static, str>>) -> Cow<'static, str> {
-    configured.unwrap_or_else(|| Cow::Owned(crate::config::gen_random_key()))
-}
-
-/// Returns a message key if the given IP requires encryption.
-#[inline]
-pub fn get_msg_key_from_codec_ip(ip: impl AsRef<str>) -> Option<String> {
-    let codec_ips = runtime::need_codec_ips();
-    codec_ips
-        .iter()
-        .find(|codec_ip| codec_ip.as_str() == ip.as_ref())
-        .map(|_| crate::config::gen_random_key())
-}
-
-/// Changes `msg_key` when it is None and the IP requires encryption.
-#[inline]
-pub fn change_msg_key(
-    ip: impl AsRef<str>,
-    msg_key: Option<Cow<'static, str>>,
-) -> Option<Cow<'static, str>> {
-    if msg_key.is_none() {
-        get_msg_key_from_codec_ip(ip).map(Cow::Owned)
-    } else {
-        msg_key
-    }
 }
 
 #[cfg(test)]

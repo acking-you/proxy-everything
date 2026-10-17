@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+proxy-crypto = { path = "../proxy-crypto" }
 # Process-wide allocator
 better_mimalloc_rs = { workspace = true }
 

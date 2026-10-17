@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use proxy_core::datagram::DatagramAddress;
@@ -64,9 +63,7 @@ enum SocksRequest {
     Echo { host: String, ipv6: bool },
 }
 
-pub struct SocksProxierProvider {
-    msg_key: Option<Cow<'static, str>>,
-}
+pub struct SocksProxierProvider;
 
 impl ForwarderProvider for SocksProxierProvider {
     type Item = SocksForwarder;
@@ -105,9 +102,7 @@ impl ForwarderProvider for SocksProxierProvider {
             .fail()
             .context(SocksProxySnafu)?;
         }
-        Ok(Self {
-            msg_key: header_context.msg_key.map(|s| Cow::Owned(s.to_owned())),
-        })
+        Ok(Self)
     }
 
     async fn try_build_forwarder(
@@ -151,13 +146,8 @@ impl ForwarderProvider for SocksProxierProvider {
                     .fail()
                     .context(SocksProxySnafu);
                 }
-                let forwarder = super::icmp::EchoForwarder::connect(
-                    proxy_context.stream,
-                    &host,
-                    ipv6,
-                    self.msg_key,
-                )
-                .await?;
+                let forwarder =
+                    super::icmp::EchoForwarder::connect(proxy_context.stream, &host, ipv6).await?;
                 Ok(SocksForwarder::Echo(Box::new(forwarder)))
             }
             SocksRequest::Connect { host, port } => {
@@ -174,8 +164,8 @@ impl ForwarderProvider for SocksProxierProvider {
                 } = match resolve_server_connection(
                     host.as_str(),
                     port,
+                    #[cfg(feature = "auto-proxy")]
                     proxy_context.sender,
-                    self.msg_key,
                     proxy_context.upstream_proxy,
                     proxy_context.honor_forced_direct,
                 )
@@ -193,11 +183,6 @@ impl ForwarderProvider for SocksProxierProvider {
                     .await
                     .context(SocksProxySnafu)?;
 
-                let msg_key = if server_stream.is_secure() {
-                    None
-                } else {
-                    msg_key
-                };
                 let (client_reader, client_writer) = split_and_wrap(proxy_context.stream);
                 let (server_reader, server_writer) = split_and_wrap(server_stream);
                 Ok(SocksForwarder::Tcp(TcpForwardImpl {
@@ -240,7 +225,6 @@ impl ForwarderProvider for SocksProxierProvider {
                 let (mut association, relay_addr) = UdpAssociation::bind(
                     proxy_context.stream,
                     client_addr,
-                    self.msg_key,
                     proxy_context.upstream_proxy,
                 )
                 .await?;

@@ -44,10 +44,6 @@ pub struct PacketTunnelConfig {
     pub tun_dns_server: std::net::IpAddr,
     #[serde(default)]
     pub reverse_geo: bool,
-    #[serde(default)]
-    pub need_codec_ips: Option<String>,
-    #[serde(default)]
-    pub force_codec: bool,
 }
 
 fn legacy_fake_ip() -> bool {
@@ -192,14 +188,6 @@ impl PacketTunnelRuntime {
             config.server_host,
             config.server_port,
             config.reverse_geo,
-            config
-                .need_codec_ips
-                .unwrap_or_default()
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-                .collect(),
             config.session_key,
         );
         let virtual_dns = VirtualDnsState::default();
@@ -260,23 +248,13 @@ impl PacketTunnelRuntime {
         let client_failure = failure.clone();
         tracker.spawn_on(
             async move {
-                if config.force_codec {
-                    run_client_with_listener_runtime_config::<true>(
-                        listener,
-                        client_cancel.clone(),
-                        Some(client_tracker),
-                        Some(client_config),
-                    )
-                    .await;
-                } else {
-                    run_client_with_listener_runtime_config::<false>(
-                        listener,
-                        client_cancel.clone(),
-                        Some(client_tracker),
-                        Some(client_config),
-                    )
-                    .await;
-                }
+                run_client_with_listener_runtime_config(
+                    listener,
+                    client_cancel.clone(),
+                    Some(client_tracker),
+                    Some(client_config),
+                )
+                .await;
                 finish_worker(
                     &client_cancel,
                     &client_failure,

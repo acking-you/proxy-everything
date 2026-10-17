@@ -46,7 +46,6 @@ async fn protocol_round_trips(protocol: WireProtocol) {
         server_addr.ip().to_string(),
         server_addr.port(),
         false,
-        Vec::new(),
         Some(DEFAULT_SECRET_KEY.to_string()),
     );
 
@@ -93,48 +92,10 @@ async fn protocol_round_trips(protocol: WireProtocol) {
         assert!(legacy.read_u8().await.is_err());
     }
 
-    // Exercise the original unencrypted data path first. UDP support shares
-    // the connection setup with TCP, so both codec modes need end-to-end
-    // coverage rather than relying only on framing unit tests.
-    let plain_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let plain_addr = plain_listener.local_addr().unwrap();
-    let plain_cancel = CancellationToken::new();
-    let plain_task = tokio::spawn(run_client_with_listener_runtime_config::<false>(
-        plain_listener,
-        plain_cancel.clone(),
-        None,
-        Some(ClientRuntimeConfig {
-            client: ClientConfig {
-                enable_auto_proxy: false,
-                enable_udp: true,
-                cache_dir: None,
-            },
-            upstream_proxy: None,
-            tun: None,
-            force_proxy: None,
-        }),
-    ));
-    assert_udp_round_trip(
-        plain_addr,
-        DatagramAddress::Ip(echo_addr),
-        DatagramAddress::Ip(echo_addr),
-        b"udp-through-plain-proxy",
-        false,
-    )
-    .await;
-    assert_udp_round_trip(
-        plain_addr,
-        DatagramAddress::Ip(echo_addr),
-        DatagramAddress::Ip(echo_addr),
-        b"udp-after-malformed-unpinned-packet",
-        true,
-    )
-    .await;
-
     let client_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let client_addr = client_listener.local_addr().unwrap();
     let client_cancel = CancellationToken::new();
-    let client_task = tokio::spawn(run_client_with_listener_runtime_config::<true>(
+    let client_task = tokio::spawn(run_client_with_listener_runtime_config(
         client_listener,
         client_cancel.clone(),
         None,
@@ -159,13 +120,20 @@ async fn protocol_round_trips(protocol: WireProtocol) {
     )
     .await;
 
-    assert_http_round_trip(plain_addr).await;
+    assert_udp_round_trip(
+        client_addr,
+        DatagramAddress::Ip(echo_addr),
+        DatagramAddress::Ip(echo_addr),
+        b"udp-after-malformed-unpinned-packet",
+        true,
+    )
+    .await;
     assert_http_round_trip(client_addr).await;
 
     let chained_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let chained_addr = chained_listener.local_addr().unwrap();
     let chained_cancel = CancellationToken::new();
-    let chained_task = tokio::spawn(run_client_with_listener_runtime_config::<false>(
+    let chained_task = tokio::spawn(run_client_with_listener_runtime_config(
         chained_listener,
         chained_cancel.clone(),
         None,
@@ -218,6 +186,14 @@ async fn protocol_round_trips(protocol: WireProtocol) {
             None,
         ));
         runtime::set_server_endpoint("127.0.0.1".to_string(), relay_addr.port());
+        assert_udp_round_trip(
+            client_addr,
+            DatagramAddress::Ip(echo_addr),
+            DatagramAddress::Ip(echo_addr),
+            b"udp-after-malformed-unpinned-packet",
+            true,
+        )
+        .await;
         assert_http_round_trip(client_addr).await;
         assert_udp_round_trip(
             client_addr,
@@ -250,11 +226,9 @@ async fn protocol_round_trips(protocol: WireProtocol) {
 
     chained_cancel.cancel();
     client_cancel.cancel();
-    plain_cancel.cancel();
     server_cancel.cancel();
     chained_task.await.unwrap();
     client_task.await.unwrap();
-    plain_task.await.unwrap();
     server_task.await.unwrap();
     echo_task.abort();
     let _ = std::fs::remove_dir_all(state_dir);
@@ -265,7 +239,7 @@ async fn socks5_udp_associate_returns_command_not_supported_when_disabled() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let client_addr = listener.local_addr().unwrap();
     let cancel = CancellationToken::new();
-    let task = tokio::spawn(run_client_with_listener_runtime_config::<false>(
+    let task = tokio::spawn(run_client_with_listener_runtime_config(
         listener,
         cancel.clone(),
         None,

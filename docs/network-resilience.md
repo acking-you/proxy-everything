@@ -352,14 +352,14 @@ Fake-IP on/off did not resolve it. No host TUN restart, cache deletion, default
 route replacement, or user configuration overwrite was needed. The macOS
 packet-path difference and every historical reset were not independently proven.
 
-### TCP protection and compatibility
+### Encrypted native sessions and compatibility
 
-Application TCP connections through a native proxy now always select a session
-key before writing the proxy header. This includes HTTP CONNECT, SOCKS CONNECT,
+Native TCP, UDP and ICMP sessions always select encryption through the shared
+`NativeSession` constructor before writing the proxy header. This includes HTTP CONNECT, SOCKS CONNECT,
 plain HTTP sent through a native proxy rule, DNS-over-TCP, and node probes. TLS
 ClientHello and subsequent bytes traverse the existing legacy framed codec,
-regardless of packet segmentation. Explicitly supplied session keys are kept;
-otherwise a fresh key is generated for each connection. There is no plaintext
+regardless of packet segmentation. A fresh legacy payload key is generated per
+connection. V3 already encrypts its stream and does not add a second codec. There is no plaintext
 retry or automatic protocol downgrade after an error.
 
 The wire format is unchanged: legacy TCP still uses the original encrypted
@@ -372,8 +372,11 @@ compatibility repair does not claim to replace the v3 security migration.
 
 Direct destinations and external HTTP/SOCKS upstreams keep their existing wire
 behavior. Saved `forceCodec=false`, CLI `msg_key=false`, and empty codec-IP lists
-no longer disable native TCP protection. The force-codec/msg-key flag still
-adds session encoding to UDP/ICMP tunnels. No saved setting is rewritten, and
+are ignored. The encryption switch and codec-IP policy have been removed.
+Legacy CLI arguments remain hidden no-ops; FFI fields retain their offsets as
+reserved slots, allowing existing callers to load the new library safely.
+Control clients retain an explicitly configured authentication key, or generate
+a payload key when none is supplied. No configuration migration is required, and
 Fake-IP, DNS routing, TUN bypass, timeout policy and socket options are unchanged.
 The node-probe `force_codec` argument is retained for C ABI compatibility; both
 values now probe the same protected TCP path used by applications.
@@ -383,7 +386,8 @@ historical header/data-frame reader. It checks that neither the TLS SNI nor
 HTTP plaintext occurs anywhere in the upstream stream, with fragmented writes,
 fragmented responses and request half-close. Other tests cover encrypted
 DNS-over-TCP, node probes, both old-client/server compatibility directions,
-plain/encrypted UDP, V3 and relay paths. No live user network is required.
+native encrypted UDP, V3 and relay paths. Server-side plaintext framing is kept
+only for legacy peers and data already protected by v3. No live user network is required.
 
 Windows binary checks also compared the released v1.2.24 DLL against the rebuilt
 DLL using a loopback filter that resets any stream containing a synthetic SNI.
@@ -392,6 +396,29 @@ including force-codec on/off and node probes. The rebuilt DLL also passed twelve
 HTTP/CONNECT/SOCKS exchanges through an actual native 0.4.30 server built from
 `2adfc542851dfeb11bfd7b5a01ae1330511ea80f`, both directly and through an old native
 relay. These local tests use separate temporary state, not the user's TUN.
+
+### Rust ownership and reuse
+
+`proxy-crypto` owns configuration-free AES-GCM primitives and the generic v3
+record stream. `proxy-core` owns wire headers, runtime key selection and
+`NativeSession`. `FrameReader<R, D>` supplies the same bounded, cancellation-safe
+parser to TCP decryption, probes, control and datagrams. Client frontend parsing,
+route selection, forwarding and error types have separate modules.
+
+The relay uses generic codec/reader/writer traits and a monomorphized progress
+callback. Client and server share the transfer loop and half-close/error policy;
+no trait objects or per-connection metrics channel are needed for this reuse.
+Errors propagate with a typed source and failing direction instead of being
+logged and returned as success. Transfer totals use `u64`, independent of the
+wire's `u32` frame lengths. Plain forwarding remains necessary for direct and
+external destinations, v3's decrypted stream, and inbound historical clients;
+it is not a selectable outbound native-client mode.
+
+Encrypted reads reserve space for the authentication tag within the legacy
+30 MiB frame limit. The generic raw-copy buffer may grow to 32 MiB, so reusing
+its full capacity for encryption previously produced frames rejected by the
+receiver during sustained transfers. A streaming regression covers that limit
+without constructing a complete transfer-sized payload in memory.
 
 ### Read-only connection diagnostics
 

@@ -1,6 +1,5 @@
 //! Bridge the private local Echo extension to the authenticated proxy path.
 
-use std::borrow::Cow;
 use std::time::Duration;
 
 use proxy_core::ProxyError;
@@ -11,7 +10,7 @@ use snafu::ResultExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
-use super::{ExternalProxySnafu, Forwarder, ProxySnafu, Result, TcpAsyncReader, TcpAsyncWriter};
+use super::{Forwarder, ProxySnafu, Result, TcpAsyncReader, TcpAsyncWriter, TransportSnafu};
 
 /// One bounded, sequential ICMP Echo flow over the configured native proxy.
 pub struct EchoForwarder {
@@ -21,23 +20,18 @@ pub struct EchoForwarder {
 }
 
 impl EchoForwarder {
-    pub(super) async fn connect(
-        mut local: TcpStream,
-        host: &str,
-        ipv6: bool,
-        key: Option<Cow<'static, str>>,
-    ) -> Result<Self> {
+    pub(super) async fn connect(mut local: TcpStream, host: &str, ipv6: bool) -> Result<Self> {
         let endpoint = runtime::server_endpoint();
-        let remote = proxy_core::transport::get_icmp_proxy_stream(
+        let (remote, key) = proxy_core::session::NativeSession::connect(
             host,
-            ipv6,
+            if ipv6 { 6 } else { 4 },
             &endpoint.host,
             endpoint.port,
-            key.clone(),
+            proxy_core::ProxyTransport::IcmpEcho,
         )
         .await
-        .context(ExternalProxySnafu)?;
-        let key = if remote.is_secure() { None } else { key };
+        .context(TransportSnafu)?
+        .into_parts();
         let (reader, writer) = remote.into_split();
         local
             .write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0])

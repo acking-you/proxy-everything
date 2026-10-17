@@ -4,9 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use proxy_core::codec::{
-    AsyncDecryptCodec, AsyncEncryptCodec, AsyncNormalCodec, AsyncReader, AsyncWriter,
-};
+use proxy_core::codec::{AsyncNormalCodec, AsyncReader, AsyncWriter};
 use proxy_core::control::{ControlCodec, is_control_target};
 use proxy_core::metrics::{ConnectionRecord, MetricsStore, current_time_ms};
 use proxy_core::relay::RelayRoute;
@@ -14,13 +12,12 @@ use proxy_core::secure_transport::{MAGIC, ProxyStream, accept_v3};
 use proxy_core::transport::get_tcp_external_proxy_stream;
 use proxy_core::util::{display_report, error_report};
 use proxy_core::{
-    Aes256GcmCryption, Aes256GcmDecryptor, Aes256GcmEncryptor, DataSize, MyAsyncCodecReader,
-    MyAsyncReadExt, MyAsyncWriteExt, ProxyHeader, ProxyTransport, get_data_size, set_data_size,
+    MyAsyncCodecReader, MyAsyncReadExt, MyAsyncWriteExt, ProxyHeader, ProxyTransport,
+    get_data_size, set_data_size,
 };
 use smallvec::{SmallVec, smallvec};
 use snafu::ResultExt;
 use tokio::net::TcpStream;
-use tokio::sync::oneshot;
 use tracing::{Instrument, field};
 
 use super::control::handle_control_session;
@@ -47,33 +44,31 @@ pub(super) struct TransferStats {
     pub(super) latency_ms: Option<u64>,
 }
 
-async fn copy_with_metrics<R, W>(
-    mut reader: R,
-    mut writer: W,
-    mut first_byte_tx: Option<oneshot::Sender<Duration>>,
-    start: Instant,
-) -> proxy_core::Result<DataSize>
-where
-    R: MyAsyncCodecReader + Send + Unpin,
+async fn proxy_with_metrics<
+    Client: MyAsyncCodecReader + Send + Unpin,
+    Server: MyAsyncCodecReader + Send + Unpin,
     W: MyAsyncWriteExt + Send + Unpin,
-{
-    let mut total: DataSize = 0;
-    loop {
-        match reader.codec_and_write(&mut writer).await {
-            Ok(n) => {
-                if n == 0 {
-                    let _ = writer.shutdown().await;
-                    break;
-                }
-                if let Some(tx) = first_byte_tx.take() {
-                    let _ = tx.send(start.elapsed());
-                }
-                total = total.saturating_add(n);
-            }
-            Err(err) => return Err(err),
-        }
-    }
-    Ok(total)
+>(
+    client: Client,
+    server: Server,
+    client_writer: W,
+    server_writer: W,
+) -> Result<TransferStats> {
+    let start = Instant::now();
+    let mut latency = None;
+    let (bytes_up, bytes_down) = proxy_core::relay_bidirectional(
+        proxy_core::codec::copy(client, server_writer),
+        proxy_core::codec::copy_with_observer(server, client_writer, |_| {
+            latency.get_or_insert_with(|| start.elapsed());
+        }),
+    )
+    .await
+    .context(ProxySnafu)?;
+    Ok(TransferStats {
+        bytes_up,
+        bytes_down,
+        latency_ms: latency.map(|v| v.as_millis() as u64),
+    })
 }
 
 async fn proxy_with_metrics_normal<
@@ -85,29 +80,13 @@ async fn proxy_with_metrics_normal<
     client_writer: W,
     server_writer: W,
 ) -> Result<TransferStats> {
-    let (tx, rx) = oneshot::channel();
-    let start = Instant::now();
-    let client_to_server = copy_with_metrics(
+    proxy_with_metrics(
         AsyncNormalCodec::new(client_reader),
-        server_writer,
-        None,
-        start,
-    );
-    let server_to_client = copy_with_metrics(
         AsyncNormalCodec::new(server_reader),
         client_writer,
-        Some(tx),
-        start,
-    );
-    // Authentication/I/O errors cancel the other direction immediately. A
-    // normal EOF still half-closes its writer and lets the peer drain.
-    let (bytes_up, bytes_down) =
-        tokio::try_join!(client_to_server, server_to_client).context(ProxySnafu)?;
-    Ok(TransferStats {
-        bytes_up: bytes_up as u64,
-        bytes_down: bytes_down as u64,
-        latency_ms: rx.await.ok().map(|v| v.as_millis() as u64),
-    })
+        server_writer,
+    )
+    .await
 }
 
 async fn proxy_with_metrics_cryptor<
@@ -120,32 +99,13 @@ async fn proxy_with_metrics_cryptor<
     client_writer: W,
     server_writer: W,
 ) -> Result<TransferStats> {
-    let client_codec = AsyncDecryptCodec::new(
-        client_reader,
-        Aes256GcmDecryptor::try_new(key.as_bytes()).map_err(|e| ServerError::Decryption {
-            detail: e.to_string(),
-        })?,
-    );
-    let server_codec = AsyncEncryptCodec::new(
-        server_reader,
-        Aes256GcmEncryptor::try_new(key.as_bytes()).map_err(|e| ServerError::Decryption {
-            detail: e.to_string(),
-        })?,
-    );
-
-    let (tx, rx) = oneshot::channel();
-    let start = Instant::now();
-    let client_to_server = copy_with_metrics(client_codec, server_writer, None, start);
-    let server_to_client = copy_with_metrics(server_codec, client_writer, Some(tx), start);
-    // Authentication/I/O errors cancel the other direction immediately. A
-    // normal EOF still half-closes its writer and lets the peer drain.
-    let (bytes_up, bytes_down) =
-        tokio::try_join!(client_to_server, server_to_client).context(ProxySnafu)?;
-    Ok(TransferStats {
-        bytes_up: bytes_up as u64,
-        bytes_down: bytes_down as u64,
-        latency_ms: rx.await.ok().map(|v| v.as_millis() as u64),
-    })
+    proxy_with_metrics(
+        proxy_core::get_decryptor_codec(&key, client_reader).context(ProxySnafu)?,
+        proxy_core::get_encryptor_codec(key, server_reader).context(ProxySnafu)?,
+        client_writer,
+        server_writer,
+    )
+    .await
 }
 
 /// Handle a new TCP connection with a per-connection tracing span.
@@ -342,7 +302,7 @@ async fn handle_connect_inner(
         }
         Some(header)
     } else {
-        match Aes256GcmCryption::try_new_with_default_key() {
+        match proxy_core::crypto::configured_cryption() {
             Ok(mut cryption) => match cryption.decrypt_with_tag(&mut header_buf) {
                 Ok(payload) => match serde_json::from_slice::<ProxyHeader>(payload) {
                     Ok(header) => Some(header),
@@ -370,7 +330,7 @@ async fn handle_connect_inner(
             destination_host = %header.host,
             destination_port = header.port,
             transport = ?header.transport,
-            session_encrypted = header.key.is_some(),
+            session_encrypted = secure || header.key.is_some(),
             "decoded proxy connection header"
         );
         dest_host = header.host.clone();
@@ -671,42 +631,4 @@ fn record_connection(
         error: error_msg,
     };
     ctx.metrics.record_connection(record);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    struct Reader(bool);
-    impl MyAsyncReadExt for Reader {
-        async fn read_u32(&mut self) -> std::io::Result<u32> {
-            unreachable!()
-        }
-
-        async fn read_exact(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-            unreachable!()
-        }
-
-        async fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-            if self.0 {
-                Err(std::io::ErrorKind::ConnectionReset.into())
-            } else {
-                std::future::pending().await
-            }
-        }
-    }
-    #[tokio::test]
-    async fn forwarding_error_does_not_wait_for_a_silent_peer() {
-        let result = tokio::time::timeout(
-            Duration::from_millis(100),
-            proxy_with_metrics_normal(
-                Reader(true),
-                Reader(false),
-                AsyncWriter::new(Vec::new()),
-                AsyncWriter::new(Vec::new()),
-            ),
-        )
-        .await
-        .expect("peer direction must be cancelled");
-        assert!(result.is_err());
-    }
 }

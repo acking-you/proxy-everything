@@ -19,7 +19,6 @@ async fn real_listener_forces_dns_through_remote_without_forcing_other_traffic()
     use proxy_client::client::auto_proxy::PROXY_CACHE;
     use proxy_client::client::{ClientConfig, run_client_with_listener};
     use proxy_core::codec::{AsyncReader, AsyncWriter};
-    use proxy_core::crypto::Aes256GcmCryption;
     use proxy_core::protocol::{FrameReader, FrameWriter, ProxyHeader};
     use tokio_util::task::TaskTracker;
 
@@ -36,13 +35,12 @@ async fn real_listener_forces_dns_through_remote_without_forcing_other_traffic()
             "127.0.0.1".into(),
             remote.local_addr().unwrap().port(),
             true,
-            vec![],
             None,
         );
         let cancel = CancellationToken::new();
         let _guard = cancel.clone().drop_guard();
         let tracker = TaskTracker::new();
-        tracker.spawn(run_client_with_listener::<false>(
+        tracker.spawn(run_client_with_listener(
             local,
             cancel.clone(),
             Some(tracker.clone()),
@@ -66,7 +64,7 @@ async fn real_listener_forces_dns_through_remote_without_forcing_other_traffic()
                     assert!(length < 4096);
                     let mut header = vec![0; length];
                     stream.read_exact(&mut header).await.unwrap();
-                    let mut cipher = Aes256GcmCryption::try_new_with_default_key().unwrap();
+                    let mut cipher = proxy_core::crypto::configured_cryption().unwrap();
                     let header: ProxyHeader =
                         serde_json::from_slice(cipher.decrypt_with_tag(&mut header).unwrap())
                             .unwrap();

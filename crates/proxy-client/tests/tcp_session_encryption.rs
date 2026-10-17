@@ -61,11 +61,9 @@ impl Drop for TestCache {
 async fn default_tcp_hides_tls_and_http_from_a_stream_filter_with_a_legacy_peer() {
     set_wire_protocol(WireProtocol::Legacy);
     tokio::time::timeout(Duration::from_secs(20), async {
-        for force_codec in [false, true] {
-            for keyword_route in [false, true] {
-                for frontend in [Frontend::Connect, Frontend::Socks, Frontend::Http] {
-                    legacy_round_trip(frontend, force_codec, keyword_route).await;
-                }
+        for keyword_route in [false, true] {
+            for frontend in [Frontend::Connect, Frontend::Socks, Frontend::Http] {
+                legacy_round_trip(frontend, keyword_route).await;
             }
         }
     })
@@ -73,7 +71,7 @@ async fn default_tcp_hides_tls_and_http_from_a_stream_filter_with_a_legacy_peer(
     .expect("loopback compatibility exchange must complete without retry/fallback");
 }
 
-async fn legacy_round_trip(frontend: Frontend, force_codec: bool, keyword_route: bool) {
+async fn legacy_round_trip(frontend: Frontend, keyword_route: bool) {
     let cache = TestCache::new();
     let remote = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -82,7 +80,6 @@ async fn legacy_round_trip(frontend: Frontend, force_codec: bool, keyword_route:
         "127.0.0.1".into(),
         remote.local_addr().unwrap().port(),
         false,
-        vec![],
         Some(DEFAULT_SECRET_KEY.into()),
     );
     // The built-in rule resolves locally before any geo lookup or target DNS.
@@ -99,21 +96,12 @@ async fn legacy_round_trip(frontend: Frontend, force_codec: bool, keyword_route:
         enable_udp: false,
         cache_dir: Some(cache.0.clone()),
     });
-    if force_codec {
-        tracker.spawn(run_client_with_listener::<true>(
-            local,
-            cancel.clone(),
-            Some(tracker.clone()),
-            config,
-        ));
-    } else {
-        tracker.spawn(run_client_with_listener::<false>(
-            local,
-            cancel.clone(),
-            Some(tracker.clone()),
-            config,
-        ));
-    }
+    tracker.spawn(run_client_with_listener(
+        local,
+        cancel.clone(),
+        Some(tracker.clone()),
+        config,
+    ));
     let payload = match frontend {
         Frontend::Http => HTTP_REQUEST.to_vec(),
         _ => client_hello(HOST),
@@ -136,7 +124,7 @@ async fn legacy_round_trip(frontend: Frontend, force_codec: bool, keyword_route:
         client.shutdown().await.unwrap();
         let mut response = Vec::new();
         client.read_to_end(&mut response).await.unwrap();
-        assert_eq!(response, payload, "{frontend:?}, force_codec={force_codec}");
+        assert_eq!(response, payload, "{frontend:?}");
     };
     tokio::join!(peer, application);
     cancel.cancel();

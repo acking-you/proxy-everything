@@ -94,8 +94,8 @@ python3 scripts/macos/export-app-store.py \
 
 ```bash
 cargo test --workspace --features proxy-ffi/mac-app-store
-cargo clippy -p proxy-core -p proxy-client -p proxy-server -p proxy-tui -p proxy-ffi --all-targets --all-features --no-deps -- -D warnings
-cargo fmt -p proxy-core -p proxy-client -p proxy-server -p proxy-tui -p proxy-ffi -- --check
+cargo clippy -p proxy-crypto -p proxy-core -p proxy-client -p proxy-server -p proxy-tui -p proxy-ffi --all-targets --all-features --no-deps -- -D warnings
+cargo fmt -p proxy-crypto -p proxy-core -p proxy-client -p proxy-server -p proxy-tui -p proxy-ffi -- --check
 cargo test --manifest-path deps/tun2proxy/Cargo.toml
 cargo clippy --manifest-path deps/tun2proxy/Cargo.toml --all-targets --all-features -- -D warnings
 cargo fmt --manifest-path deps/tun2proxy/Cargo.toml -- --check

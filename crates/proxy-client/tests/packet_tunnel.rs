@@ -45,7 +45,7 @@ fn receive(tunnel: &PacketTunnelRuntime, accept: impl Fn(&SlicedPacket<'_>) -> b
 /// The real packet adapter, IP stack, SOCKS listener and server are exercised
 /// entirely on loopback. No OS tunnel, routes, DNS or public service is touched.
 #[test]
-fn provider_forwards_dns_tcp_and_udp_in_plain_and_encrypted_modes_and_stops() {
+fn provider_forwards_encrypted_dns_tcp_and_udp_and_stops() {
     packet_round_trips(false);
 }
 
@@ -153,15 +153,13 @@ fn packet_round_trips(with_echo: bool) {
         None,
     ));
 
-    for (encrypted, protocol, endpoint) in [
-        (false, proxy_core::secure_transport::WireProtocol::Legacy),
-        (true, proxy_core::secure_transport::WireProtocol::Legacy),
-        (true, proxy_core::secure_transport::WireProtocol::V3),
+    for (protocol, endpoint) in [
+        proxy_core::secure_transport::WireProtocol::Legacy,
+        proxy_core::secure_transport::WireProtocol::V3,
     ]
     .into_iter()
-    .flat_map(|(encrypted, protocol)| {
-        [server_addr, relay_address].map(move |endpoint| (encrypted, protocol, endpoint))
-    }) {
+    .flat_map(|protocol| [server_addr, relay_address].map(move |endpoint| (protocol, endpoint)))
+    {
         proxy_core::secure_transport::set_wire_protocol(protocol);
         let tunnel = PacketTunnelRuntime::start(
             PacketTunnelConfig {
@@ -175,10 +173,8 @@ fn packet_round_trips(with_echo: bool) {
                 tun_fake_ip: true,
                 tun_dns_server: proxy_client::client::tun::DEFAULT_TUN_DNS_SERVER,
                 reverse_geo: false,
-                need_codec_ips: None,
-                force_codec: encrypted,
             },
-            dir.0.join(if encrypted { "encrypted" } else { "plain" }),
+            dir.0.join(format!("{protocol:?}-{}", endpoint.port())),
             Runtime::new().unwrap(),
         )
         .unwrap();

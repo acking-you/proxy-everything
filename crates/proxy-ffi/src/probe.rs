@@ -9,13 +9,16 @@ use std::ffi::{CStr, CString, c_char, c_int};
 use std::ptr;
 use std::time::{Duration, Instant};
 
-use proxy_core::codec::AsyncReaderWriterRef;
+use proxy_core::codec::{
+    AsyncDecryptCodec, AsyncNormalCodec, AsyncReader, AsyncReaderWriterRef, AsyncWriter,
+};
 use proxy_core::diagnostics::{self, ConnectionTrace};
+use proxy_core::protocol::FrameWriter;
 use proxy_core::secure_transport::{ProxyStream, WireProtocol};
-use proxy_core::transport::{get_tcp_proxy_stream_with_protocol, tcp_session_key};
+use proxy_core::session::NativeSession;
 use proxy_core::util::error_report;
-use proxy_core::{Aes256GcmCryption, MyAsyncWriteExt};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
+use proxy_core::{Aes256GcmDecryptor, MyAsyncCodecReader, MyAsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::latency::DEFAULT_TIMEOUT_MS;
 use crate::types::NodeProbeResult;
@@ -279,21 +282,17 @@ async fn probe(
     port: u16,
     protocol: WireProtocol,
 ) -> Result<(String, String), ProbeError> {
-    // Match application TCP sessions even when the historical force-codec flag
-    // is false. V3 already encrypts the stream and skips the legacy data codec.
-    let msg_key = Some(tcp_session_key(None));
-
-    let stream = get_tcp_proxy_stream_with_protocol(
+    let (stream, msg_key) = NativeSession::connect_with_protocol(
         ECHO_HOST,
         ECHO_PORT,
         host,
         port,
-        msg_key.clone(),
-        "node probe",
+        proxy_core::ProxyTransport::Tcp,
         protocol,
     )
     .await
-    .map_err(|e| ProbeError::from_error(ProbeStage::Connect, &e))?;
+    .map_err(|e| ProbeError::from_error(ProbeStage::Connect, &e))?
+    .into_parts();
     let mut observed = ObservedProbeSocket {
         stream,
         outcome: "probe_cancelled",
@@ -306,12 +305,7 @@ async fn probe(
         wire_protocol = ?protocol,
         "node probe socket connected; proxy header written, awaiting response"
     );
-    let legacy_key = if observed.stream.is_secure() {
-        None
-    } else {
-        msg_key.as_deref()
-    };
-    let result = exchange_probe(&mut observed.stream, legacy_key).await;
+    let result = exchange_probe(&mut observed.stream, msg_key.as_deref()).await;
     observed.outcome = if result.is_ok() {
         "probe_succeeded"
     } else {
@@ -325,64 +319,54 @@ async fn exchange_probe<S: AsyncRead + AsyncWrite + Send + Unpin>(
     msg_key: Option<&str>,
 ) -> Result<(String, String), ProbeError> {
     diagnostics::phase("request_prepare");
-    let mut cryptor = msg_key
-        .map(|key| Aes256GcmCryption::try_new(key.as_bytes()))
-        .transpose()
-        .map_err(|e| ProbeError::new(ProbeStage::Request, e.to_string()))?;
-    let mut request = ECHO_REQUEST.as_bytes().to_vec();
-    if let Some(cryptor) = cryptor.as_mut() {
-        let tag = cryptor
-            .encrypt(&mut request)
-            .map_err(|e| ProbeError::new(ProbeStage::Request, e.to_string()))?;
-        request.extend_from_slice(tag.as_ref());
-        let len = request.len() as u32;
-        let mut framed = proxy_core::protocol::get_check_sum(len)
-            .to_be_bytes()
-            .to_vec();
-        framed.extend_from_slice(&len.to_be_bytes());
-        framed.extend_from_slice(&request);
-        request = framed;
-    }
-    diagnostics::phase("request_write");
-    AsyncReaderWriterRef::new(&mut stream)
-        .write_all(&request)
-        .await
+    if let Some(key) = msg_key {
+        let mut writer = FrameWriter::new(
+            AsyncWriter::new(&mut stream),
+            Some(key),
+            MAX_ECHO_RESPONSE + 16,
+        )
         .map_err(|e| ProbeError::from_error(ProbeStage::Request, &e))?;
+        writer
+            .prepare()
+            .map_err(|e| ProbeError::from_error(ProbeStage::Request, &e))?
+            .extend_from_slice(ECHO_REQUEST.as_bytes());
+        diagnostics::phase("request_write");
+        writer
+            .send()
+            .await
+            .map_err(|e| ProbeError::from_error(ProbeStage::Request, &e))?;
+        let decryptor = Aes256GcmDecryptor::try_new(key.as_bytes())
+            .map_err(|e| ProbeError::new(ProbeStage::Response, e.to_string()))?;
+        read_probe_response(AsyncDecryptCodec::with_limit(
+            AsyncReader::new(stream),
+            decryptor,
+            MAX_ECHO_RESPONSE + 16,
+        ))
+        .await
+    } else {
+        // v3 already protects these bytes; do not double-encrypt the payload.
+        diagnostics::phase("request_write");
+        AsyncReaderWriterRef::new(&mut stream)
+            .write_all(ECHO_REQUEST.as_bytes())
+            .await
+            .map_err(|e| ProbeError::from_error(ProbeStage::Request, &e))?;
+        read_probe_response(AsyncNormalCodec::new(AsyncReader::new(stream))).await
+    }
+}
+
+async fn read_probe_response<R: MyAsyncCodecReader + Send + Unpin>(
+    mut reader: R,
+) -> Result<(String, String), ProbeError> {
     diagnostics::phase("response_wait");
     let mut response = Vec::with_capacity(512);
-    let mut chunk = [0_u8; 1024];
     loop {
         let first = response.is_empty();
-        if let Some(cryptor) = cryptor.as_mut() {
-            let mut frame = AsyncReaderWriterRef::new(&mut stream);
-            let length = proxy_core::get_data_size(&mut frame)
-                .await
-                .map_err(|e| ProbeError::from_error(ProbeStage::Response, &e))?
-                as usize;
-            if !(16..=MAX_ECHO_RESPONSE + 16).contains(&length) {
-                return Err(ProbeError::new(
-                    ProbeStage::Response,
-                    "invalid encrypted echo length",
-                ));
-            }
-            let mut data = vec![0; length];
-            stream
-                .read_exact(&mut data)
-                .await
-                .map_err(|e| ProbeError::from_error(ProbeStage::Response, &e))?;
-            let payload = cryptor
-                .decrypt_with_tag(&mut data)
-                .map_err(|e| ProbeError::new(ProbeStage::Response, e.to_string()))?;
-            response.extend_from_slice(payload);
-        } else {
-            let read = stream
-                .read(&mut chunk)
-                .await
-                .map_err(|e| ProbeError::from_error(ProbeStage::Response, &e))?;
-            if read == 0 {
-                break;
-            }
-            response.extend_from_slice(&chunk[..read]);
+        let received = reader
+            .codec_and_write(&mut AsyncWriter::new(&mut response))
+            .await
+            .map_err(|e| ProbeError::from_error(ProbeStage::Response, &e))?;
+        if received == 0 {
+            break;
         }
         if first && !response.is_empty() {
             diagnostics::phase("response_body");
@@ -498,7 +482,7 @@ mod tests {
             assert!(len < 4096);
             let mut header = vec![0; len as usize];
             stream.read_exact(&mut header).await.unwrap();
-            let mut cipher = super::Aes256GcmCryption::try_new_with_default_key().unwrap();
+            let mut cipher = proxy_core::crypto::configured_cryption().unwrap();
             let header: serde_json::Value =
                 serde_json::from_slice(cipher.decrypt_with_tag(&mut header).unwrap()).unwrap();
             assert_eq!(header["host"], super::ECHO_HOST);
@@ -507,7 +491,7 @@ mod tests {
             let key = header["key"]
                 .as_str()
                 .expect("probes follow the TCP encryption policy");
-            let mut cipher = super::Aes256GcmCryption::try_new(key.as_bytes()).unwrap();
+            let mut cipher = proxy_core::Aes256GcmCryption::try_new(key.as_bytes()).unwrap();
             let checksum = stream.read_u32().await.unwrap();
             let len = stream.read_u32().await.unwrap();
             assert_eq!(checksum, get_check_sum(len));
@@ -635,7 +619,7 @@ mod tests {
                 .unwrap();
             let mut request = vec![0; size as usize];
             stream.read_exact(&mut request).await.unwrap();
-            let mut crypto = super::Aes256GcmCryption::try_new(key.as_bytes()).unwrap();
+            let mut crypto = proxy_core::Aes256GcmCryption::try_new(key.as_bytes()).unwrap();
             assert_eq!(
                 crypto.decrypt_with_tag(&mut request).unwrap(),
                 super::ECHO_REQUEST.as_bytes()
