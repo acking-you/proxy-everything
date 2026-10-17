@@ -550,9 +550,42 @@ mod tests {
         assert!(error.is_connection_reset);
     }
 
-    #[tokio::test]
-    async fn cancelled_exchange_retains_the_actual_waiting_phase() {
-        let (client, mut server) = tokio::io::duplex(1024);
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_exchange_retains_phase_and_live_socket_observations() {
+        use std::sync::{Arc, Mutex};
+
+        use tokio::net::{TcpListener, TcpStream};
+
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let capture = Capture(output.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || capture.clone())
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (client, server) = tokio::join!(
+            TcpStream::connect(listener.local_addr().unwrap()),
+            listener.accept()
+        );
+        let client = client.unwrap();
+        let (mut server, _) = server.unwrap();
+        let local = client.local_addr().unwrap();
+        let peer = client.peer_addr().unwrap();
         let trace = proxy_core::diagnostics::ConnectionTrace::default();
         let consume = tokio::spawn(async move {
             use tokio::io::AsyncReadExt;
@@ -562,13 +595,27 @@ mod tests {
         });
         let outcome = tokio::time::timeout(
             std::time::Duration::from_millis(25),
-            trace.scope(super::exchange_probe(client, None)),
+            trace.scope(async move {
+                let mut observed = super::ObservedProbeSocket {
+                    stream: client.into(),
+                    outcome: "probe_cancelled",
+                };
+                super::exchange_probe(&mut observed.stream, None).await
+            }),
         )
         .await;
         assert!(outcome.is_err());
         assert_eq!(trace.phase(), "response_wait");
         consume.abort();
         let _ = consume.await;
+        let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        let endpoints = output
+            .lines()
+            .find(|line| line.contains("socket endpoints") && line.contains("probe_cancelled"))
+            .expect("timeout must log the live socket while its trace is installed");
+        assert!(endpoints.contains(&format!("connection_id={}", trace.id())));
+        assert!(endpoints.contains(&format!("local_addr=Some({local})")));
+        assert!(endpoints.contains(&format!("peer_addr=Some({peer})")));
     }
 
     #[tokio::test]

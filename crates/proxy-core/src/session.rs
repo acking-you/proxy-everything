@@ -38,8 +38,10 @@ impl NativeSession {
         transport: ProxyTransport,
         protocol: WireProtocol,
     ) -> Result<Self> {
-        let legacy_key =
-            (protocol == WireProtocol::Legacy).then(|| Cow::Owned(crate::config::gen_random_key()));
+        let legacy_key = match protocol {
+            WireProtocol::Legacy => Some(Cow::Owned(crate::config::gen_random_key())),
+            WireProtocol::V3 => None,
+        };
         let header = ProxyHeader {
             host: host.into(),
             port,

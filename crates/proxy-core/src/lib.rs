@@ -107,7 +107,8 @@ pub trait MyAsyncCodecReader {
     /// Reads and decodes the next chunk of data.
     fn codec(&mut self) -> impl std::future::Future<Output = Result<Self::Item<'_>>> + Send;
 
-    /// Reads, decodes, and writes to the given writer.
+    /// Reads, transforms, and writes a chunk; returns forwarded payload bytes.
+    /// Codec framing and authentication tags are excluded from this count.
     fn codec_and_write<W: MyAsyncWriteExt + Send + Unpin>(
         &mut self,
         writer: &mut W,

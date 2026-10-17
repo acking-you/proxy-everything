@@ -438,7 +438,7 @@ impl<T: MyAsyncReadExt + Send + Unpin, E: Encryptor + Send + Unpin> MyAsyncCodec
 
 /// Copies data from a codec reader to a writer until EOF.
 ///
-/// Returns the total number of bytes transferred.
+/// Returns forwarded payload bytes, excluding this codec's framing and tags.
 pub async fn copy<R: MyAsyncCodecReader + Send + Unpin, W: MyAsyncWriteExt + Send + Unpin>(
     reader: R,
     writer: W,
@@ -448,6 +448,7 @@ pub async fn copy<R: MyAsyncCodecReader + Send + Unpin, W: MyAsyncWriteExt + Sen
 
 /// One transfer loop for client and server. The no-op observer compiles away;
 /// metrics callers can observe progress without a second implementation.
+/// The observer receives cumulative payload bytes, not physical wire bytes.
 pub async fn copy_with_observer<
     R: MyAsyncCodecReader + Send + Unpin,
     W: MyAsyncWriteExt + Send + Unpin,
