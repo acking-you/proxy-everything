@@ -504,6 +504,7 @@ async fn main() -> Result<()> {
         upstream_proxy: upstream_proxy.clone(),
         tun,
         force_proxy: None,
+        process_bypass: None,
     };
     let env_listen_host = std::env::var("LISTEN_HOST").ok();
     let listen_host = cli

@@ -79,7 +79,7 @@ pub fn phase(name: &'static str) {
     });
 }
 
-pub(crate) fn tcp_connect_finished(
+pub fn tcp_connect_finished(
     address: SocketAddr,
     elapsed: Duration,
     result: &std::io::Result<TcpStream>,

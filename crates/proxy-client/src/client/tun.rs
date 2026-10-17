@@ -18,9 +18,10 @@ use std::os::fd::{IntoRawFd, OwnedFd};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
-use tun2proxy::{ArgDns, ArgProxy, ArgUdpStrategy, Args, ProcessBypass};
+use tun2proxy::{ArgDns, ArgProxy, ArgUdpStrategy, Args};
 pub use tun2proxy::{
-    NetworkTeardownError as TunNetworkTeardownError, VirtualDnsState as TunVirtualDnsState,
+    NetworkTeardownError as TunNetworkTeardownError, ProcessBypass,
+    VirtualDnsState as TunVirtualDnsState,
 };
 
 // Desktop browsers and Android applications can create hundreds of concurrent
@@ -28,7 +29,7 @@ pub use tun2proxy::{
 // giving the embedded client enough headroom for a full-device workload.
 const EMBEDDED_TUN_MAX_SESSIONS: usize = 1024;
 
-pub const DEFAULT_TUN_DNS_SERVER: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8));
+pub const DEFAULT_TUN_DNS_SERVER: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(223, 5, 5, 5));
 
 pub fn default_dns_server() -> IpAddr {
     DEFAULT_TUN_DNS_SERVER
@@ -101,6 +102,7 @@ pub type BypassSink = std::sync::Arc<dyn Fn(Vec<String>) + Send + Sync>;
 #[derive(Clone)]
 pub struct TunBypassController {
     processes: ProcessBypass,
+    user_processes: ProcessBypass,
     self_process: String,
     /// Forwards each update to an out-of-process TUN session, when there is one.
     ///
@@ -134,6 +136,7 @@ impl TunBypassController {
         let self_process = current_process_name()?;
         let controller = Self {
             processes: ProcessBypass::default(),
+            user_processes: ProcessBypass::default(),
             self_process,
             #[cfg(target_os = "macos")]
             sink: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -166,6 +169,7 @@ impl TunBypassController {
     /// cannot be removed by CLI, FFI, or UI callers.
     pub fn set_user_processes(&self, user_processes: impl IntoIterator<Item = String>) {
         let mut effective = user_processes.into_iter().collect::<Vec<_>>();
+        self.user_processes.set_names(effective.iter().cloned());
         effective.push(self.self_process.clone());
         self.processes.set_names(effective);
         let names = self.processes.names();
@@ -199,6 +203,11 @@ impl TunBypassController {
     pub(crate) fn process_bypass(&self) -> ProcessBypass {
         self.processes.clone()
     }
+
+    /// Shared explicit rules for local HTTP/SOCKS clients, without the loop guard.
+    pub fn user_process_bypass(&self) -> ProcessBypass {
+        self.user_processes.clone()
+    }
 }
 
 /// Settings for routing local device traffic through the client SOCKS5 port.
@@ -211,7 +220,7 @@ pub struct TunConfig {
     pub virtual_dns_state: TunVirtualDnsState,
     /// Allocate synthetic DNS addresses only when explicitly enabled.
     pub fake_ip: bool,
-    /// Resolver for the TUN DNS portal, reached through the remote proxy.
+    /// Extra resolver for the desktop physical DNS portal; mobile uses TCP proxy DNS.
     pub dns_server: IpAddr,
     pub ipv6_enabled: bool,
     pub mtu: u16,
@@ -260,7 +269,7 @@ impl TunConfig {
         self
     }
 
-    /// Use Fake-IP DNS instead of real answers resolved over the proxy's TCP path.
+    /// Use Fake-IP DNS instead of real answers from the platform's DNS path.
     pub fn with_fake_ip(mut self, enabled: bool) -> Self {
         self.fake_ip = enabled;
         self
@@ -270,7 +279,15 @@ impl TunConfig {
         if self.fake_ip {
             ArgDns::Virtual
         } else {
-            ArgDns::OverTcp
+            if cfg!(any(
+                target_os = "windows",
+                target_os = "linux",
+                target_os = "macos"
+            )) {
+                ArgDns::Physical
+            } else {
+                ArgDns::OverTcp
+            }
         }
     }
 
@@ -731,8 +748,8 @@ async fn run_with_ready_inner(
         // Android's VpnService already owns addresses, routes, DNS, and the
         // per-application policy. Desktop platforms remain managed here.
         setup: !platform_owned_tun,
-        // Real DNS answers still travel through the proxy, even when ordinary
-        // UDP is disabled. Fake-IP allocation is an explicit opt-in.
+        // Desktop DNS uses physical egress; platform VPNs keep protected proxy
+        // DNS. Both work with ordinary UDP disabled. Fake-IP is opt-in.
         dns: config.dns_mode(),
         dns_addr: config.dns_server,
         udp_strategy: tun_udp_strategy(config.udp_enabled, config.udp_direct_fallback),
@@ -930,9 +947,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tun_dns_defaults_to_proxied_real_answers_and_fake_ip_is_opt_in() {
+    fn tun_dns_uses_physical_resolvers_on_desktop_and_fake_ip_is_opt_in() {
         let config = TunConfig::new(Vec::<String>::new()).unwrap();
-        assert_eq!(config.dns_mode(), ArgDns::OverTcp);
+        let mode = if cfg!(any(
+            target_os = "windows",
+            target_os = "linux",
+            target_os = "macos"
+        )) {
+            ArgDns::Physical
+        } else {
+            ArgDns::OverTcp
+        };
+        assert_eq!(config.dns_mode(), mode);
         assert_eq!(config.with_fake_ip(true).dns_mode(), ArgDns::Virtual);
     }
 

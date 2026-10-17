@@ -3,6 +3,7 @@
 //! This module provides a C-compatible interface for external applications to use the proxy client.
 //! It reuses the existing client module logic.
 
+mod disk_log;
 mod groups;
 mod handle;
 mod latency;

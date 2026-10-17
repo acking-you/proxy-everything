@@ -24,6 +24,8 @@ use super::{DatagramSnafu, Forwarder, Result, TransportSnafu};
 const UDP_ASSOCIATION_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 enum UpstreamReader {
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    Direct(super::process_bypass::UdpReader),
     Proxy(Box<DatagramTunnelReader<AsyncReader<ReadHalf<ProxyStream>>>>),
     Socks5(DatagramRelayReader),
 }
@@ -31,6 +33,8 @@ enum UpstreamReader {
 impl UpstreamReader {
     async fn recv(&mut self) -> std::result::Result<std::borrow::Cow<'_, [u8]>, ProxyError> {
         match self {
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            Self::Direct(reader) => reader.recv().await.map(std::borrow::Cow::Owned),
             Self::Proxy(reader) => reader.recv_ref().await.map(std::borrow::Cow::Borrowed),
             Self::Socks5(reader) => reader.recv().await.map(std::borrow::Cow::Owned),
         }
@@ -38,6 +42,8 @@ impl UpstreamReader {
 }
 
 enum UpstreamWriter {
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    Direct(super::process_bypass::UdpWriter),
     Proxy(Box<DatagramTunnelWriter<AsyncWriter<WriteHalf<ProxyStream>>>>),
     Socks5(DatagramRelayWriter),
 }
@@ -45,6 +51,8 @@ enum UpstreamWriter {
 impl UpstreamWriter {
     async fn send(&mut self, packet: &[u8]) -> std::result::Result<(), ProxyError> {
         match self {
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            Self::Direct(writer) => writer.send(packet).await,
             Self::Proxy(writer) => writer.send(packet).await,
             Self::Socks5(writer) => writer.send(packet).await,
         }
@@ -64,10 +72,12 @@ pub struct UdpAssociation {
 }
 
 impl UdpAssociation {
-    pub async fn bind(
+    pub(super) async fn bind(
         control_stream: TcpStream,
         requested_client: DatagramAddress,
         upstream_proxy: Option<&ExternalProxyTarget>,
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+        direct_interface: Option<&super::process_bypass::DirectRoute>,
     ) -> Result<(Self, SocketAddr)> {
         let peer_addr = control_stream
             .peer_addr()
@@ -106,8 +116,33 @@ impl UdpAssociation {
         // A UDP association remains pinned to the endpoint generation active
         // when its TCP control connection was accepted.
         let server_endpoint = runtime::server_endpoint();
-        let (upstream_reader, upstream_writer, upstream_guard) = if let Some(proxy) = upstream_proxy
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+        let direct = match direct_interface {
+            Some(iface) => Some(
+                super::process_bypass::udp_relay(iface)
+                    .await
+                    .context(DatagramSnafu)?,
+            ),
+            None => None,
+        };
+        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+        let direct: Option<(UpstreamReader, UpstreamWriter)> = None;
+        let (upstream_reader, upstream_writer, upstream_guard) = if let Some((reader, writer)) =
+            direct
         {
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            {
+                (
+                    UpstreamReader::Direct(reader),
+                    UpstreamWriter::Direct(writer),
+                    None,
+                )
+            }
+            #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+            {
+                (reader, writer, None)
+            }
+        } else if let Some(proxy) = upstream_proxy {
             let relay = create_socks5_datagram_relay(proxy)
                 .await
                 .context(DatagramSnafu)?;
@@ -200,14 +235,18 @@ impl UdpAssociation {
             )
         };
 
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+        let direct = matches!(&upstream_reader, UpstreamReader::Direct(_));
+        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+        let direct = false;
         tracing::info!(
             tcp_peer = %peer_addr,
             requested_client = ?requested_client,
             local_udp_relay = %relay_addr,
-            upstream = %upstream_proxy
+            upstream = %if direct { "physical-interface".to_string() } else { upstream_proxy
                 .map(ExternalProxyTarget::display_url)
-                .unwrap_or_else(|| format!("proxy-server://{}:{}", server_endpoint.host, server_endpoint.port)),
-            native_encrypted = upstream_proxy.is_none(),
+                .unwrap_or_else(|| format!("proxy-server://{}:{}", server_endpoint.host, server_endpoint.port)) },
+            native_encrypted = !direct && upstream_proxy.is_none(),
             "SOCKS5 UDP association initialized"
         );
 

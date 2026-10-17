@@ -21,8 +21,8 @@ Without `--set-system-proxy`, manually configure system proxy to `127.0.0.1:<loc
 | `-m, --msg-key` | Enable random message key |
 | `--udp <true\|false>` | Enable SOCKS5 UDP ASSOCIATE (default: `true`) |
 | `--tun` | Capture device traffic with a local TUN interface |
-| `--tun-fake-ip true` | Opt into virtual DNS; default is real DNS answers through the proxy |
-| `--tun-dns-server <IP>` | Resolver for the TUN DNS portal (default: `8.8.8.8`), reached from the proxy server |
+| `--tun-fake-ip true` | Opt into virtual DNS; desktop defaults to real answers over the physical interface |
+| `--tun-dns-server <IP>` | Additional desktop physical DNS fallback; platform VPN proxy resolver (default: `223.5.5.5`) |
 | `--tun-udp-direct-fallback <true\|false>` | Send UDP directly when proxy UDP is off; `false` blocks it (default: `true`) |
 | `--tun-bypass-process <name>` | Bypass TUN for an executable name (repeatable) |
 | `--tun-list-processes` | List running Windows executable names and exit |
@@ -51,8 +51,9 @@ Operational details:
   cannot interpret the new `udp_associate` transport header. If the remote end
   closes before the readiness byte, the client now reports this as a likely
   server-version mismatch instead of the unhelpful `unexpected end of file`.
-- UDP always uses the configured remote proxy server. TCP keyword/GeoIP split
-  routing is not applied per UDP datagram.
+- UDP uses the configured remote proxy server unless the local calling process
+  is explicitly excluded. TCP keyword/GeoIP split routing is not applied per
+  UDP datagram.
 - `--msg-key` enables AES-256-GCM authentication and encryption per UDP frame.
 - `socks5://` and `socks5h://` upstream proxies support UDP ASSOCIATE when the
   upstream server implements it. `socks5://` resolves domain targets locally;
@@ -89,9 +90,17 @@ capture policy by application package name.
 The local port is a protocol-multiplexed HTTP/SOCKS5 listener, but tun2proxy
 deliberately uses its SOCKS5 endpoint because SOCKS5 preserves both TCP and UDP
 semantics. A successful local listener bind is therefore a prerequisite for
-starting TUN. By default, captured DNS queries (UDP or TCP on port 53) are sent
-over TCP through the proxy and return real addresses. This also works when
-ordinary UDP forwarding is disabled. Fake-IP is optional: enable **Fake-IP DNS**
+starting TUN. Desktop TUN resolves captured DNS queries (UDP or TCP on port 53)
+through sockets bound to the physical interface, returning real addresses. The
+ordered resolvers are AliDNS `223.5.5.5`, Tencent DNSPod `119.29.29.29`, AliDNS
+`223.6.6.6`, then the physical adapter's DNS and the configured fallback. UDP
+retries and TCP fallback precede moving to the next resolver; a valid NXDOMAIN
+is final. This also works when ordinary UDP forwarding is disabled. Windows'
+shared DNS service hides the original application, so the desktop DNS portal
+and excluded processes use the same physical resolver path, avoiding a shared
+cache populated with CDN addresses selected for the proxy exit. Android, iOS
+and the macOS Network Extension keep their platform-managed proxy DNS path.
+Fake-IP is optional: enable **Fake-IP DNS**
 in the GUI configuration or pass `--tun-fake-ip true` to the CLI to allocate
 virtual addresses and forward the original domain. Missing settings in older
 configurations default to disabled. Changing this setting requires stopping and
@@ -100,16 +109,14 @@ its DNS portal at `172.19.0.2`, outside the
 `198.18.0.0/15` fake-IP pool, so its opportunistic private-DNS probe cannot
 collide with an allocated application hostname.
 
-Set **TUN DNS resolver IP** in the GUI or `--tun-dns-server` in the CLI to use a
-private or enterprise resolver instead of the displayed `8.8.8.8` default. The
-resolver must accept DNS over TCP on port 53 and be reachable from the remote
-proxy server; the client does not silently select the host's physical DNS.
-This setting supplies the resolver behind private TUN DNS portals; explicitly
-addressed public resolvers keep their destination. Restart the proxy connection
-after changing it. TCP DNS CONNECT requests always use the configured upstream,
-even under reverse-geo or direct-cache rules; non-DNS destinations still follow
-auto-proxy policy. IPv4-only TUN sessions remove AAAA records from both UDP and
-TCP DNS replies, including fragmented TCP replies.
+**TUN DNS resolver IP** / `--tun-dns-server` defaults to `223.5.5.5`; saved values
+are preserved. On desktop it is an additional fallback, not an override of the
+ordered public resolvers; split-horizon enterprise DNS is not provided by this
+policy. In platform-managed VPNs it remains the resolver behind the private
+DNS portal, reached through the proxy. Restart the proxy connection after
+changing it. IPv4-only TUN sessions remove AAAA records from UDP and TCP replies.
+Large upstream answers set DNS truncation when they exceed the client's UDP
+limit, allowing that client to retry over TCP.
 
 Native embedders can call the additive `proxy_set_tun_dns_server` before startup;
 it accepts a literal IPv4/IPv6 address (null resets the default), rejects invalid
@@ -177,6 +184,18 @@ bypasses its live child-process tree. The matcher uses the ToolHelp process
 snapshot, which remains available when a protected game process rejects direct
 process-handle access. If the application already cached a virtual-DNS address,
 the direct route restores the real destination through the physical interface.
+Explicit child executable selections are retained when a parent is selected
+or disappears. The mixed checkbox indicates inherited bypass; checking that
+child explicitly keeps it excluded after the launcher exits. Rules lost by an
+older version cannot be inferred: add the desired executable again once.
+
+The same explicit rules apply to local HTTP, CONNECT and SOCKS clients, including
+applications using the Windows system proxy. Their TCP and UDP sockets and
+hostname lookups bind to the physical interface; loopback destinations stay on
+loopback. This does not edit the Windows system-proxy bypass list. Remote LAN
+clients are not attributed to local processes, and this proxy's own PID is
+excluded before ancestor matching so TUN's internal SOCKS connections retain
+their original routing decision. Excluded UDP works even when proxy UDP is off.
 User-selected bypasses apply to new TCP or UDP sessions. On Windows and macOS,
 Apply evaluates existing sessions against the executable and ancestor identities
 recorded when each session began. Adding an unrelated application leaves existing
@@ -317,8 +336,8 @@ does not control multicast egress. Without the multicast-specific binding, an
 SSDP packet such as `239.255.255.250:1900` can return through Wintun, create a
 new proxy-ui UDP socket, and amplify into a self-sustaining relay loop.
 
-TUN TCP continues to work with `--udp false`. DNS still uses the proxy’s TCP
-path (or the virtual resolver when Fake-IP is enabled), while other captured UDP
+TUN TCP continues to work with `--udp false`. DNS still uses the platform path
+described above (or the virtual resolver when Fake-IP is enabled), while other captured UDP
 is relayed directly instead
 of being sent to the local SOCKS5 listener. This matches the practical fallback
 used when a selected outbound cannot carry UDP, but it means non-DNS UDP
@@ -351,14 +370,25 @@ explicitly and select either the default direct fallback or strict blocking.
 
 ### Desktop log safeguards
 
-The GUI requests native logs at `INFO` by default. Selecting a more verbose
-level changes the native callback threshold, but burst delivery remains capped
+The GUI requests native logs at `INFO` by default. Selecting WARN or ERROR only
+filters the view; disk diagnostics retain INFO. Selecting a more verbose
+level lowers the native callback threshold, but burst delivery remains capped
 and reports how many low-priority records were omitted. The in-memory viewer is
 an O(1) 1,000-entry queue and refreshes at most ten times per second. Disk
 logging batches writes, bounds its pending queue, caps each hourly file at 64
 MiB, and retains at most 512 MiB across hourly files. These limits keep packet
 or connection storms from turning diagnostic work into forwarding latency or
 unbounded memory growth.
+
+Native FFI logs also go to `logs/proxy-native-*.log` in the existing application
+support directory, before UI filtering or callback throttling. This independent
+writer preserves complete request destinations and error chains, uses an 8 MiB
+bounded queue, and rotates at 64 MiB with at most eight files of its own. Queue
+overflow and disk failures are reported rather than silently truncating records.
+UDP relay lifecycle logs include the selected interface, socket endpoints,
+datagram counts and close reason. Receiving a large UDP reply now produces IP
+fragments of one datagram, rather than splitting it into unrelated UDP messages;
+empty UDP payloads are data, not stream EOF.
 
 ---
 

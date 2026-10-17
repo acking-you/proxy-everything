@@ -11,8 +11,7 @@ use tokio::io::AsyncWriteExt;
 
 use super::{
     ForwardContext, ForwarderProvider, HeaderContext, HttpProxySnafu, ProxyContext,
-    ServerConnection, TcpForwardImpl, connect_native, get_tcp_stream, resolve_server_connection,
-    split_and_wrap,
+    ServerConnection, TcpForwardImpl, connect_native, get_tcp_stream, split_and_wrap,
 };
 
 #[derive(Debug, Snafu)]
@@ -251,6 +250,20 @@ impl HttpProxierProvider {
     ) -> super::Result<(ProxyStream, bool, Option<Cow<'static, str>>)> {
         // if we don't have ssl,only use proxy when host is part of `PROXY_KEYWORDS`
         if !self.has_ssl {
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            if context.direct_interface.is_some() {
+                let mut connection = context.connect(&self.host, self.port).await?;
+                connection
+                    .stream
+                    .write_all(context.buffer)
+                    .await
+                    .with_context(|_| IoSnafu {
+                        uri: Some(self.get_uri()),
+                        detail: "write process-bypass HTTP request",
+                    })
+                    .context(HttpProxySnafu)?;
+                return Ok((connection.stream, false, None));
+            }
             // Compiled-in direct hosts win over the upstream proxy and over
             // `force_proxy`; see `proxy_core::config::FORCED_DIRECT_HOSTS`.
             if context.honor_forced_direct
@@ -378,16 +391,7 @@ impl HttpProxierProvider {
                 stream,
                 need_proxy,
                 msg_key,
-            } = match resolve_server_connection(
-                self.host.as_str(),
-                self.port,
-                #[cfg(feature = "auto-proxy")]
-                context.sender,
-                context.upstream_proxy,
-                context.honor_forced_direct,
-            )
-            .await
-            {
+            } = match context.connect(self.host.as_str(), self.port).await {
                 Ok(connection) => connection,
                 Err(error) => {
                     let _ = context.stream.write_all(

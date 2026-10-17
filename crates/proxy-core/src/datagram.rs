@@ -319,13 +319,29 @@ impl DatagramRelay {
 /// Create a relay that sends UDP datagrams directly from this process.
 pub async fn create_direct_datagram_relay() -> crate::Result<DatagramRelay> {
     let sockets = UdpSocketSet::bind().await?;
+    Ok(direct_datagram_relay(sockets))
+}
+
+/// Reuse the direct relay's source validation and framing with sockets bound
+/// by the platform owner (for example to a physical interface under TUN).
+pub fn create_direct_datagram_relay_with_sockets(
+    v4: UdpSocket,
+    v6: Option<UdpSocket>,
+) -> DatagramRelay {
+    direct_datagram_relay(UdpSocketSet {
+        v4: Arc::new(v4),
+        v6: v6.map(Arc::new),
+    })
+}
+
+fn direct_datagram_relay(sockets: UdpSocketSet) -> DatagramRelay {
     tracing::info!(
         ipv4_socket = ?sockets.v4.local_addr().ok(),
         ipv6_socket = ?sockets.v6.as_ref().and_then(|socket| socket.local_addr().ok()),
         "direct UDP relay sockets initialized"
     );
     let peers = Arc::new(DashMap::new());
-    Ok(DatagramRelay {
+    DatagramRelay {
         reader: DatagramRelayReader::Direct(DirectDatagramReader {
             sockets: sockets.clone(),
             peers: peers.clone(),
@@ -334,7 +350,7 @@ pub async fn create_direct_datagram_relay() -> crate::Result<DatagramRelay> {
         }),
         writer: DatagramRelayWriter::Direct(DirectDatagramWriter { sockets, peers }),
         _control_stream: None,
-    })
+    }
 }
 
 /// Create an RFC 1928 UDP association through an external SOCKS5 proxy.
@@ -593,9 +609,11 @@ impl DirectDatagramWriter {
             if !self.peers.contains_key(&destination) && self.peers.len() >= MAX_DIRECT_UDP_PEERS {
                 return protocol_error("UDP association exceeded its destination limit");
             }
+            // Authorize before yielding to send_to: a fast reply can reach the
+            // reader before this task resumes after a successful send.
+            self.peers.insert(destination, ());
             match socket.send_to(packet.payload, destination).await {
                 Ok(_) => {
-                    self.peers.insert(destination, ());
                     tracing::debug!(
                         direction = "tunnel_to_remote",
                         remote = %destination,
