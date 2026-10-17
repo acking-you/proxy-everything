@@ -30,7 +30,7 @@ pub struct ProxyConfig {
     // Stable application cache directory; recommended on every platform.
     pub cache_dir: *const c_char,
     pub need_codec_ips: *const c_char, // comma-separated IPs (default: null = empty list)
-    pub force_codec: c_int,            // default: 0 = only specified IPs use codec
+    pub force_codec: c_int,            // additionally encode UDP/ICMP; native TCP always encoded
     pub set_system_proxy: c_int,       // desktop only: 0 = disabled, 1 = set system proxy
 }
 

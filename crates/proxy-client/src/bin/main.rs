@@ -42,10 +42,10 @@ struct Cli {
     /// [optional] Keywords-set for identify proxy
     #[arg(long, value_name = "PROXY_KEYWORDS")]
     proxy_keywords: Option<String>,
-    /// [optional] Keywords-set for identify proxy
+    /// [optional] Legacy codec-IP setting; native TCP sessions always use encryption
     #[arg(long, value_name = "NEED_CODEC_IP")]
     need_codec_ip: Option<String>,
-    /// [optional] Enable random key for sending message, default is false
+    /// [optional] Also encrypt UDP/ICMP tunnels; native TCP sessions are always encrypted
     #[arg(short, long, value_name = "MSG_KEY")]
     msg_key: bool,
     /// [optional] Reverse geo-proxy logic: CN sites use proxy, others direct

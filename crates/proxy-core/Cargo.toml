@@ -82,6 +82,14 @@ tokio = { workspace = true, features = [
 # Keep the latest compatible bindings until nix restricts those APIs to macOS.
 libc = "=0.2.189"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_System_IO",
+] }
+
 [features]
 # Store builds never disclose lookup targets or download a GeoIP database.
 no-external-geo = []

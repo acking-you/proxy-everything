@@ -19,6 +19,7 @@ pub mod config;
 pub mod control;
 pub mod crypto;
 pub mod datagram;
+pub mod diagnostics;
 pub mod error;
 pub mod geo;
 pub mod metrics;

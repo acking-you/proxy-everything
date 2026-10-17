@@ -47,7 +47,9 @@ tun_bypass_processes = []
 # [Optional] Auto set system proxy on start (disabled on exit)
 set_system_proxy = false
 
-# [Optional] Enable random message key
+# Native proxy TCP sessions always use a random session key, including TLS.
+# [Optional] Also encrypt UDP and ICMP tunnels (does not affect direct traffic
+# or external HTTP/SOCKS upstreams).
 # msg_key = false
 
 # ============================================================================

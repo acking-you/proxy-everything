@@ -411,7 +411,7 @@ pub async fn resolve_server_connection(
                 });
             }
             ProxyStatus::NeedSpecialProxy(proxy_server) => {
-                let msg_key = change_msg_key(proxy_server.as_str(), msg_key);
+                let msg_key = Some(proxy_core::transport::tcp_session_key(msg_key));
                 return Ok(ServerConnection {
                     stream: get_tcp_proxy_stream(
                         host,
@@ -430,7 +430,7 @@ pub async fn resolve_server_connection(
     }
 
     // Default: use normal proxy
-    let msg_key = change_msg_key(server_endpoint.host.as_str(), msg_key);
+    let msg_key = Some(proxy_core::transport::tcp_session_key(msg_key));
     Ok(ServerConnection {
         stream: get_tcp_proxy_stream(
             host,

@@ -11,7 +11,7 @@ use tokio::io::AsyncWriteExt;
 
 use super::{
     ForwardContext, ForwarderProvider, HeaderContext, HttpProxySnafu, ProxyContext,
-    ServerConnection, TcpForwardImpl, change_msg_key, get_tcp_proxy_stream, get_tcp_stream,
+    ServerConnection, TcpForwardImpl, get_tcp_proxy_stream, get_tcp_stream,
     resolve_server_connection, split_and_wrap,
 };
 
@@ -330,7 +330,7 @@ impl HttpProxierProvider {
             // concurrent node switch cannot mix address generations.
             let server_endpoint = runtime::server_endpoint();
             let (mut server_stream, need_proxy, msg_key) = if context.force_proxy {
-                let msg_key = change_msg_key(server_endpoint.host.as_str(), self.msg_key.clone());
+                let msg_key = Some(proxy_core::transport::tcp_session_key(self.msg_key.clone()));
                 (
                     get_tcp_proxy_stream(
                         self.host.as_str(),
@@ -355,7 +355,8 @@ impl HttpProxierProvider {
                             .proxy_server
                             .as_ref()
                             .unwrap_or(&server_endpoint.host);
-                        let msg_key = change_msg_key(server_ip.as_str(), self.msg_key.clone());
+                        let msg_key =
+                            Some(proxy_core::transport::tcp_session_key(self.msg_key.clone()));
                         (
                             get_tcp_proxy_stream(
                                 self.host.as_str(),

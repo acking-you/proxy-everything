@@ -89,6 +89,31 @@ impl From<TcpStream> for ProxyStream {
     }
 }
 impl ProxyStream {
+    /// The local endpoint selected by the operating system for the TCP socket.
+    pub fn local_addr(&self) -> io::Result<std::net::SocketAddr> {
+        match self {
+            Self::Plain { stream, .. } => stream.local_addr(),
+            Self::Secure(stream) => stream.inner.local_addr(),
+        }
+    }
+
+    /// The connected TCP peer, independently of the destination inside the proxy.
+    pub fn peer_addr(&self) -> io::Result<std::net::SocketAddr> {
+        match self {
+            Self::Plain { stream, .. } => stream.peer_addr(),
+            Self::Secure(stream) => stream.inner.peer_addr(),
+        }
+    }
+
+    /// Read-only endpoint, route and TCP statistics within a diagnostic scope.
+    pub fn record_diagnostics(&self, observation: &'static str) {
+        let socket = match self {
+            Self::Plain { stream, .. } => stream,
+            Self::Secure(stream) => &stream.inner,
+        };
+        crate::diagnostics::record_socket(observation, socket);
+    }
+
     pub fn is_secure(&self) -> bool {
         matches!(self, Self::Secure(_))
     }
@@ -534,6 +559,32 @@ mod tests {
 
     use super::*;
     const KEY: [u8; 32] = [7; 32];
+
+    #[tokio::test]
+    async fn proxy_socket_endpoints_survive_legacy_and_secure_wrapping() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        for secure in [false, true] {
+            let socket = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (peer, _) = listener.accept().await.unwrap();
+            let local = socket.local_addr().unwrap();
+            let stream = if secure {
+                ProxyStream::Secure(Box::new(connect_v3(socket, &KEY, false).unwrap()))
+            } else {
+                ProxyStream::legacy_with_prefix(socket, b"buffered".to_vec())
+            };
+            assert_eq!(stream.local_addr().unwrap(), local);
+            assert_eq!(stream.peer_addr().unwrap(), peer.local_addr().unwrap());
+            // Reading metadata must not send a handshake or consume a prefix.
+            assert_eq!(stream.is_secure(), secure);
+            let mut byte = [0];
+            assert_eq!(
+                peer.try_read(&mut byte).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+        }
+    }
     pub(super) fn hello(seed: u8) -> [u8; HELLO_LEN] {
         let mut hello = [seed; HELLO_LEN];
         hello[..4].copy_from_slice(&MAGIC);
