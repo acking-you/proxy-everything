@@ -9,6 +9,8 @@ async fn a_client_that_stalls_after_socks_greeting_still_times_out() {
         upstream_proxy: None,
         honor_forced_direct: false,
         enable_udp: false,
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+        process_matcher: None,
     }));
     client.write_all(&[5, 1, 0]).await.unwrap();
     let mut greeting = [0; 2];
@@ -50,6 +52,8 @@ async fn client_input_deadline_does_not_cancel_outbound_setup() {
     tokio::time::pause();
     let context = super::ProxyContext {
         handshake_deadline: tokio::time::Instant::now() + super::CLIENT_SETUP_TIMEOUT,
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+        direct_interface: None,
         buffer: b"",
         #[cfg(feature = "auto-proxy")]
         sender: None,
@@ -287,6 +291,7 @@ async fn start_client_for_test(upstream_proxy: ExternalProxyTarget) -> (String, 
             upstream_proxy: Some(upstream_proxy),
             tun: None,
             force_proxy: None,
+            process_bypass: None,
         }),
     ));
     (addr, token)

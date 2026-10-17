@@ -59,6 +59,7 @@ pub struct ProxyHandle {
     pub(crate) local_port: u16,
     pub(crate) http_client: Mutex<Option<reqwest::Client>>,
     tun_bypass: Arc<Mutex<Option<TunBypassController>>>,
+    local_process_bypass: proxy_client::client::tun::ProcessBypass,
     tun_lifecycle: Mutex<TunLifecycle>,
     tun_running: Arc<AtomicBool>,
     tun_generation: Arc<AtomicU64>,
@@ -141,6 +142,7 @@ pub extern "C" fn proxy_create() -> *mut ProxyHandle {
         local_port: 0,
         http_client: Mutex::new(None),
         tun_bypass: Arc::new(Mutex::new(None)),
+        local_process_bypass: proxy_client::client::tun::ProcessBypass::default(),
         tun_lifecycle: Mutex::new(TunLifecycle::default()),
         tun_running: Arc::new(AtomicBool::new(false)),
         tun_generation: Arc::new(AtomicU64::new(0)),
@@ -599,6 +601,12 @@ fn proxy_start_inner(
     };
 
     if let Some(cache_dir) = &cache_dir {
+        if let Err(error) = crate::disk_log::configure(&cache_dir.join("logs")) {
+            send_log(
+                4,
+                &format!("Failed to initialize native disk logging: {error}"),
+            );
+        }
         match handle
             .runtime
             .block_on(handle.tun_virtual_dns.enable_persistence_in(cache_dir))
@@ -640,6 +648,9 @@ fn proxy_start_inner(
         Ok(server) => *server,
         Err(_) => return ProxyResult::RuntimeError,
     };
+    handle
+        .local_process_bypass
+        .set_names(tun_bypass_processes.iter().cloned());
     let tun_config = if enable_tun {
         match TunConfig::new(tun_bypass_processes) {
             Ok(config) => Some(
@@ -676,6 +687,11 @@ fn proxy_start_inner(
         // destroy cannot wait for.
         tun: None,
         force_proxy: Some(Arc::clone(&handle.force_proxy)),
+        process_bypass: Some(proxy_client::client::ProcessBypassConfig {
+            processes: handle.local_process_bypass.clone(),
+            virtual_dns: handle.tun_virtual_dns.clone(),
+            dns_fallback: Some(dns_server),
+        }),
     };
 
     // Bind listener synchronously before reporting start success.
@@ -995,6 +1011,9 @@ fn start_configured_tun(
     config: TunConfig,
     ready_message: String,
 ) -> ProxyResult {
+    handle
+        .local_process_bypass
+        .set_names(config.bypass.user_process_bypass().names());
     // Desktop TUN keeps the user's auto-proxy setting. This process is always in
     // the TUN bypass list, so a direct socket it opens is relayed out through the
     // physical interface rather than looping back into this listener, and the
@@ -1505,6 +1524,8 @@ pub unsafe extern "C" fn proxy_stop(handle: *mut ProxyHandle) -> ProxyResult {
         handle.listener_task = None;
     }
 
+    crate::disk_log::flush();
+
     if handle.cancel_token.take().is_some() {
         handle.running.store(false, Ordering::SeqCst);
         handle.tun_running.store(false, Ordering::Release);
@@ -1566,10 +1587,10 @@ pub unsafe extern "C" fn proxy_set_tun_bypass_processes(
         Ok(tun_bypass) => tun_bypass,
         Err(_) => return ProxyResult::RuntimeError,
     };
-    let Some(controller) = tun_bypass.as_ref() else {
-        return ProxyResult::NotRunning;
-    };
-    controller.set_user_processes(processes);
+    if let Some(controller) = tun_bypass.as_ref() {
+        controller.set_user_processes(processes.iter().cloned());
+    }
+    handle.local_process_bypass.set_names(processes);
     clear_last_error(handle);
     ProxyResult::Ok
 }

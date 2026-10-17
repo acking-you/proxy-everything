@@ -8,7 +8,7 @@ use tokio::net::TcpStream;
 use super::udp::UdpAssociation;
 use super::{
     ForwardContext, Forwarder, ForwarderProvider, ServerConnection, SocksProxySnafu,
-    TcpForwardImpl, resolve_server_connection, split_and_wrap,
+    TcpForwardImpl, split_and_wrap,
 };
 
 #[derive(Debug, Snafu)]
@@ -161,16 +161,7 @@ impl ForwarderProvider for SocksProxierProvider {
                     stream: server_stream,
                     need_proxy,
                     msg_key,
-                } = match resolve_server_connection(
-                    host.as_str(),
-                    port,
-                    #[cfg(feature = "auto-proxy")]
-                    proxy_context.sender,
-                    proxy_context.upstream_proxy,
-                    proxy_context.honor_forced_direct,
-                )
-                .await
-                {
+                } = match proxy_context.connect(host.as_str(), port).await {
                     Ok(connection) => connection,
                     Err(error) => {
                         // General server failure (RFC 1928); never signal a
@@ -205,7 +196,11 @@ impl ForwarderProvider for SocksProxierProvider {
                     command = "UDP ASSOCIATE",
                     "received SOCKS5 proxy request"
                 );
-                if !proxy_context.enable_udp {
+                #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+                let direct = proxy_context.direct_interface.is_some();
+                #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+                let direct = false;
+                if !proxy_context.enable_udp && !direct {
                     tracing::warn!(
                         transport = "udp",
                         client_address = ?client_addr,
@@ -226,6 +221,8 @@ impl ForwarderProvider for SocksProxierProvider {
                     proxy_context.stream,
                     client_addr,
                     proxy_context.upstream_proxy,
+                    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+                    proxy_context.direct_interface,
                 )
                 .await?;
                 association.reply_success(relay_addr).await?;

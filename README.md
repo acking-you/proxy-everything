@@ -161,6 +161,12 @@ client executable in the process-bypass policy. Additional processes can bypass
 TUN with repeatable `--tun-bypass-process` options. Use `--tun-list-processes`
 to list currently running Windows executable names.
 
+Desktop DNS prefers AliDNS and Tencent DNSPod through the physical interface.
+Explicit process exclusions also apply to local HTTP/SOCKS clients using the
+system proxy; their hostname lookups and outbound sockets use the physical
+interface. See [DNS, exclusions and diagnostic logs](docs/client-usage.md#tun-mode)
+for resolver order, platform differences and upgrade behavior.
+
 Windows setup leaves every existing default route untouched and captures IPv4
 with two owned `/1` routes. Shutdown and hot switching cancel all managed TUN
 sessions before restoring only those exact routes and the previous DNS state;

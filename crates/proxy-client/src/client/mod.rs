@@ -16,6 +16,8 @@ pub mod macos_dns_restore;
 pub mod macos_tun;
 #[cfg(feature = "network-extension")]
 pub mod packet_tunnel;
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+mod process_bypass;
 pub mod socks;
 pub mod tun;
 mod udp;
@@ -70,6 +72,14 @@ impl Default for ClientConfig {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct ProcessBypassConfig {
+    pub processes: tun2proxy::ProcessBypass,
+    pub virtual_dns: tun::TunVirtualDnsState,
+    /// Custom resolver used after preferred and physical-adapter resolvers.
+    pub dns_fallback: Option<std::net::IpAddr>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct ClientRuntimeConfig {
     pub client: ClientConfig,
     pub upstream_proxy: Option<ExternalProxyTarget>,
@@ -80,6 +90,9 @@ pub struct ClientRuntimeConfig {
     /// connection uses the remote proxy so client-owned direct sockets cannot
     /// be captured and fed back into the listener.
     pub force_proxy: Option<Arc<AtomicBool>>,
+    /// User-selected process rules, shared with a separately managed TUN.
+    /// The mandatory self bypass is never a local-proxy direct rule.
+    pub process_bypass: Option<ProcessBypassConfig>,
 }
 
 impl From<ClientConfig> for ClientRuntimeConfig {
@@ -89,6 +102,7 @@ impl From<ClientConfig> for ClientRuntimeConfig {
             upstream_proxy: None,
             tun: None,
             force_proxy: None,
+            process_bypass: None,
         }
     }
 }
@@ -119,6 +133,8 @@ pub struct ProxyContext<'a> {
     honor_forced_direct: bool,
     /// Whether the local listener accepts SOCKS5 UDP ASSOCIATE requests.
     enable_udp: bool,
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    direct_interface: Option<&'a process_bypass::DirectRoute>,
     /// TODO: let this stream abstract
     stream: TcpStream,
 }
@@ -136,6 +152,34 @@ pub trait ForwarderProvider {
     ) -> impl std::future::Future<Output = Result<Self::Item>> + Send;
 }
 
+impl ProxyContext<'_> {
+    async fn connect(&self, host: &str, port: u16) -> Result<ServerConnection> {
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+        if let Some(iface) = self.direct_interface {
+            let stream = process_bypass::connect(host, port, iface)
+                .await
+                .context(IoSnafu {
+                    uri: Some(format!("{host}:{port}")),
+                    detail: "process-bypass direct connection",
+                })?;
+            return Ok(ServerConnection {
+                stream: stream.into(),
+                need_proxy: false,
+                msg_key: None,
+            });
+        }
+        resolve_server_connection(
+            host,
+            port,
+            #[cfg(feature = "auto-proxy")]
+            self.sender,
+            self.upstream_proxy,
+            self.honor_forced_direct,
+        )
+        .await
+    }
+}
+
 pub struct ClientProxyContext {
     stream: TcpStream,
     #[cfg(feature = "auto-proxy")]
@@ -144,6 +188,8 @@ pub struct ClientProxyContext {
     upstream_proxy: Option<ExternalProxyTarget>,
     honor_forced_direct: bool,
     enable_udp: bool,
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    process_matcher: Option<Arc<process_bypass::LocalPolicy>>,
 }
 
 async fn handle_proxy(
@@ -206,6 +252,24 @@ pub async fn handle_client(mut context: ClientProxyContext) -> Result<()> {
             detail: "Read First Header Error",
         })?;
     let header = header_buf.as_slice();
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    let policy = if let Some(matcher) = &context.process_matcher {
+        match (context.stream.peer_addr(), context.stream.local_addr()) {
+            (Ok(peer), Ok(local)) => matcher.matcher.match_tcp(peer, local).await,
+            _ => None,
+        }
+    } else {
+        None
+    };
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    let direct_interface = context.process_matcher.as_ref().and_then(|matcher| {
+        policy
+            .as_ref()
+            .is_some_and(tun2proxy::SessionPolicy::bypass)
+            .then(|| {
+                process_bypass::DirectRoute::new(matcher.virtual_dns.clone(), matcher.dns_fallback)
+            })
+    });
     let header_context = HeaderContext { header };
     let proxy_context = ProxyContext {
         handshake_deadline: deadline,
@@ -216,24 +280,39 @@ pub async fn handle_client(mut context: ClientProxyContext) -> Result<()> {
         upstream_proxy: context.upstream_proxy.as_ref(),
         honor_forced_direct: context.honor_forced_direct,
         enable_udp: context.enable_udp,
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+        direct_interface: direct_interface.as_ref(),
         stream: context.stream,
     };
 
-    if header.first() == Some(&5) {
-        handle_proxy(
-            proxy_context,
-            SocksProxierProvider::try_new(header_context)?,
-            permit,
-        )
-        .await
-    } else {
-        handle_proxy(
-            proxy_context,
-            HttpProxierProvider::try_new(header_context)?,
-            permit,
-        )
-        .await
+    let relay = async {
+        if header.first() == Some(&5) {
+            handle_proxy(
+                proxy_context,
+                SocksProxierProvider::try_new(header_context)?,
+                permit,
+            )
+            .await
+        } else {
+            handle_proxy(
+                proxy_context,
+                HttpProxierProvider::try_new(header_context)?,
+                permit,
+            )
+            .await
+        }
+    };
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    if let Some(policy) = policy {
+        return tokio::select! {
+            result = relay => result,
+            _ = policy.wait_for_routing_change() => {
+                tracing::info!("local proxy connection closed after process policy changed");
+                Ok(())
+            }
+        };
     }
+    relay.await
 }
 
 #[cfg(feature = "auto-proxy")]
@@ -293,6 +372,24 @@ pub async fn run_client_with_listener_runtime_config(
         .unwrap_or(true);
     let upstream_proxy = config.as_ref().and_then(|c| c.upstream_proxy.clone());
     let tun_config = config.as_ref().and_then(|c| c.tun.clone());
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    let process_matcher = config
+        .as_ref()
+        .and_then(|c| c.process_bypass.clone())
+        .or_else(|| {
+            tun_config.as_ref().map(|c| ProcessBypassConfig {
+                processes: c.bypass.user_process_bypass(),
+                virtual_dns: c.virtual_dns_state.clone(),
+                dns_fallback: Some(c.dns_server),
+            })
+        })
+        .map(|config| {
+            Arc::new(process_bypass::LocalPolicy {
+                matcher: tun2proxy::LocalProcessMatcher::new(config.processes),
+                virtual_dns: config.virtual_dns,
+                dns_fallback: config.dns_fallback.unwrap_or(tun::DEFAULT_TUN_DNS_SERVER),
+            })
+        });
     let force_proxy_controller = config.as_ref().and_then(|c| c.force_proxy.clone());
     let enable_udp = config.as_ref().map(|c| c.client.enable_udp).unwrap_or(true);
     let tun_active = tun_config.is_some();
@@ -407,6 +504,8 @@ pub async fn run_client_with_listener_runtime_config(
                     // See `proxy_core::config::FORCED_DIRECT_HOSTS`.
                     honor_forced_direct: !tun_owns_routes,
                     enable_udp,
+                    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+                    process_matcher: process_matcher.clone(),
                 });
                 let wrapped_task = async move {
                     tokio::select! {

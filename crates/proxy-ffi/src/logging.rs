@@ -79,6 +79,17 @@ impl CallbackRateLimiter {
 
 /// Internal function to send log to callback
 pub(crate) fn send_log(level: c_int, message: &str) {
+    if level >= i32::from(MIN_LOG_LEVEL.load(Ordering::Relaxed).min(2)) {
+        crate::disk_log::write(level, message);
+    }
+    send_callback(level, message);
+}
+
+/// Writer diagnostics bypass the file queue so disk failures cannot recurse.
+pub(crate) fn send_callback(level: c_int, message: &str) {
+    if level < MIN_LOG_LEVEL.load(Ordering::Relaxed) as c_int {
+        return;
+    }
     if LOG_CALLBACK.load(Ordering::Relaxed).is_null() {
         return;
     }
@@ -199,9 +210,7 @@ where
             tracing::Level::WARN => 3,
             tracing::Level::ERROR => 4,
         };
-        if level < MIN_LOG_LEVEL.load(Ordering::Relaxed) as c_int
-            || LOG_CALLBACK.load(Ordering::Relaxed).is_null()
-        {
+        if level < i32::from(MIN_LOG_LEVEL.load(Ordering::Relaxed).min(2)) {
             return;
         }
 

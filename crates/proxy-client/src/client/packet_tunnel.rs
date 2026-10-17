@@ -206,6 +206,7 @@ impl PacketTunnelRuntime {
             // enumeration or userspace interface binding is needed for direct
             // decisions made by the existing auto-proxy implementation.
             force_proxy: None,
+            process_bypass: None,
         };
         let (input, input_rx) = mpsc::channel(QUEUE_CAPACITY);
         let (output_tx, output) = mpsc::channel(QUEUE_CAPACITY);
