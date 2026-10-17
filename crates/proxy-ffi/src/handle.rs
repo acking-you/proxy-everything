@@ -834,10 +834,13 @@ fn local_listen_host(allow_lan: bool) -> &'static str {
 /// Atomically replace the remote proxy endpoint without rebinding the local
 /// HTTP/SOCKS5 listener.
 ///
-/// TUN must be stopped first because its operating-system route bypass was
-/// resolved from the previous endpoint. Callers can immediately start TUN
-/// again after this function returns; existing TUN relays are already drained
-/// by `proxy_stop_tun`, while the local listener remains available throughout.
+/// On Windows, a live TUN first confirms the new endpoint's physical bypass
+/// and TCP reachability. Only then is the endpoint published; failure leaves
+/// the previous endpoint and capture running. Other platforms require TUN to
+/// be stopped first so its route bypass can be refreshed.
+///
+/// This call can wait for DNS, routes and a reachability probe. Run it off the
+/// UI thread and serialize it with other lifecycle calls on this handle.
 ///
 /// # Safety
 /// - `handle` must be a valid pointer from `proxy_create`
@@ -860,6 +863,7 @@ pub unsafe extern "C" fn proxy_switch_upstream(
         );
         return ProxyResult::NotRunning;
     }
+    #[cfg(not(windows))]
     if handle.tun_running.load(Ordering::Acquire) {
         record_error(
             handle,
@@ -872,6 +876,45 @@ pub unsafe extern "C" fn proxy_switch_upstream(
         Ok(host) if !host.trim().is_empty() => host.trim().to_string(),
         _ => return ProxyResult::InvalidParam,
     };
+    #[cfg(windows)]
+    if handle.tun_running.load(Ordering::Acquire) {
+        let bypass = handle
+            .tun_bypass
+            .lock()
+            .ok()
+            .and_then(|bypass| bypass.clone());
+        let Some(bypass) = bypass else {
+            record_error(
+                handle,
+                "Active TUN has no upstream bypass controller; previous upstream retained",
+            );
+            return ProxyResult::RuntimeError;
+        };
+        let generation = handle.tun_generation.load(Ordering::Acquire);
+        if let Err(error) = handle.runtime.block_on(bypass.prepare_upstream(
+            &server_host,
+            server_port,
+            handle.udp_enabled.load(Ordering::Acquire),
+        )) {
+            record_error(
+                handle,
+                &format!(
+                    "Live upstream switch failed; previous upstream retained: {}",
+                    error_report(&error)
+                ),
+            );
+            return ProxyResult::RuntimeError;
+        }
+        if !handle.tun_running.load(Ordering::Acquire)
+            || handle.tun_generation.load(Ordering::Acquire) != generation
+        {
+            record_error(
+                handle,
+                "TUN session changed during upstream preparation; endpoint was not switched",
+            );
+            return ProxyResult::RuntimeError;
+        }
+    }
     let mut endpoint = match handle.remote_endpoint.lock() {
         Ok(endpoint) => endpoint,
         Err(_) => {
@@ -894,6 +937,7 @@ pub unsafe extern "C" fn proxy_switch_upstream(
         previous_port = previous.as_ref().map(|(_, port)| *port),
         remote_host = %server_host,
         remote_port = server_port,
+        tun_preserved = handle.tun_running.load(Ordering::Acquire),
         "proxy upstream switched without rebinding the local listener"
     );
     ProxyResult::Ok
@@ -2012,7 +2056,7 @@ mod tests {
     }
 
     #[test]
-    fn upstream_switch_requires_running_listener_and_stopped_tun() {
+    fn upstream_switch_requires_running_listener_and_confirmed_bypass() {
         let handle = proxy_create();
         assert!(!handle.is_null());
         let host = CString::new("new.example").unwrap();
@@ -2030,6 +2074,8 @@ mod tests {
             unsafe { proxy_switch_upstream(handle, host.as_ptr(), 2081) },
             ProxyResult::RuntimeError
         );
+        assert!(state.remote_endpoint.lock().unwrap().is_none());
+        assert!(state.tun_running.load(Ordering::Acquire));
 
         state.tun_running.store(false, Ordering::Release);
         assert_eq!(

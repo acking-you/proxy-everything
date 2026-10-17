@@ -104,6 +104,8 @@ pub struct TunBypassController {
     processes: ProcessBypass,
     user_processes: ProcessBypass,
     self_process: String,
+    #[cfg(windows)]
+    upstream_routes: tun2proxy::WindowsRouteBypass,
     /// Forwards each update to an out-of-process TUN session, when there is one.
     ///
     /// Shared across clones like `processes` is. The FFI keeps its own clone of
@@ -138,6 +140,8 @@ impl TunBypassController {
             processes: ProcessBypass::default(),
             user_processes: ProcessBypass::default(),
             self_process,
+            #[cfg(windows)]
+            upstream_routes: tun2proxy::WindowsRouteBypass::default(),
             #[cfg(target_os = "macos")]
             sink: std::sync::Arc::new(std::sync::Mutex::new(None)),
         };
@@ -207,6 +211,84 @@ impl TunBypassController {
     /// Shared explicit rules for local HTTP/SOCKS clients, without the loop guard.
     pub fn user_process_bypass(&self) -> ProcessBypass {
         self.user_processes.clone()
+    }
+
+    /// Prepare a live Windows node switch while the old upstream keeps serving
+    /// traffic. Use the same resolver/cache as relay connections, install all
+    /// its host routes first, then probe TCP without publishing the endpoint.
+    #[cfg(windows)]
+    pub async fn prepare_upstream(
+        &self,
+        host: &str,
+        port: u16,
+        udp_enabled: bool,
+    ) -> io::Result<()> {
+        let started = std::time::Instant::now();
+        tracing::info!(
+            host,
+            port,
+            phase = "resolve",
+            "preparing live TUN upstream switch"
+        );
+        let addresses = proxy_core::transport::resolve_host_addresses(host).await?;
+        tracing::info!(
+            host,
+            port,
+            phase = "bypass",
+            ?addresses,
+            "preparing live TUN upstream switch"
+        );
+        self.upstream_routes
+            .add_addresses(addresses.to_vec())
+            .await?;
+        if udp_enabled {
+            tracing::info!(
+                host,
+                port,
+                phase = "udp_preflight",
+                "preparing live TUN upstream switch"
+            );
+            tokio::time::timeout(
+                std::time::Duration::from_secs(12),
+                super::udp::connect_native_udp(host, port),
+            )
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "new upstream UDP readiness probe exceeded 12 seconds",
+                )
+            })?
+            .map_err(io::Error::other)?;
+            tracing::info!(
+                host,
+                port,
+                elapsed_ms = started.elapsed().as_millis(),
+                "live TUN upstream bypass and UDP readiness confirmed"
+            );
+            return Ok(());
+        }
+        tracing::info!(
+            host,
+            port,
+            phase = "connect",
+            "preparing live TUN upstream switch"
+        );
+        // This is a UI reachability probe, not the relay's TCP retry policy.
+        // Never publish a node whose probe failed or outlived this operation.
+        let stream = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            proxy_core::transport::connect_tcp_addresses(&addresses, port),
+        )
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "new upstream TCP reachability probe exceeded 5 seconds",
+            )
+        })??;
+        tracing::info!(host, port, local = ?stream.local_addr().ok(), peer = ?stream.peer_addr().ok(), elapsed_ms = started.elapsed().as_millis(), "live TUN upstream bypass and TCP reachability confirmed");
+        Ok(())
     }
 }
 
@@ -755,6 +837,8 @@ async fn run_with_ready_inner(
         max_sessions: EMBEDDED_TUN_MAX_SESSIONS,
         tcp_read_buffer_size: EMBEDDED_TUN_TCP_READ_BUFFER,
         bypass_process: config.bypass.effective_processes(),
+        #[cfg(windows)]
+        upstream_bypass: Some(config.bypass.upstream_routes.clone()),
         ..Args::default()
     };
 

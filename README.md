@@ -170,9 +170,11 @@ interface. See [DNS, exclusions and diagnostic logs](docs/client-usage.md#tun-mo
 for resolver order, platform differences and upgrade behavior.
 
 Windows setup leaves every existing default route untouched and captures IPv4
-with two owned `/1` routes. Shutdown and hot switching cancel all managed TUN
-sessions before restoring only those exact routes and the previous DNS state;
-the cleanup path never performs a broad deletion of `0.0.0.0/0`.
+with two owned `/1` routes. Windows node switching installs the new upstream's
+physical host routes before publishing its address, preserving the TUN adapter,
+DNS, and established connections. Shutdown cancels managed TUN sessions before
+restoring owned routes and the previous DNS state; the cleanup path never
+performs a broad deletion of `0.0.0.0/0`.
 
 TUN mode requires administrator privileges. The Windows CLI requests UAC
 elevation in the existing terminal. The Flutter application normally runs

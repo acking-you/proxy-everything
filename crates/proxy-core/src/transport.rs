@@ -186,7 +186,7 @@ pub async fn connect_tcp_host(host: &str, port: u16) -> std::io::Result<TcpStrea
     crate::diagnostics::phase("resolve");
     let addresses = resolve_host_addresses(host).await?;
     crate::diagnostics::phase("tcp_connect");
-    match race_addresses(&addresses, port, connect_socket).await {
+    match connect_tcp_addresses(&addresses, port).await {
         Ok(stream) => Ok(stream),
         Err(error) if host.parse::<IpAddr>().is_err() => {
             crate::diagnostics::phase("resolve_refresh");
@@ -195,10 +195,17 @@ pub async fn connect_tcp_host(host: &str, port: u16) -> std::io::Result<TcpStrea
                 return Err(error);
             }
             crate::diagnostics::phase("tcp_connect");
-            race_addresses(&refreshed, port, connect_socket).await
+            connect_tcp_addresses(&refreshed, port).await
         }
         Err(error) => Err(error),
     }
+}
+
+/// Connect only to addresses whose route policy the caller has already prepared.
+/// Uses the normal family staggering and TCP diagnostics without resolving a
+/// different address behind the caller's installed bypass routes.
+pub async fn connect_tcp_addresses(addresses: &[IpAddr], port: u16) -> std::io::Result<TcpStream> {
+    race_addresses(addresses, port, connect_socket).await
 }
 
 async fn connect_socket(address: SocketAddr) -> std::io::Result<TcpStream> {

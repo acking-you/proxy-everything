@@ -23,6 +23,80 @@ use super::{DatagramSnafu, Forwarder, Result, TransportSnafu};
 
 const UDP_ASSOCIATION_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Establish and confirm the same native UDP association used by SOCKS5 and
+/// by a live node-switch probe. No datagram is sent by the probe.
+pub(super) async fn connect_native_udp(
+    host: &str,
+    port: u16,
+) -> Result<(ProxyStream, Option<std::borrow::Cow<'static, str>>)> {
+    let (mut stream, msg_key) = proxy_core::session::NativeSession::connect(
+        "",
+        0,
+        host,
+        port,
+        proxy_core::ProxyTransport::UdpAssociate,
+    )
+    .await
+    .context(TransportSnafu)?
+    .into_parts();
+    let ready = match tokio::time::timeout(UDP_ASSOCIATION_SETUP_TIMEOUT, stream.read_u8()).await {
+        Err(_) => {
+            return Err(super::ClientError::Datagram {
+                source: ProxyError::Protocol {
+                    detail: format!(
+                        "remote proxy server {}:{} timed out before confirming UDP support; \
+                         verify that the server is current and allows UDP egress",
+                        host, port
+                    ),
+                },
+            });
+        }
+        Ok(Err(source)) if is_expected_disconnect(&source) => {
+            return Err(super::ClientError::Datagram {
+                source: ProxyError::Protocol {
+                    detail: format!(
+                        "remote proxy server {}:{} closed the UDP association before readiness; \
+                         its binary likely predates UDP support or UDP relay initialization \
+                         failed. Upgrade and restart http-proxy-server with the same release as \
+                         this client",
+                        host, port
+                    ),
+                },
+            });
+        }
+        Ok(Err(source)) => {
+            return Err(super::ClientError::Io {
+                uri: None,
+                detail: "wait for remote UDP association readiness",
+                source,
+            });
+        }
+        Ok(Ok(ready)) => ready,
+    };
+    if ready != UDP_ASSOCIATION_READY {
+        return Err(super::ClientError::Datagram {
+            source: ProxyError::Protocol {
+                detail: if ready == 1 {
+                    "remote proxy server could not initialize its UDP relay; check server logs, \
+                     firewall rules, and any configured upstream SOCKS5 UDP support"
+                        .to_string()
+                } else {
+                    format!(
+                        "remote proxy server returned unknown UDP association status {ready:#x}; \
+                         client and server versions may be incompatible"
+                    )
+                },
+            },
+        });
+    }
+    tracing::debug!(
+        server = %format!("{}:{}", host, port),
+        native_encrypted = true,
+        "remote proxy server confirmed UDP association readiness"
+    );
+    Ok((stream, msg_key))
+}
+
 enum UpstreamReader {
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     Direct(super::process_bypass::UdpReader),
@@ -127,113 +201,47 @@ impl UdpAssociation {
         };
         #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
         let direct: Option<(UpstreamReader, UpstreamWriter)> = None;
-        let (upstream_reader, upstream_writer, upstream_guard) = if let Some((reader, writer)) =
-            direct
-        {
-            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-            {
+        let (upstream_reader, upstream_writer, upstream_guard) =
+            if let Some((reader, writer)) = direct {
+                #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+                {
+                    (
+                        UpstreamReader::Direct(reader),
+                        UpstreamWriter::Direct(writer),
+                        None,
+                    )
+                }
+                #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+                {
+                    (reader, writer, None)
+                }
+            } else if let Some(proxy) = upstream_proxy {
+                let relay = create_socks5_datagram_relay(proxy)
+                    .await
+                    .context(DatagramSnafu)?;
+                let (reader, writer, guard) = relay.into_parts();
                 (
-                    UpstreamReader::Direct(reader),
-                    UpstreamWriter::Direct(writer),
+                    UpstreamReader::Socks5(reader),
+                    UpstreamWriter::Socks5(writer),
+                    Some(guard),
+                )
+            } else {
+                let (stream, msg_key) =
+                    connect_native_udp(&server_endpoint.host, server_endpoint.port).await?;
+                let msg_key = msg_key.as_deref();
+                let (read_half, write_half) = stream.into_split();
+                (
+                    UpstreamReader::Proxy(Box::new(
+                        DatagramTunnelReader::new(AsyncReader::new(read_half), msg_key)
+                            .context(DatagramSnafu)?,
+                    )),
+                    UpstreamWriter::Proxy(Box::new(
+                        DatagramTunnelWriter::new(AsyncWriter::new(write_half), msg_key)
+                            .context(DatagramSnafu)?,
+                    )),
                     None,
                 )
-            }
-            #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-            {
-                (reader, writer, None)
-            }
-        } else if let Some(proxy) = upstream_proxy {
-            let relay = create_socks5_datagram_relay(proxy)
-                .await
-                .context(DatagramSnafu)?;
-            let (reader, writer, guard) = relay.into_parts();
-            (
-                UpstreamReader::Socks5(reader),
-                UpstreamWriter::Socks5(writer),
-                Some(guard),
-            )
-        } else {
-            let (mut stream, msg_key) = proxy_core::session::NativeSession::connect(
-                "",
-                0,
-                &server_endpoint.host,
-                server_endpoint.port,
-                proxy_core::ProxyTransport::UdpAssociate,
-            )
-            .await
-            .context(TransportSnafu)?
-            .into_parts();
-            let ready = match tokio::time::timeout(UDP_ASSOCIATION_SETUP_TIMEOUT, stream.read_u8())
-                .await
-            {
-                Err(_) => {
-                    return Err(super::ClientError::Datagram {
-                        source: ProxyError::Protocol {
-                            detail: format!(
-                                "remote proxy server {}:{} timed out before confirming UDP \
-                                 support; verify that the server is current and allows UDP egress",
-                                server_endpoint.host, server_endpoint.port
-                            ),
-                        },
-                    });
-                }
-                Ok(Err(source)) if is_expected_disconnect(&source) => {
-                    return Err(super::ClientError::Datagram {
-                        source: ProxyError::Protocol {
-                            detail: format!(
-                                "remote proxy server {}:{} closed the UDP association before \
-                                 readiness; its binary likely predates UDP support or UDP relay \
-                                 initialization failed. Upgrade and restart http-proxy-server \
-                                 with the same release as this client",
-                                server_endpoint.host, server_endpoint.port
-                            ),
-                        },
-                    });
-                }
-                Ok(Err(source)) => {
-                    return Err(super::ClientError::Io {
-                        uri: None,
-                        detail: "wait for remote UDP association readiness",
-                        source,
-                    });
-                }
-                Ok(Ok(ready)) => ready,
             };
-            if ready != UDP_ASSOCIATION_READY {
-                return Err(super::ClientError::Datagram {
-                    source: ProxyError::Protocol {
-                        detail: if ready == 1 {
-                            "remote proxy server could not initialize its UDP relay; check server \
-                             logs, firewall rules, and any configured upstream SOCKS5 UDP support"
-                                .to_string()
-                        } else {
-                            format!(
-                                "remote proxy server returned unknown UDP association status \
-                                 {ready:#x}; client and server versions may be incompatible"
-                            )
-                        },
-                    },
-                });
-            }
-            tracing::debug!(
-                server = %format!("{}:{}", server_endpoint.host, server_endpoint.port),
-                native_encrypted = upstream_proxy.is_none(),
-                "remote proxy server confirmed UDP association readiness"
-            );
-            let msg_key = msg_key.as_deref();
-            let (read_half, write_half) = stream.into_split();
-            (
-                UpstreamReader::Proxy(Box::new(
-                    DatagramTunnelReader::new(AsyncReader::new(read_half), msg_key)
-                        .context(DatagramSnafu)?,
-                )),
-                UpstreamWriter::Proxy(Box::new(
-                    DatagramTunnelWriter::new(AsyncWriter::new(write_half), msg_key)
-                        .context(DatagramSnafu)?,
-                )),
-                None,
-            )
-        };
 
         #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
         let direct = matches!(&upstream_reader, UpstreamReader::Direct(_));
