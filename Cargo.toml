@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/proxy-crypto",
     "crates/proxy-core",
     "crates/proxy-client",
     "crates/proxy-server",

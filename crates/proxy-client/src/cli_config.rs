@@ -40,8 +40,6 @@ pub struct Config {
     pub tun_bypass_processes: Option<Vec<String>>,
     pub nonproxy_keywords: Option<Vec<String>>,
     pub proxy_keywords: Option<Vec<String>>,
-    pub need_codec_ip: Option<Vec<String>>,
-    pub msg_key: Option<bool>,
     pub reverse_geo: Option<bool>,
     pub use_local_geoip: Option<bool>,
     pub set_system_proxy: Option<bool>,

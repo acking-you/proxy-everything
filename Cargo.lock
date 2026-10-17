@@ -2945,6 +2945,7 @@ dependencies = [
  "moka",
  "once_cell",
  "parking_lot",
+ "proxy-crypto",
  "rand 0.10.3",
  "reqwest",
  "ring",
@@ -2959,6 +2960,16 @@ dependencies = [
  "tracing-subscriber",
  "uni-stream",
  "ureq",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "proxy-crypto"
+version = "0.4.39"
+dependencies = [
+ "futures",
+ "ring",
+ "tokio",
 ]
 
 [[package]]

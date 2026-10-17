@@ -42,11 +42,11 @@ struct Cli {
     /// [optional] Keywords-set for identify proxy
     #[arg(long, value_name = "PROXY_KEYWORDS")]
     proxy_keywords: Option<String>,
-    /// [optional] Keywords-set for identify proxy
-    #[arg(long, value_name = "NEED_CODEC_IP")]
+    /// Deprecated compatibility argument; native sessions are always encrypted.
+    #[arg(long, hide = true)]
     need_codec_ip: Option<String>,
-    /// [optional] Enable random key for sending message, default is false
-    #[arg(short, long, value_name = "MSG_KEY")]
+    /// Deprecated compatibility argument; native sessions are always encrypted.
+    #[arg(short, long, hide = true)]
     msg_key: bool,
     /// [optional] Reverse geo-proxy logic: CN sites use proxy, others direct
     #[arg(long, env = "REVERSE_GEO_PROXY")]
@@ -113,11 +113,6 @@ impl Cli {
                 .proxy_keywords
                 .as_ref()
                 .map(|s| s.split(',').map(String::from).collect()),
-            need_codec_ip: self
-                .need_codec_ip
-                .as_ref()
-                .map(|s| s.split(',').map(String::from).collect()),
-            msg_key: if self.msg_key { Some(true) } else { None },
             reverse_geo: if self.reverse_geo { Some(true) } else { None },
             use_local_geoip: if self.use_local_geoip {
                 Some(true)
@@ -242,7 +237,6 @@ async fn main() -> Result<()> {
         )?)
     };
 
-    let msg_key = cli.msg_key || config.msg_key.unwrap_or(false);
     let reverse_geo = cli.reverse_geo || config.reverse_geo.unwrap_or(false);
     let do_set_system_proxy = cli.set_system_proxy || config.set_system_proxy.unwrap_or(false);
     let enable_auto_proxy = cli
@@ -326,13 +320,6 @@ async fn main() -> Result<()> {
         {
             std::env::set_var("PROXY_KEYWORDS", keywords);
         }
-        if let Some(ips) = cli
-            .need_codec_ip
-            .clone()
-            .or_else(|| config.need_codec_ip.clone().map(|v| v.join(",")))
-        {
-            std::env::set_var("NEED_CODEC_IP", ips);
-        }
         if let Some(port) = cli.client_port.or(config.client_port) {
             std::env::set_var("CLIENT_PORT", port.to_string());
         }
@@ -363,12 +350,6 @@ async fn main() -> Result<()> {
     let server_port = *SERVER_PORT;
 
     // Initialize runtime config (used by client code)
-    // Parse NEED_CODEC_IP from environment variable
-    let need_codec_ips = std::env::var("NEED_CODEC_IP")
-        .ok()
-        .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
-        .unwrap_or_default();
-
     let secret_key = std::env::var("SECRET_KEY").ok();
 
     if !upstream_mode {
@@ -378,7 +359,6 @@ async fn main() -> Result<()> {
                 .expect("server_host is validated outside upstream mode"),
             server_port,
             reverse_geo,
-            need_codec_ips,
             secret_key,
         );
     }
@@ -536,15 +516,9 @@ async fn main() -> Result<()> {
         } else {
             "0.0.0.0"
         });
-    if msg_key && !upstream_mode {
-        start_client_with_runtime_config::<true>(listen_host, client_port, Some(client_config))
-            .await
-            .unwrap();
-    } else {
-        start_client_with_runtime_config::<false>(listen_host, client_port, Some(client_config))
-            .await
-            .unwrap();
-    }
+    start_client_with_runtime_config(listen_host, client_port, Some(client_config))
+        .await
+        .context("local proxy failed")?;
 
     Ok(())
 }

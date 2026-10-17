@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+proxy-crypto = { path = "../proxy-crypto" }
 # Process-wide allocator
 better_mimalloc_rs = { workspace = true }
 
@@ -81,6 +82,14 @@ tokio = { workspace = true, features = [
 # nix 0.31 still references iOS system-control types removed by libc 0.2.190.
 # Keep the latest compatible bindings until nix restricts those APIs to macOS.
 libc = "=0.2.189"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_System_IO",
+] }
 
 [features]
 # Store builds never disclose lookup targets or download a GeoIP database.

@@ -316,3 +316,142 @@ strict Clippy and formatting passed on both platforms. ProxyUI analysis and
 Echo was verified through isolated Linux loopback, including both ICMP socket
 types, native relays and Fake-IP targets. Live Windows TUN/Wi-Fi handover was
 not exercised; the existing running proxy process was not restarted.
+
+## Windows TCP resets and elevation handoff (2026-10-17)
+
+### Confirmed transport regression
+
+An isolated Windows reproduction compared the v1.2.15/native 0.4.30 and
+v1.2.24/native 0.4.39 releases. Commit `06670c85479df2dd28ea10f1d4741360cc91151b`
+introduced `TCP_NODELAY` and combined the legacy header into one write. With
+session encoding disabled, the next TLS ClientHello consequently appeared at
+TCP payload offset zero. Specific SNI values triggered injected resets on the
+measured network. Restoring only Nagle or only the old header writes did not
+remove the trigger; relying on accidental coalescing is not a fix.
+
+The decisive control replayed identical bytes through the same node. A combined
+532-byte proxy header/ClientHello received TLS responses twice; splitting the
+same stream into 70 and 462 bytes received RSTs twice. Keeping that split and
+replacing only the equal-length SNI with `www.example.com` received responses
+twice. Captures verified actual segment boundaries and equal stream hashes,
+not merely application write calls. All six connections first received the
+normal server SYN-ACK. These are small causal controls, not estimates of the
+failure rate or complete TLS certificate-validation tests.
+
+Full GUI failures were also correlated from the guest process/socket through
+NAT to the host's physical WLAN. Abnormal SYN-ACK/RST packets arrived on that
+interface before a different normal server SYN-ACK. Other connections received
+server ACKs or TLS responses after the injected RST. The observations identify
+incoming interference, not a specific injecting device or operator. Subsequent
+node probes can fail before sending their own request; a probe's `10054` alone
+cannot identify the request that triggered interference or its duration.
+
+The failure reproduced with real TUN disabled and requests through the local
+HTTP proxy, and in a clean guest without the investigated QQ/TAO components.
+Fake-IP on/off did not resolve it. No host TUN restart, cache deletion, default
+route replacement, or user configuration overwrite was needed. The macOS
+packet-path difference and every historical reset were not independently proven.
+
+### Encrypted native sessions and compatibility
+
+Native TCP, UDP and ICMP sessions always select encryption through the shared
+`NativeSession` constructor before writing the proxy header. This includes HTTP CONNECT, SOCKS CONNECT,
+plain HTTP sent through a native proxy rule, DNS-over-TCP, and node probes. TLS
+ClientHello and subsequent bytes traverse the existing legacy framed codec,
+regardless of packet segmentation. A fresh legacy payload key is generated per
+connection. V3 already encrypts its stream and does not add a second codec. There is no plaintext
+retry or automatic protocol downgrade after an error.
+
+The wire format is unchanged: legacy TCP still uses the original encrypted
+`host`/`port`/`key` header and data frames. Historical servers already understand
+that non-null key. Current servers continue to accept both encrypted and
+unencrypted old clients. V3 remains opt-in, supplies its own encryption, and
+skips the inner legacy codec; opaque native relays preserve the selected wire
+format. Legacy's previously documented nonce limitations still apply: this
+compatibility repair does not claim to replace the v3 security migration.
+
+Direct destinations and external HTTP/SOCKS upstreams keep their existing wire
+behavior. Saved `forceCodec=false`, CLI `msg_key=false`, and empty codec-IP lists
+are ignored. The encryption switch and codec-IP policy have been removed.
+Legacy CLI arguments remain hidden no-ops; FFI fields retain their offsets as
+reserved slots, allowing existing callers to load the new library safely.
+Control clients retain an explicitly configured authentication key, or generate
+a payload key when none is supplied. No configuration migration is required, and
+Fake-IP, DNS routing, TUN bypass, timeout policy and socket options are unchanged.
+The node-probe `force_codec` argument is retained for C ABI compatibility; both
+values now probe the same protected TCP path used by applications.
+
+Regression coverage uses real loopback HTTP/SOCKS listeners and an independent
+historical header/data-frame reader. It checks that neither the TLS SNI nor
+HTTP plaintext occurs anywhere in the upstream stream, with fragmented writes,
+fragmented responses and request half-close. Other tests cover encrypted
+DNS-over-TCP, node probes, both old-client/server compatibility directions,
+native encrypted UDP, V3 and relay paths. Server-side plaintext framing is kept
+only for legacy peers and data already protected by v3. No live user network is required.
+
+Windows binary checks also compared the released v1.2.24 DLL against the rebuilt
+DLL using a loopback filter that resets any stream containing a synthetic SNI.
+All three released default TCP cases failed; all eight rebuilt cases passed,
+including force-codec on/off and node probes. The rebuilt DLL also passed twelve
+HTTP/CONNECT/SOCKS exchanges through an actual native 0.4.30 server built from
+`2adfc542851dfeb11bfd7b5a01ae1330511ea80f`, both directly and through an old native
+relay. These local tests use separate temporary state, not the user's TUN.
+
+### Rust ownership and reuse
+
+`proxy-crypto` owns configuration-free AES-GCM primitives and the generic v3
+record stream. `proxy-core` owns wire headers, runtime key selection and
+`NativeSession`. `FrameReader<R, D>` supplies the same bounded, cancellation-safe
+parser to TCP decryption, probes, control and datagrams. Client frontend parsing,
+route selection, forwarding and error types have separate modules.
+
+The relay uses generic codec/reader/writer traits and a monomorphized progress
+callback. Client and server share the transfer loop and half-close/error policy;
+no trait objects or per-connection metrics channel are needed for this reuse.
+Errors propagate with a typed source and failing direction instead of being
+logged and returned as success. Transfer totals use `u64`, independent of the
+wire's `u32` frame lengths. Plain forwarding remains necessary for direct and
+external destinations, v3's decrypted stream, and inbound historical clients;
+it is not a selectable outbound native-client mode.
+
+Encrypted reads reserve space for the authentication tag within the legacy
+30 MiB frame limit. The generic raw-copy buffer may grow to 32 MiB, so reusing
+its full capacity for encryption previously produced frames rejected by the
+receiver during sustained transfers. A streaming regression covers that limit
+without constructing a complete transfer-sized payload in memory.
+
+### Read-only connection diagnostics
+
+Node probes carry a process-local `connection_id` and separately record name
+resolution, measured TCP connect time, header preparation/write, request write
+and response wait. Cancellation retains the actual last phase. Native error
+codes, including Windows `10054`, survive the error chain.
+
+Windows observations include live socket endpoints, `IP_UNICAST_IF` /
+`IPV6_UNICAST_IF`, source-constrained `GetBestRoute2`, and `SIO_TCP_INFO`. A route
+snapshot is explicitly not labelled actual packet egress: correlate process,
+local port, peer and time with TCPIP ETW and physical packet capture. A reset
+without that correlation remains unattributed. TCP RTT estimates and the
+separately measured connect duration are distinct; synchronous diagnostic cost
+is reported. Queries do not change sockets, routes, DNS or the FFI layout, and
+unsupported statistics cannot fail a connection. Request destinations and
+connection errors remain visible; keys and payloads are not logged.
+
+### Elevation handoff is a separate defect
+
+Windows crash events and a native-only reproducer identified an access
+violation in `cnativeapi.dll` 0.5.2's tray destructor during `ExitProcess`.
+Explicitly destroying the tray before process teardown avoided the reproduced
+crash. This explains the abnormal relaunch delay, not the TCP resets above.
+
+The GUI now awaits native listener/system-proxy cleanup, drains tray work,
+releases the tray and flushes logs before exiting for the elevated replacement.
+Both page and tray entry points share this ordering; ordinary quit also releases
+the tray. The handoff has an eight-second cleanup budget, below the child's
+ten-second single-instance wait. Each awaited step checks the remaining budget:
+late completion after a timeout cannot resume the exit sequence. Failed cleanup
+keeps the window open for a retry. Once tray teardown starts, closing the window
+retries explicit cleanup/quit and minimizing cannot hide it behind the removed
+icon. The retry uses the current proxy state even after tray listeners detach.
+Saved TUN intent is preserved for the elevated child. No test restarts the
+currently running old application.

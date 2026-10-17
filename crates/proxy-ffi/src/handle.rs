@@ -620,21 +620,10 @@ fn proxy_start_inner(
         *stored = cache_dir.clone();
     }
 
-    // need_codec_ips: null or empty = empty list (no codec IPs), otherwise comma-separated
-    let need_codec_ips = if config.need_codec_ips.is_null() {
-        Some(vec![]) // default: empty list
-    } else {
-        match unsafe { CStr::from_ptr(config.need_codec_ips) }.to_str() {
-            Ok(s) if !s.is_empty() => Some(s.split(',').map(|ip| ip.trim().to_string()).collect()),
-            _ => Some(vec![]), // empty string = empty list
-        }
-    };
-
     let server_port = config.server_port;
     let local_port = config.local_port;
     let reverse_geo = config.reverse_geo != 0;
     let enable_auto_proxy = config.auto_proxy != 0;
-    let force_codec = config.force_codec != 0;
     let set_system_proxy = config.set_system_proxy != 0;
     let listen_host = local_listen_host(allow_lan);
 
@@ -644,7 +633,6 @@ fn proxy_start_inner(
         server_host.clone(),
         server_port,
         reverse_geo,
-        need_codec_ips.clone().unwrap_or_default(),
         session_key.clone(),
     );
 
@@ -780,28 +768,17 @@ fn proxy_start_inner(
             tun_udp_direct_fallback,
             allow_lan,
             listen_host,
-            force_codec,
+            native_encryption = true,
             "proxy started"
         );
 
-        // Use force_codec to determine NEED_CODEC constant
-        if force_codec {
-            run_client_with_listener_runtime_config::<true>(
-                listener,
-                cancel_token,
-                Some(connections.clone()),
-                Some(client_config),
-            )
-            .await;
-        } else {
-            run_client_with_listener_runtime_config::<false>(
-                listener,
-                cancel_token,
-                Some(connections.clone()),
-                Some(client_config),
-            )
-            .await;
-        }
+        run_client_with_listener_runtime_config(
+            listener,
+            cancel_token,
+            Some(connections.clone()),
+            Some(client_config),
+        )
+        .await;
 
         connections.close();
         connections.wait().await;

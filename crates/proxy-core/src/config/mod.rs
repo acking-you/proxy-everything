@@ -90,8 +90,6 @@ pub mod runtime {
             port: 1081,
         })
     });
-    static NEED_CODEC_IP_RT: Lazy<ArcSwap<Vec<String>>> =
-        Lazy::new(|| ArcSwap::from_pointee(Vec::new()));
     static SECRET_KEY_RT: Lazy<ArcSwap<SecretKey>> = Lazy::new(|| ArcSwap::from_pointee(None));
     #[cfg(feature = "auto-proxy")]
     static PROXY_KEYWORDS_RT: Lazy<ArcSwap<Vec<ParsedProxyKeyWord>>> =
@@ -122,10 +120,6 @@ pub mod runtime {
     #[cfg(feature = "auto-proxy")]
     pub fn set_reverse_geo(reverse: bool) {
         REVERSE_GEO_RT.store(reverse, Ordering::SeqCst);
-    }
-
-    pub fn set_need_codec_ips(ips: Vec<String>) {
-        NEED_CODEC_IP_RT.store(Arc::new(ips));
     }
 
     pub fn set_secret_key(key: Option<String>) {
@@ -204,10 +198,6 @@ pub mod runtime {
         false
     }
 
-    pub fn need_codec_ips() -> Arc<Vec<String>> {
-        NEED_CODEC_IP_RT.load_full()
-    }
-
     /// Get secret key via closure (zero-copy for sync callers)
     pub fn with_secret_key<R>(f: impl FnOnce(&[u8], u32) -> R) -> R {
         let guard = SECRET_KEY_RT.load();
@@ -228,16 +218,9 @@ pub mod runtime {
     }
 
     /// Initialize all runtime config from values (for FFI)
-    pub fn init_config(
-        host: String,
-        port: u16,
-        reverse: bool,
-        codec_ips: Vec<String>,
-        secret: Option<String>,
-    ) {
+    pub fn init_config(host: String, port: u16, reverse: bool, secret: Option<String>) {
         set_server_endpoint(host, port);
         set_secret_key(secret);
-        set_need_codec_ips(codec_ips);
 
         #[cfg(feature = "auto-proxy")]
         {
@@ -628,28 +611,6 @@ pub static PROXY_KEYWORDS: Lazy<Vec<ParsedProxyKeyWord>> = Lazy::new(|| {
     }
     tracing::info!("`PROXY_KEYWORDS` is `{keywords:?}`");
     parse_keywords(keywords)
-});
-
-pub static NEED_CODEC_IP: Lazy<Vec<String>> = Lazy::new(|| {
-    let default_codec_ip = vec![
-        // US node
-        "64.23.159.180".to_string(),
-        // Your default proxy server
-        SERVER_HOST.clone(),
-    ];
-    match std::env::var("NEED_CODEC_IP") {
-        Ok(v) => {
-            let keywords = split_concat_with_default(v, default_codec_ip);
-            tracing::info!("`NEED_CODEC_IP` is `{keywords:?}`");
-            keywords
-        }
-        Err(_) => {
-            tracing::info!(
-                "No ENV:`NEED_CODEC_IP` provided,we use default need codec ip:{default_codec_ip:?}"
-            );
-            default_codec_ip
-        }
-    }
 });
 
 #[cfg(test)]

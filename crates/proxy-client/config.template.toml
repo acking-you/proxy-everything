@@ -47,8 +47,9 @@ tun_bypass_processes = []
 # [Optional] Auto set system proxy on start (disabled on exit)
 set_system_proxy = false
 
-# [Optional] Enable random message key
-# msg_key = false
+# Native proxy TCP, UDP and ICMP sessions always use encryption.
+# No encryption toggle or per-IP codec list is needed. Direct destinations and
+# external HTTP/SOCKS upstreams retain their own protocols.
 
 # ============================================================================
 # Keyword Configuration

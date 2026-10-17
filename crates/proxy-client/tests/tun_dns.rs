@@ -18,8 +18,8 @@ const QUERY: &[u8] =
 async fn real_listener_forces_dns_through_remote_without_forcing_other_traffic() {
     use proxy_client::client::auto_proxy::PROXY_CACHE;
     use proxy_client::client::{ClientConfig, run_client_with_listener};
-    use proxy_core::crypto::Aes256GcmCryption;
-    use proxy_core::protocol::ProxyHeader;
+    use proxy_core::codec::{AsyncReader, AsyncWriter};
+    use proxy_core::protocol::{FrameReader, FrameWriter, ProxyHeader};
     use tokio_util::task::TaskTracker;
 
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -35,13 +35,12 @@ async fn real_listener_forces_dns_through_remote_without_forcing_other_traffic()
             "127.0.0.1".into(),
             remote.local_addr().unwrap().port(),
             true,
-            vec![],
             None,
         );
         let cancel = CancellationToken::new();
         let _guard = cancel.clone().drop_guard();
         let tracker = TaskTracker::new();
-        tracker.spawn(run_client_with_listener::<false>(
+        tracker.spawn(run_client_with_listener(
             local,
             cancel.clone(),
             Some(tracker.clone()),
@@ -65,20 +64,35 @@ async fn real_listener_forces_dns_through_remote_without_forcing_other_traffic()
                     assert!(length < 4096);
                     let mut header = vec![0; length];
                     stream.read_exact(&mut header).await.unwrap();
-                    let mut cipher = Aes256GcmCryption::try_new_with_default_key().unwrap();
+                    let mut cipher = proxy_core::crypto::configured_cryption().unwrap();
                     let header: ProxyHeader =
                         serde_json::from_slice(cipher.decrypt_with_tag(&mut header).unwrap())
                             .unwrap();
                     assert_eq!(header.host, resolver);
                     assert_eq!(header.port, 53);
-                    assert!(header.key.is_none());
-                    let length = stream.read_u16().await.unwrap() as usize;
-                    let mut answer = vec![0; length];
-                    stream.read_exact(&mut answer).await.unwrap();
-                    assert_eq!(answer, QUERY);
-                    answer[2..4].copy_from_slice(&[0x81, 0x80]);
-                    stream.write_u16(length as u16).await.unwrap();
-                    stream.write_all(&answer).await.unwrap();
+                    assert!(
+                        header.key.is_some(),
+                        "TCP DNS uses the default session codec"
+                    );
+                    let (reader, writer) = stream.into_split();
+                    let mut reader =
+                        FrameReader::new(AsyncReader::new(reader), header.key.as_deref(), 4096)
+                            .unwrap();
+                    let mut writer =
+                        FrameWriter::new(AsyncWriter::new(writer), header.key.as_deref(), 4096)
+                            .unwrap();
+                    let mut answer = Vec::new();
+                    while answer.len() < 2 + QUERY.len() {
+                        answer.extend_from_slice(reader.read().await.unwrap().unwrap());
+                    }
+                    assert_eq!(
+                        u16::from_be_bytes(answer[..2].try_into().unwrap()) as usize,
+                        QUERY.len()
+                    );
+                    assert_eq!(&answer[2..], QUERY);
+                    answer[4..6].copy_from_slice(&[0x81, 0x80]);
+                    writer.prepare().unwrap().extend_from_slice(&answer);
+                    writer.send().await.unwrap();
                 }
             };
             let args = Args {

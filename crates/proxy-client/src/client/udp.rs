@@ -1,6 +1,5 @@
 //! SOCKS5 UDP ASSOCIATE lifecycle and local relay.
 
-use std::borrow::Cow;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
@@ -20,7 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::time::Instant;
 
-use super::{DatagramSnafu, ExternalProxySnafu, Forwarder, Result};
+use super::{DatagramSnafu, Forwarder, Result, TransportSnafu};
 
 const UDP_ASSOCIATION_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -68,7 +67,6 @@ impl UdpAssociation {
     pub async fn bind(
         control_stream: TcpStream,
         requested_client: DatagramAddress,
-        msg_key: Option<Cow<'static, str>>,
         upstream_proxy: Option<&ExternalProxyTarget>,
     ) -> Result<(Self, SocketAddr)> {
         let peer_addr = control_stream
@@ -120,14 +118,16 @@ impl UdpAssociation {
                 Some(guard),
             )
         } else {
-            let mut stream = proxy_core::transport::get_udp_proxy_stream(
-                server_endpoint.host.as_str(),
+            let (mut stream, msg_key) = proxy_core::session::NativeSession::connect(
+                "",
+                0,
+                &server_endpoint.host,
                 server_endpoint.port,
-                msg_key.clone(),
-                "connect UDP association to proxy server",
+                proxy_core::ProxyTransport::UdpAssociate,
             )
             .await
-            .context(ExternalProxySnafu)?;
+            .context(TransportSnafu)?
+            .into_parts();
             let ready = match tokio::time::timeout(UDP_ASSOCIATION_SETUP_TIMEOUT, stream.read_u8())
                 .await
             {
@@ -182,14 +182,10 @@ impl UdpAssociation {
             }
             tracing::debug!(
                 server = %format!("{}:{}", server_endpoint.host, server_endpoint.port),
-                datagram_encryption = msg_key.is_some(),
+                native_encrypted = upstream_proxy.is_none(),
                 "remote proxy server confirmed UDP association readiness"
             );
-            let msg_key = if stream.is_secure() {
-                None
-            } else {
-                msg_key.as_deref()
-            };
+            let msg_key = msg_key.as_deref();
             let (read_half, write_half) = stream.into_split();
             (
                 UpstreamReader::Proxy(Box::new(
@@ -211,7 +207,7 @@ impl UdpAssociation {
             upstream = %upstream_proxy
                 .map(ExternalProxyTarget::display_url)
                 .unwrap_or_else(|| format!("proxy-server://{}:{}", server_endpoint.host, server_endpoint.port)),
-            datagram_encryption = msg_key.is_some(),
+            native_encrypted = upstream_proxy.is_none(),
             "SOCKS5 UDP association initialized"
         );
 

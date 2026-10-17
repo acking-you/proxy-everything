@@ -76,6 +76,11 @@ pub enum TransportError {
     EmptyDNSRecord,
     #[snafu(display("External proxy `{proxy}` error: {detail}"))]
     ExternalProxy { proxy: String, detail: String },
+    #[snafu(display("SOCKS5 upstream `{proxy}` handshake failed"))]
+    SocksProxy {
+        proxy: String,
+        source: tokio_socks::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, TransportError>;
@@ -178,14 +183,18 @@ pub async fn resolve_host(host: &str) -> std::io::Result<IpAddr> {
 /// fail. Dropping this future cancels all outstanding sockets. A caller's
 /// protocol handshake deadline must not truncate TCP's SYN retransmissions.
 pub async fn connect_tcp_host(host: &str, port: u16) -> std::io::Result<TcpStream> {
+    crate::diagnostics::phase("resolve");
     let addresses = resolve_host_addresses(host).await?;
+    crate::diagnostics::phase("tcp_connect");
     match race_addresses(&addresses, port, connect_socket).await {
         Ok(stream) => Ok(stream),
         Err(error) if host.parse::<IpAddr>().is_err() => {
+            crate::diagnostics::phase("resolve_refresh");
             let refreshed = resolve_addresses(host, true).await?;
             if refreshed == addresses {
                 return Err(error);
             }
+            crate::diagnostics::phase("tcp_connect");
             race_addresses(&refreshed, port, connect_socket).await
         }
         Err(error) => Err(error),
@@ -193,7 +202,10 @@ pub async fn connect_tcp_host(host: &str, port: u16) -> std::io::Result<TcpStrea
 }
 
 async fn connect_socket(address: SocketAddr) -> std::io::Result<TcpStream> {
-    let stream = TcpStream::connect(address).await?;
+    let started = Instant::now();
+    let result = TcpStream::connect(address).await;
+    crate::diagnostics::tcp_connect_finished(address, started.elapsed(), &result);
+    let stream = result?;
     stream.set_nodelay(true)?;
     Ok(stream)
 }
@@ -308,7 +320,7 @@ pub async fn get_tcp_proxy_stream_with_protocol(
         transport: ProxyTransport::Tcp,
     };
     get_proxy_stream(
-        proxy_header,
+        &proxy_header,
         proxy_server,
         proxy_server_port,
         detail,
@@ -318,64 +330,8 @@ pub async fn get_tcp_proxy_stream_with_protocol(
     .await
 }
 
-/// Establishes a framed UDP-association tunnel through the proxy server.
-pub async fn get_udp_proxy_stream(
-    proxy_server: &str,
-    proxy_server_port: u16,
-    msg_key: Option<Cow<'static, str>>,
-    detail: &'static str,
-) -> Result<ProxyStream> {
-    let proxy_header = ProxyHeader {
-        host: String::new(),
-        port: 0,
-        key: msg_key,
-        transport: ProxyTransport::UdpAssociate,
-    };
-    get_proxy_stream(
-        proxy_header,
-        proxy_server,
-        proxy_server_port,
-        detail,
-        "udp-associate",
-        WireProtocol::configured().context(IoSnafu {
-            uri: None,
-            detail: "select wire protocol",
-        })?,
-    )
-    .await
-}
-
-/// Establish an ICMP Echo stream. Existing proxy paths remain legacy-compatible;
-/// this additional transport requires an Echo-capable final server.
-pub async fn get_icmp_proxy_stream(
-    host: &str,
-    ipv6: bool,
-    proxy_server: &str,
-    proxy_server_port: u16,
-    msg_key: Option<Cow<'static, str>>,
-) -> Result<ProxyStream> {
-    let header = ProxyHeader {
-        host: host.to_owned(),
-        port: if ipv6 { 6 } else { 4 },
-        key: msg_key,
-        transport: ProxyTransport::IcmpEcho,
-    };
-    get_proxy_stream(
-        header,
-        proxy_server,
-        proxy_server_port,
-        "ICMP Echo",
-        host,
-        WireProtocol::configured().context(IoSnafu {
-            uri: None,
-            detail: "select Echo wire protocol",
-        })?,
-    )
-    .await
-}
-
-async fn get_proxy_stream(
-    proxy_header: ProxyHeader,
+pub(crate) async fn get_proxy_stream(
+    proxy_header: &ProxyHeader,
     proxy_server: &str,
     proxy_server_port: u16,
     detail: &'static str,
@@ -390,10 +346,12 @@ async fn get_proxy_stream(
         proxy_server_port,
         target = uri,
         transport = ?proxy_header.transport,
-        session_encrypted = proxy_header.key.is_some(),
+        wire_protocol = ?protocol,
+        session_encrypted = protocol == WireProtocol::V3 || proxy_header.key.is_some(),
         "opening proxy transport connection"
     );
     let mut proxy_server_stream = get_tcp_stream(proxy_server, proxy_server_port, detail).await?;
+    crate::diagnostics::phase("proxy_header_prepare");
     // One snapshot binds header encryption and framing to the same credential.
     let (key, checksum_key) =
         runtime::with_secret_key(|key, hash| <[u8; 32]>::try_from(key).map(|key| (key, hash)))
@@ -426,8 +384,10 @@ async fn get_proxy_stream(
         let control = crate::control::is_control_target(&proxy_header.host, proxy_header.port);
         let setup = async {
             let mut stream = connect_v3(proxy_server_stream, &key, control)?;
+            crate::diagnostics::phase("proxy_header_write");
             stream.write_all(&header).await?;
             stream.flush().await?;
+            crate::diagnostics::phase("proxy_header_written");
             Ok::<_, std::io::Error>(ProxyStream::Secure(Box::new(stream)))
         };
         return tokio::time::timeout(Duration::from_secs(10), setup)
@@ -441,7 +401,8 @@ async fn get_proxy_stream(
                 detail: "v3 setup",
             });
     }
-    tokio::time::timeout(
+    crate::diagnostics::phase("proxy_header_write");
+    let written = tokio::time::timeout(
         Duration::from_secs(10),
         proxy_server_stream.write_all(&header),
     )
@@ -452,11 +413,15 @@ async fn get_proxy_stream(
             "legacy header write timed out",
         )
     })
-    .and_then(|result| result)
-    .with_context(|_| IoSnafu {
+    .and_then(|result| result);
+    if written.is_err() {
+        crate::diagnostics::record_socket("proxy_header_write_failed", &proxy_server_stream);
+    }
+    written.with_context(|_| IoSnafu {
         uri: Some(uri.to_string()),
         detail: "send proxy header",
     })?;
+    crate::diagnostics::phase("proxy_header_written");
     tracing::debug!(
         proxy_server,
         proxy_server_port,
@@ -518,15 +483,15 @@ async fn negotiate_external_proxy(
                     password,
                 )
                 .await
-                .map_err(|e| TransportError::ExternalProxy {
+                .map_err(|source| TransportError::SocksProxy {
                     proxy: proxy.display_url(),
-                    detail: e.to_string(),
+                    source,
                 })?,
                 _ => Socks5Stream::connect_with_socket(stream, (target_host.as_str(), port))
                     .await
-                    .map_err(|e| TransportError::ExternalProxy {
+                    .map_err(|source| TransportError::SocksProxy {
                         proxy: proxy.display_url(),
-                        detail: e.to_string(),
+                        source,
                     })?,
             };
             Ok(socks_stream.into_inner())
@@ -625,29 +590,6 @@ pub async fn read_http_header(
         header.extend_from_slice(&chunk[..consume]);
     }
     Ok(())
-}
-
-/// Returns a message key if the given IP requires encryption.
-#[inline]
-pub fn get_msg_key_from_codec_ip(ip: impl AsRef<str>) -> Option<String> {
-    let codec_ips = runtime::need_codec_ips();
-    codec_ips
-        .iter()
-        .find(|codec_ip| codec_ip.as_str() == ip.as_ref())
-        .map(|_| crate::config::gen_random_key())
-}
-
-/// Changes `msg_key` when it is None and the IP requires encryption.
-#[inline]
-pub fn change_msg_key(
-    ip: impl AsRef<str>,
-    msg_key: Option<Cow<'static, str>>,
-) -> Option<Cow<'static, str>> {
-    if msg_key.is_none() {
-        get_msg_key_from_codec_ip(ip).map(Cow::Owned)
-    } else {
-        msg_key
-    }
 }
 
 #[cfg(test)]

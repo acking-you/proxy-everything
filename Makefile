@@ -1,5 +1,5 @@
 TAG ?= dev
-CRATES ?= proxy-core proxy-client proxy-server proxy-tui proxy-ffi
+CRATES ?= proxy-crypto proxy-core proxy-client proxy-server proxy-tui proxy-ffi
 
 build-client-release:
 	bash ./scripts/build/build-client-release.sh

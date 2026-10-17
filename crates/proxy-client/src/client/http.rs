@@ -11,8 +11,8 @@ use tokio::io::AsyncWriteExt;
 
 use super::{
     ForwardContext, ForwarderProvider, HeaderContext, HttpProxySnafu, ProxyContext,
-    ServerConnection, TcpForwardImpl, change_msg_key, get_tcp_proxy_stream, get_tcp_stream,
-    resolve_server_connection, split_and_wrap,
+    ServerConnection, TcpForwardImpl, connect_native, get_tcp_stream, resolve_server_connection,
+    split_and_wrap,
 };
 
 #[derive(Debug, Snafu)]
@@ -165,7 +165,6 @@ pub struct HttpProxierProvider {
     host: String,
     port: u16,
     has_ssl: bool,
-    msg_key: Option<Cow<'static, str>>,
 }
 
 impl ForwarderProvider for HttpProxierProvider {
@@ -175,7 +174,7 @@ impl ForwarderProvider for HttpProxierProvider {
     where
         Self: std::marker::Sized,
     {
-        let HeaderContext { header, msg_key } = header;
+        let HeaderContext { header } = header;
         let request = String::from_utf8_lossy(header);
         let mut lines = request.lines();
         if let Some(first_line) = lines.next() {
@@ -199,12 +198,10 @@ impl ForwarderProvider for HttpProxierProvider {
             } else {
                 extract_host_from_raw_uri(uri).context(HttpProxySnafu)?
             };
-            let msg_key = msg_key.map(|s| Cow::Owned(s.to_owned()));
             return Ok(Self {
                 host: host.to_string(),
                 port,
                 has_ssl,
-                msg_key,
             });
         }
         InvliadProxySnafu {
@@ -217,11 +214,6 @@ impl ForwarderProvider for HttpProxierProvider {
     // when it is https proxy we will decide start proxy or not
     async fn try_build_forwarder(self, mut context: ProxyContext<'_>) -> super::Result<Self::Item> {
         let (server_stream, need_proxy, msg_key) = self.get_server_stream(&mut context).await?;
-        let msg_key = if server_stream.is_secure() {
-            None
-        } else {
-            msg_key
-        };
         let initial_request = if !self.has_ssl && need_proxy && msg_key.is_some() {
             context.buffer.to_vec()
         } else {
@@ -278,7 +270,7 @@ impl HttpProxierProvider {
                         detail: "http forced-direct first write error",
                     })
                     .context(HttpProxySnafu)?;
-                return Ok((server_stream, false, self.msg_key.clone()));
+                return Ok((server_stream, false, None));
             }
 
             if let Some(upstream_proxy) = context.upstream_proxy {
@@ -305,7 +297,7 @@ impl HttpProxierProvider {
                             "[UPSTREAM-PROXY] connect http target through socks5 proxy",
                         )
                         .await
-                        .context(super::ExternalProxySnafu)?
+                        .context(super::TransportSnafu)?
                         .into()
                     }
                 };
@@ -330,20 +322,14 @@ impl HttpProxierProvider {
             // concurrent node switch cannot mix address generations.
             let server_endpoint = runtime::server_endpoint();
             let (mut server_stream, need_proxy, msg_key) = if context.force_proxy {
-                let msg_key = change_msg_key(server_endpoint.host.as_str(), self.msg_key.clone());
-                (
-                    get_tcp_proxy_stream(
-                        self.host.as_str(),
-                        self.port,
-                        &server_endpoint.host,
-                        server_endpoint.port,
-                        msg_key.clone(),
-                        "[PROXY] auto-proxy disabled; force proxy",
-                    )
-                    .await?,
-                    true,
-                    msg_key,
+                let connection = connect_native(
+                    &self.host,
+                    self.port,
+                    &server_endpoint.host,
+                    server_endpoint.port,
                 )
+                .await?;
+                (connection.stream, connection.need_proxy, connection.msg_key)
             } else {
                 let proxy_keywords = runtime::proxy_keywords();
                 let has_proxy_status = proxy_keywords
@@ -355,20 +341,10 @@ impl HttpProxierProvider {
                             .proxy_server
                             .as_ref()
                             .unwrap_or(&server_endpoint.host);
-                        let msg_key = change_msg_key(server_ip.as_str(), self.msg_key.clone());
-                        (
-                            get_tcp_proxy_stream(
-                                self.host.as_str(),
-                                self.port,
-                                server_ip,
-                                server_endpoint.port,
-                                msg_key.clone(),
-                                "[PROXY] we will proxy http",
-                            )
-                            .await?,
-                            true,
-                            msg_key,
-                        )
+                        let connection =
+                            connect_native(&self.host, self.port, server_ip, server_endpoint.port)
+                                .await?;
+                        (connection.stream, connection.need_proxy, connection.msg_key)
                     }
                     None => (
                         get_tcp_stream(
@@ -378,14 +354,9 @@ impl HttpProxierProvider {
                         )
                         .await?,
                         false,
-                        self.msg_key.clone(),
+                        None,
                     ),
                 }
-            };
-            let msg_key = if server_stream.is_secure() {
-                None
-            } else {
-                msg_key
             };
             // An encrypted stream must send the initial HTTP header through
             // the same codec and nonce sequence as the body that follows it.
@@ -410,8 +381,8 @@ impl HttpProxierProvider {
             } = match resolve_server_connection(
                 self.host.as_str(),
                 self.port,
+                #[cfg(feature = "auto-proxy")]
                 context.sender,
-                self.msg_key.clone(),
                 context.upstream_proxy,
                 context.honor_forced_direct,
             )

@@ -75,7 +75,8 @@ Application → Client(local:1080) → [AES-256-GCM] → Server(remote:1081) →
 
 | Module | Path | Purpose |
 |--------|------|---------|
-| **Core** | `crates/proxy-core/src/lib.rs` | Crypto primitives, ProxyHeader, bidirectional forwarding |
+| **Crypto** | `crates/proxy-crypto/src/` | Configuration-free AES-GCM and generic v3 records |
+| **Core** | `crates/proxy-core/src/` | Native session policy, wire headers, shared framing and forwarding |
 | **Client** | `crates/proxy-client/src/client/mod.rs` | Main loop, protocol abstraction (ForwarderProvider) |
 | **Server** | `crates/proxy-server/src/server/mod.rs` | Connection handling, metrics collection |
 | **Codec** | `crates/proxy-core/src/codec/` | Encrypt/decrypt streams, frame processing |
@@ -93,15 +94,18 @@ Application → Client(local:1080) → [AES-256-GCM] → Server(remote:1081) →
 proxy-everything/
 ├── Cargo.toml                    # Workspace root configuration
 ├── crates/
+│   ├── proxy-crypto/             # Crypto primitives and generic v3 streams
 │   ├── proxy-core/               # Core library (shared by all crates)
 │   │   └── src/
-│   │       ├── lib.rs            # Core encryption and forwarding logic
+│   │       ├── lib.rs            # Shared trait definitions and module exports
+│   │       ├── session.rs        # Always-encrypted native session construction
+│   │       ├── forward.rs        # Generic bidirectional forwarding
 │   │       ├── error.rs          # Error types
 │   │       ├── transport.rs      # TCP connection helpers
 │   │       ├── codec/            # Encrypt/decrypt codecs
 │   │       ├── config/           # Configuration and runtime state
 │   │       ├── control/          # Control plane protocol
-│   │       ├── crypto/           # AES-256-GCM encryption
+│   │       ├── crypto/           # Configured crypto facade
 │   │       ├── geo/              # GeoIP lookup
 │   │       ├── metrics/          # Connection metrics
 │   │       ├── nodes/            # Node management
@@ -263,12 +267,17 @@ job actually takes.
 | `SERVER_HOST` | Remote proxy server address | 127.0.0.1 |
 | `SERVER_PORT` | Remote proxy server port | 1081 |
 | `CLIENT_PORT` | Local listening port | 1080 |
-| `SECRET_KEY` | 32-byte encryption key | `my-secret-key123my-secret-key123` |
+| `SECRET_KEY` | 32-byte encryption key | Built-in development key; configure a private key for deployment |
 | `PROXY_KEYWORDS` | Domain keywords to proxy (comma-separated) | google,youtube,github... |
 | `NONPROXY_KEYWORDS` | Domain keywords for direct connection | bilibili,baidu,taobao... |
 | `REVERSE_GEO_PROXY` | Reverse geo logic (CN=proxy, overseas=direct) | false |
 | `TURELY_PROXY_SERVER` | Transparent proxy chain target (ip:port) | - |
-| `NEED_CODEC_IP` | Server IPs requiring encryption | SERVER_HOST + 64.23.159.180 |
+
+Native client TCP, UDP, ICMP, control and probes always encrypt payloads.
+`NEED_CODEC_IP` and the old encryption switches no longer select a plaintext
+path. Legacy encrypted framing remains the default for deployed nodes; v3 is
+an explicit wire-version choice requiring compatible nodes. See
+`docs/network-resilience.md` for compatibility and legacy nonce limitations.
 
 ### Server-specific Environment Variables
 
@@ -554,12 +563,12 @@ pub struct ProxyConfig {
     pub server_port: u16,                // Server port
     pub local_port: u16,                 // Local listening port
     pub session_key: *const c_char,      // Session key (optional)
-    pub auto_proxy: bool,                // Enable auto proxy
-    pub reverse_geo: bool,               // Reverse geo logic
+    pub auto_proxy: c_int,               // Enable auto proxy
+    pub reverse_geo: c_int,              // Reverse geo logic
     pub cache_dir: *const c_char,        // Cache directory
-    pub need_codec_ips: *const c_char,   // IPs requiring encryption (comma-separated)
-    pub force_codec: bool,               // Force encryption for all connections
-    pub set_system_proxy: bool,          // Set system proxy (desktop only)
+    pub need_codec_ips: *const c_char,   // Reserved, ignored
+    pub force_codec: c_int,              // Reserved, native payloads always encrypted
+    pub set_system_proxy: c_int,         // Set system proxy (desktop only)
 }
 ```
 

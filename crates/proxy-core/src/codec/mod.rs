@@ -28,11 +28,13 @@
 
 use ring::aead::Tag;
 use ring::aead::chacha20_poly1305_openssh::TAG_LEN;
-use snafu::{ResultExt, Snafu};
+use snafu::ResultExt;
 
 use crate::crypto::{Decryptor, Encryptor};
 use crate::error::{IoSnafu, ProxyError};
-use crate::protocol::{DataSize, get_data_size, set_data_size};
+use crate::protocol::{
+    DataSize, FrameReader, MAX_DATA_SIZE, current_checksum_key, set_data_size_with_key,
+};
 use crate::{MyAsyncCodecReader, MyAsyncReadExt, MyAsyncWriteExt};
 
 // ============================================================================
@@ -165,24 +167,6 @@ impl<'a, T: tokio::io::AsyncWriteExt + tokio::io::AsyncReadExt + Send + Unpin> M
 }
 
 // ============================================================================
-// Codec Error (kept for backward compatibility, may be removed in future)
-// ============================================================================
-
-/// Codec-specific error type.
-///
-/// Retained for backward compatibility. New code should use `ProxyError`.
-#[derive(Debug, Snafu)]
-#[allow(dead_code)]
-pub enum CodecError {
-    #[snafu(display("Normal reader error"))]
-    Normal { source: std::io::Error },
-    #[snafu(display("Decrypt error: {detail}"))]
-    Decrypt { detail: String },
-    #[snafu(display("Encrypt error: {detail}"))]
-    Encrypt { detail: String },
-}
-
-// ============================================================================
 // AsyncNormalCodec
 // ============================================================================
 
@@ -197,7 +181,7 @@ pub enum CodecError {
 /// ```text
 /// Buffer Size
 ///     ^
-/// 8MB |                    ┌─────────────────── MAX_BUF_SIZE
+/// 32MB|                    ┌─────────────────── MAX_BUF_SIZE
 ///     |                   /
 ///     |                  /  ← doubles on full buffer
 ///     |                 /
@@ -241,20 +225,6 @@ where
         }
     }
 
-    /// Resize the internal buffer to the requested length.
-    ///
-    /// When shrinking, explicitly reduce capacity to avoid holding on to
-    /// large allocations after a transient burst.
-    #[inline]
-    fn resize(&mut self) {
-        let new_len = if self.need_resize >= MAX_BUF_SIZE {
-            MAX_BUF_SIZE
-        } else {
-            self.need_resize
-        };
-        self.buffer.resize(new_len, 0);
-    }
-
     #[inline]
     fn update_need_resize(&mut self, n: usize) {
         if n == self.buffer.len() {
@@ -274,6 +244,20 @@ where
             self.shrink_count = 0;
         }
     }
+
+    async fn read_with_limit(&mut self, limit: usize) -> crate::Result<&mut [u8]> {
+        let next_len = self.need_resize.min(limit);
+        if next_len != self.buffer.len() {
+            self.buffer.resize(next_len, 0);
+        }
+        let n = self
+            .reader
+            .read(&mut self.buffer)
+            .await
+            .map_err(|e| ProxyError::CodecRead { source: e })?;
+        self.update_need_resize(n);
+        Ok(&mut self.buffer[0..n])
+    }
 }
 
 impl<T: MyAsyncReadExt + Send + Unpin> MyAsyncCodecReader for AsyncNormalCodec<T> {
@@ -283,16 +267,7 @@ impl<T: MyAsyncReadExt + Send + Unpin> MyAsyncCodecReader for AsyncNormalCodec<T
         Self: 'a;
 
     async fn codec(&mut self) -> crate::Result<Self::Item<'_>> {
-        if self.need_resize != self.buffer.len() {
-            self.resize()
-        }
-        let n = self
-            .reader
-            .read(&mut self.buffer)
-            .await
-            .map_err(|e| ProxyError::CodecRead { source: e })?;
-        self.update_need_resize(n);
-        Ok(&mut self.buffer[0..n])
+        self.read_with_limit(MAX_BUF_SIZE).await
     }
 
     async fn codec_and_write<W: MyAsyncWriteExt + Send + Unpin>(
@@ -329,61 +304,31 @@ impl<T: MyAsyncReadExt + Send + Unpin> MyAsyncCodecReader for AsyncNormalCodec<T
 /// └──────────────┴──────────────┴─────────────────────┴────────────────┘
 /// ```
 pub struct AsyncDecryptCodec<T, D> {
-    codec_normal: AsyncNormalCodec<T>,
-    decryptor: D,
+    frame: FrameReader<T, D>,
 }
 
-impl<T: MyAsyncReadExt + Unpin, D: Decryptor + Unpin> AsyncDecryptCodec<T, D> {
+impl<T: MyAsyncReadExt + Send + Unpin, D: Decryptor + Send + Unpin> AsyncDecryptCodec<T, D> {
     pub fn new(reader: T, decryptor: D) -> Self {
+        Self::with_limit(reader, decryptor, MAX_DATA_SIZE as usize)
+    }
+
+    pub fn with_limit(reader: T, decryptor: D, limit: usize) -> Self {
         Self {
-            codec_normal: AsyncNormalCodec::new(reader),
-            decryptor,
+            frame: FrameReader::with_decryptor(reader, Some(decryptor), limit),
         }
     }
 }
 
-impl<T: MyAsyncReadExt + Send + Unpin, D: Decryptor + Send + Unpin + 'static> MyAsyncCodecReader
+impl<T: MyAsyncReadExt + Send + Unpin, D: Decryptor + Send + Unpin> MyAsyncCodecReader
     for AsyncDecryptCodec<T, D>
 {
     type Item<'a>
-        = &'a mut [u8]
+        = &'a [u8]
     where
         Self: 'a;
 
-    async fn codec(&mut self) -> crate::Result<&mut [u8]> {
-        let reader = &mut self.codec_normal.reader;
-        let buffer = &mut self.codec_normal.buffer;
-
-        // Read length-prefixed data
-        let data_size = get_data_size(reader).await?;
-        let data_len = data_size as usize;
-        let prev_len = buffer.len();
-        if data_len != prev_len {
-            buffer.resize(data_len, 0);
-        }
-
-        if data_len > prev_len {
-            self.codec_normal.shrink_count = 0;
-        } else if data_len != 0 && data_len < prev_len / 4 && prev_len > INIT_BUF_SIZE {
-            self.codec_normal.shrink_count = self.codec_normal.shrink_count.saturating_add(1);
-            if self.codec_normal.shrink_count >= SHRINK_THRESHOLD {
-                buffer.shrink_to(data_len.max(INIT_BUF_SIZE));
-                self.codec_normal.shrink_count = 0;
-            }
-        } else {
-            self.codec_normal.shrink_count = 0;
-        }
-        reader.read_exact(buffer).await.context(IoSnafu {
-            context: "decrypt_codec",
-            detail: "read_exact".to_string(),
-        })?;
-
-        // Decrypt in-place
-        self.decryptor
-            .decrypt_with_tag(buffer)
-            .map_err(|e| ProxyError::CodecDecrypt {
-                detail: format!("{e}"),
-            })
+    async fn codec(&mut self) -> crate::Result<&[u8]> {
+        Ok(self.frame.read().await?.unwrap_or_default())
     }
 
     async fn codec_and_write<W: MyAsyncWriteExt + Send + Unpin>(
@@ -391,6 +336,9 @@ impl<T: MyAsyncReadExt + Send + Unpin, D: Decryptor + Send + Unpin + 'static> My
         writer: &mut W,
     ) -> crate::Result<DataSize> {
         let data = self.codec().await?;
+        if data.is_empty() {
+            return Ok(0);
+        }
         writer.write_all(data).await.context(IoSnafu {
             context: "decrypt_write",
             detail: "write data".to_string(),
@@ -418,6 +366,7 @@ impl<T: MyAsyncReadExt + Send + Unpin, D: Decryptor + Send + Unpin + 'static> My
 pub struct AsyncEncryptCodec<T, E> {
     codec_normal: AsyncNormalCodec<T>,
     encryptor: E,
+    checksum_key: u32,
 }
 
 impl<T: MyAsyncReadExt + Unpin, E: Encryptor + Unpin> AsyncEncryptCodec<T, E> {
@@ -425,6 +374,7 @@ impl<T: MyAsyncReadExt + Unpin, E: Encryptor + Unpin> AsyncEncryptCodec<T, E> {
         Self {
             codec_normal: AsyncNormalCodec::new(reader),
             encryptor,
+            checksum_key: current_checksum_key(),
         }
     }
 }
@@ -438,7 +388,11 @@ impl<T: MyAsyncReadExt + Send + Unpin, E: Encryptor + Send + Unpin> MyAsyncCodec
         Self: 'a;
 
     async fn codec(&mut self) -> crate::Result<Self::Item<'_>> {
-        let raw_data = self.codec_normal.codec().await?;
+        // The legacy receiver bounds ciphertext plus tag, not just plaintext.
+        let raw_data = self
+            .codec_normal
+            .read_with_limit(MAX_DATA_SIZE as usize - TAG_LEN)
+            .await?;
         if raw_data.is_empty() {
             return Ok((raw_data, Tag::from([0; TAG_LEN])));
         }
@@ -457,6 +411,7 @@ impl<T: MyAsyncReadExt + Send + Unpin, E: Encryptor + Send + Unpin> MyAsyncCodec
         &mut self,
         writer: &mut W,
     ) -> crate::Result<DataSize> {
+        let checksum_key = self.checksum_key;
         let (data, tag) = self.codec().await?;
         if data.is_empty() {
             return Ok(0);
@@ -464,7 +419,7 @@ impl<T: MyAsyncReadExt + Send + Unpin, E: Encryptor + Send + Unpin> MyAsyncCodec
 
         // Write length prefix, ciphertext, and tag
         let length = (data.len() + tag.as_ref().len()) as DataSize;
-        set_data_size(writer, length).await?;
+        set_data_size_with_key(writer, length, checksum_key).await?;
         writer.write_all(data).await.context(IoSnafu {
             context: "encrypt_write",
             detail: "write data".to_string(),
@@ -473,7 +428,7 @@ impl<T: MyAsyncReadExt + Send + Unpin, E: Encryptor + Send + Unpin> MyAsyncCodec
             context: "encrypt_write",
             detail: "write tag".to_string(),
         })?;
-        Ok(length)
+        Ok(data.len() as DataSize)
     }
 }
 
@@ -483,19 +438,99 @@ impl<T: MyAsyncReadExt + Send + Unpin, E: Encryptor + Send + Unpin> MyAsyncCodec
 
 /// Copies data from a codec reader to a writer until EOF.
 ///
-/// Returns the total number of bytes transferred.
+/// Returns forwarded payload bytes, excluding this codec's framing and tags.
 pub async fn copy<R: MyAsyncCodecReader + Send + Unpin, W: MyAsyncWriteExt + Send + Unpin>(
+    reader: R,
+    writer: W,
+) -> crate::Result<u64> {
+    copy_with_observer(reader, writer, |_| {}).await
+}
+
+/// One transfer loop for client and server. The no-op observer compiles away;
+/// metrics callers can observe progress without a second implementation.
+/// The observer receives cumulative payload bytes, not physical wire bytes.
+pub async fn copy_with_observer<
+    R: MyAsyncCodecReader + Send + Unpin,
+    W: MyAsyncWriteExt + Send + Unpin,
+    F: FnMut(u64) + Send,
+>(
     mut reader: R,
     mut writer: W,
-) -> crate::Result<DataSize> {
-    let mut length: DataSize = 0;
+    mut progress: F,
+) -> crate::Result<u64> {
+    let mut total = 0u64;
     loop {
         let n = reader.codec_and_write(&mut writer).await?;
         if n == 0 {
             break;
         }
-        length += n;
+        total += u64::from(n);
+        progress(total);
     }
-    let _ = writer.shutdown().await;
-    Ok(length)
+    // A secure stream may still need to send its authenticated EOF. A failed
+    // shutdown must not turn an incomplete transfer into a reported success.
+    writer.shutdown().await.map_err(|source| ProxyError::Io {
+        context: "relay",
+        detail: "half-close destination".into(),
+        source,
+    })?;
+    Ok(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn large_encrypted_transfers_respect_the_legacy_frame_limit() {
+        use tokio::io::AsyncReadExt;
+
+        let key = b"01234567890123456789012345678901";
+        let length = 3 * MAX_BUF_SIZE as u64;
+        let (sender, receiver) = tokio::io::duplex(64 * 1024);
+        let sent = copy(
+            AsyncEncryptCodec::new(
+                AsyncReader::new(tokio::io::repeat(42).take(length)),
+                crate::Aes256GcmEncryptor::try_new(key).unwrap(),
+            ),
+            AsyncWriter::new(sender),
+        );
+        let received = copy(
+            AsyncDecryptCodec::new(
+                AsyncReader::new(receiver),
+                crate::Aes256GcmDecryptor::try_new(key).unwrap(),
+            ),
+            AsyncWriter::new(tokio::io::sink()),
+        );
+        let totals = tokio::try_join!(sent, received).unwrap();
+        assert_eq!(totals, (length, length));
+    }
+
+    struct LargeTransfer(u8);
+    impl MyAsyncCodecReader for LargeTransfer {
+        type Item<'a> = ();
+
+        async fn codec(&mut self) -> crate::Result<()> {
+            unreachable!()
+        }
+
+        async fn codec_and_write<W: MyAsyncWriteExt + Send + Unpin>(
+            &mut self,
+            _: &mut W,
+        ) -> crate::Result<DataSize> {
+            if self.0 == 0 {
+                return Ok(0);
+            }
+            self.0 -= 1;
+            Ok(1 << 30)
+        }
+    }
+
+    #[tokio::test]
+    async fn transfer_totals_do_not_wrap_or_saturate_at_four_gib() {
+        let total = copy(LargeTransfer(5), AsyncWriter::new(Vec::new()))
+            .await
+            .unwrap();
+        assert_eq!(total, 5u64 << 30);
+    }
 }

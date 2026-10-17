@@ -13,6 +13,7 @@ then local implementation simplicity.
 
 ## Repository Layout
 
+- `crates/proxy-crypto`: configuration-free crypto and generic v3 records.
 - `crates/proxy-core`: protocol, codecs, crypto, config, relay, metrics, nodes.
 - `crates/proxy-client`: local HTTP/HTTPS/SOCKS5 proxy and client CLI.
 - `crates/proxy-server`: remote server, admin CLI, control plane, relay routing.
@@ -242,8 +243,8 @@ On POSIX systems, the pre-commit sequence remains `make clippy` followed by
 strict Clippy should pass without linting vendored dependencies:
 
 ```bash
-cargo clippy -p proxy-core -p proxy-client -p proxy-server -p proxy-tui -p proxy-ffi --all-targets --all-features --no-deps -- -D warnings
-cargo fmt -p proxy-core -p proxy-client -p proxy-server -p proxy-tui -p proxy-ffi -- --check
+cargo clippy -p proxy-crypto -p proxy-core -p proxy-client -p proxy-server -p proxy-tui -p proxy-ffi --all-targets --all-features --no-deps -- -D warnings
+cargo fmt -p proxy-crypto -p proxy-core -p proxy-client -p proxy-server -p proxy-tui -p proxy-ffi -- --check
 ```
 
 ## Rust Engineering Conventions

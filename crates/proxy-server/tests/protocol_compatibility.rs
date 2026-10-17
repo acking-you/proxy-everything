@@ -46,7 +46,6 @@ async fn current_server_accepts_legacy_tcp_header_without_transport() {
         server_addr.ip().to_string(),
         server_addr.port(),
         false,
-        Vec::new(),
         Some(DEFAULT_SECRET_KEY.to_string()),
     );
 
@@ -93,7 +92,6 @@ async fn current_legacy_client_interoperates_with_historical_server_wire_format(
         "127.0.0.1".into(),
         1081,
         false,
-        Vec::new(),
         Some(DEFAULT_SECRET_KEY.into()),
     );
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -104,7 +102,7 @@ async fn current_legacy_client_interoperates_with_historical_server_wire_format(
                 let (mut stream, _) = listener.accept().await.unwrap();
                 // Decode the historical envelope directly, without the current
                 // server parser, and demand the exact original TCP JSON shape.
-                let mut header_codec = Aes256GcmCryption::try_new_with_default_key().unwrap();
+                let mut header_codec = proxy_core::crypto::configured_cryption().unwrap();
                 let header = read_frame(&mut stream, &mut header_codec).await;
                 assert_eq!(
                     serde_json::from_slice::<serde_json::Value>(&header).unwrap(),
@@ -221,7 +219,7 @@ async fn write_frame<S: AsyncWrite + Unpin>(
 async fn send_legacy_header(stream: &mut TcpStream, host: &str, port: u16, key: Option<&str>) {
     let header = LegacyProxyHeader { host, port, key };
     let mut encrypted_header = serde_json::to_vec(&header).unwrap();
-    let mut cryption = Aes256GcmCryption::try_new_with_default_key().unwrap();
+    let mut cryption = proxy_core::crypto::configured_cryption().unwrap();
     let tag = cryption.encrypt(&mut encrypted_header).unwrap();
     let frame_len = u32::try_from(encrypted_header.len() + tag.as_ref().len()).unwrap();
 

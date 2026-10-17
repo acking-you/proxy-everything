@@ -5,18 +5,20 @@
 //! simply mislabelled. The only way to know is to ask an echo service through
 //! the node and see which address answers.
 
-use std::borrow::Cow;
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::ptr;
 use std::time::{Duration, Instant};
 
-use proxy_core::codec::AsyncReaderWriterRef;
-use proxy_core::config::gen_random_key;
-use proxy_core::secure_transport::WireProtocol;
-use proxy_core::transport::{change_msg_key, get_tcp_proxy_stream_with_protocol};
+use proxy_core::codec::{
+    AsyncDecryptCodec, AsyncNormalCodec, AsyncReader, AsyncReaderWriterRef, AsyncWriter,
+};
+use proxy_core::diagnostics::{self, ConnectionTrace};
+use proxy_core::protocol::FrameWriter;
+use proxy_core::secure_transport::{ProxyStream, WireProtocol};
+use proxy_core::session::NativeSession;
 use proxy_core::util::error_report;
-use proxy_core::{Aes256GcmCryption, MyAsyncWriteExt};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
+use proxy_core::{Aes256GcmDecryptor, MyAsyncCodecReader, MyAsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::latency::DEFAULT_TIMEOUT_MS;
 use crate::types::NodeProbeResult;
@@ -41,15 +43,14 @@ const MAX_ECHO_RESPONSE: usize = 8 * 1024;
 
 /// Where a probe stopped.
 ///
-/// Each stage clears a different suspect, which is the whole value of the
-/// reading: reaching the node rules out routing and capture policy, the node
-/// accepting the tunnel rules out the session negotiation, and bytes coming
-/// back rule out the node's own upstream.
+/// Stages describe completed local I/O, not remote acceptance. Writing a proxy
+/// header succeeds before the server validates it, and a TCP reset alone cannot
+/// identify whether the server or an intervening filter rejected the request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProbeStage {
     /// Opening the tunnel to the node.
     Connect,
-    /// Sending the echo request into an accepted tunnel.
+    /// Sending the echo request after writing the proxy header.
     Request,
     /// Reading the answer back out of it.
     Response,
@@ -78,6 +79,8 @@ impl std::fmt::Display for ProbeStage {
 struct ProbeError {
     stage: ProbeStage,
     detail: String,
+    os_error: Option<i32>,
+    is_connection_reset: bool,
 }
 
 impl ProbeError {
@@ -85,6 +88,30 @@ impl ProbeError {
         Self {
             stage,
             detail: detail.into(),
+            os_error: None,
+            is_connection_reset: false,
+        }
+    }
+
+    fn from_error(stage: ProbeStage, error: &(dyn std::error::Error + 'static)) -> Self {
+        let mut source = Some(error);
+        let mut os_error = None;
+        let mut is_connection_reset = false;
+        while let Some(error) = source {
+            if let Some(error) = error.downcast_ref::<std::io::Error>() {
+                is_connection_reset |= error.kind() == std::io::ErrorKind::ConnectionReset;
+                if let Some(code) = error.raw_os_error() {
+                    os_error = Some(code);
+                    break;
+                }
+            }
+            source = error.source();
+        }
+        Self {
+            stage,
+            detail: error_report(error),
+            os_error,
+            is_connection_reset,
         }
     }
 
@@ -109,8 +136,8 @@ fn failure(message: impl AsRef<str>, latency_ms: u64) -> NodeProbeResult {
 
 /// Measure a real round trip through a node and report where it egresses.
 ///
-/// `force_codec` mirrors the client's force-encryption setting so the node is
-/// probed the way it is used.
+/// `force_codec` is retained for ABI compatibility. Native TCP connections now
+/// always use session encryption, including probes with this flag set to zero.
 ///
 /// # Safety
 /// - `server_host` must be a valid C string.
@@ -151,7 +178,7 @@ pub unsafe extern "C" fn proxy_probe_node_v3(
 unsafe fn probe_node_inner(
     server_host: *const c_char,
     server_port: u16,
-    force_codec: c_int,
+    _force_codec: c_int,
     timeout_ms: u32,
     protocol: WireProtocol,
 ) -> NodeProbeResult {
@@ -175,9 +202,10 @@ unsafe fn probe_node_inner(
 
     runtime.block_on(async move {
         let start = Instant::now();
+        let diagnostic = ConnectionTrace::default();
         let outcome = tokio::time::timeout(
             timeout,
-            probe(&host, server_port, force_codec != 0, protocol),
+            diagnostic.scope(probe(&host, server_port, protocol)),
         )
         .await;
         let elapsed = start.elapsed().as_millis() as u64;
@@ -188,6 +216,7 @@ unsafe fn probe_node_inner(
         match outcome {
             Ok(Ok((country_code, egress_ip))) => {
                 tracing::info!(
+                    connection_id = diagnostic.id(),
                     node = %host,
                     port = server_port,
                     country_code = %country_code,
@@ -205,10 +234,14 @@ unsafe fn probe_node_inner(
             }
             Ok(Err(error)) => {
                 tracing::warn!(
+                    connection_id = diagnostic.id(),
                     node = %host,
                     port = server_port,
                     stage = %error.stage,
                     detail = %error.detail,
+                    os_error = error.os_error,
+                    connection_phase = diagnostic.phase(),
+                    reset_origin = if error.is_connection_reset { Some("unattributed; requires packet/event correlation") } else { None },
                     latency_ms = elapsed,
                     "node probe failed"
                 );
@@ -216,9 +249,10 @@ unsafe fn probe_node_inner(
             }
             Err(_) => {
                 tracing::warn!(
+                    connection_id = diagnostic.id(),
                     node = %host,
                     port = server_port,
-                    stage = %ProbeStage::Response,
+                    connection_phase = diagnostic.phase(),
                     latency_ms = elapsed,
                     "node probe timed out before an answer returned"
                 );
@@ -228,100 +262,114 @@ unsafe fn probe_node_inner(
     })
 }
 
+struct ObservedProbeSocket {
+    stream: ProxyStream,
+    outcome: &'static str,
+}
+
+impl Drop for ObservedProbeSocket {
+    fn drop(&mut self) {
+        // TaskLocalFuture drops its inner future within the diagnostic scope,
+        // including when the outer timeout cancels the response read. Observe
+        // the live socket before its field is dropped, without extending I/O.
+        self.stream.record_diagnostics(self.outcome);
+    }
+}
+
 /// Returns `(country_code, egress_ip)`, or the stage the probe stopped at.
 async fn probe(
     host: &str,
     port: u16,
-    force_codec: bool,
     protocol: WireProtocol,
 ) -> Result<(String, String), ProbeError> {
-    // Mirror what a real connection through this node would negotiate, so a
-    // node that only accepts encrypted sessions is probed the same way it is
-    // used. A forced session key matches the client's force-codec setting.
-    let msg_key = if force_codec {
-        Some(Cow::Owned(gen_random_key()))
-    } else {
-        change_msg_key(host, None)
-    };
-
-    let stream = get_tcp_proxy_stream_with_protocol(
+    let (stream, msg_key) = NativeSession::connect_with_protocol(
         ECHO_HOST,
         ECHO_PORT,
         host,
         port,
-        msg_key.clone(),
-        "node probe",
+        proxy_core::ProxyTransport::Tcp,
         protocol,
     )
     .await
-    .map_err(|e| ProbeError::new(ProbeStage::Connect, error_report(&e)))?;
-    let legacy_key = if stream.is_secure() {
-        None
-    } else {
-        msg_key.as_deref()
+    .map_err(|e| ProbeError::from_error(ProbeStage::Connect, &e))?
+    .into_parts();
+    let mut observed = ObservedProbeSocket {
+        stream,
+        outcome: "probe_cancelled",
     };
-    exchange_probe(stream, legacy_key).await
+    tracing::info!(
+        node = host,
+        port,
+        local_addr = ?observed.stream.local_addr().ok(),
+        peer_addr = ?observed.stream.peer_addr().ok(),
+        wire_protocol = ?protocol,
+        "node probe socket connected; proxy header written, awaiting response"
+    );
+    let result = exchange_probe(&mut observed.stream, msg_key.as_deref()).await;
+    observed.outcome = if result.is_ok() {
+        "probe_succeeded"
+    } else {
+        "probe_failed"
+    };
+    result
 }
 
 async fn exchange_probe<S: AsyncRead + AsyncWrite + Send + Unpin>(
     mut stream: S,
     msg_key: Option<&str>,
 ) -> Result<(String, String), ProbeError> {
-    let mut cryptor = msg_key
-        .map(|key| Aes256GcmCryption::try_new(key.as_bytes()))
-        .transpose()
-        .map_err(|e| ProbeError::new(ProbeStage::Request, e.to_string()))?;
-    let mut request = ECHO_REQUEST.as_bytes().to_vec();
-    if let Some(cryptor) = cryptor.as_mut() {
-        let tag = cryptor
-            .encrypt(&mut request)
-            .map_err(|e| ProbeError::new(ProbeStage::Request, e.to_string()))?;
-        request.extend_from_slice(tag.as_ref());
-        let len = request.len() as u32;
-        let mut framed = proxy_core::protocol::get_check_sum(len)
-            .to_be_bytes()
-            .to_vec();
-        framed.extend_from_slice(&len.to_be_bytes());
-        framed.extend_from_slice(&request);
-        request = framed;
-    }
-    AsyncReaderWriterRef::new(&mut stream)
-        .write_all(&request)
+    diagnostics::phase("request_prepare");
+    if let Some(key) = msg_key {
+        let mut writer = FrameWriter::new(
+            AsyncWriter::new(&mut stream),
+            Some(key),
+            MAX_ECHO_RESPONSE + 16,
+        )
+        .map_err(|e| ProbeError::from_error(ProbeStage::Request, &e))?;
+        writer
+            .prepare()
+            .map_err(|e| ProbeError::from_error(ProbeStage::Request, &e))?
+            .extend_from_slice(ECHO_REQUEST.as_bytes());
+        diagnostics::phase("request_write");
+        writer
+            .send()
+            .await
+            .map_err(|e| ProbeError::from_error(ProbeStage::Request, &e))?;
+        let decryptor = Aes256GcmDecryptor::try_new(key.as_bytes())
+            .map_err(|e| ProbeError::new(ProbeStage::Response, e.to_string()))?;
+        read_probe_response(AsyncDecryptCodec::with_limit(
+            AsyncReader::new(stream),
+            decryptor,
+            MAX_ECHO_RESPONSE + 16,
+        ))
         .await
-        .map_err(|e| ProbeError::new(ProbeStage::Request, error_report(&e)))?;
+    } else {
+        // v3 already protects these bytes; do not double-encrypt the payload.
+        diagnostics::phase("request_write");
+        AsyncReaderWriterRef::new(&mut stream)
+            .write_all(ECHO_REQUEST.as_bytes())
+            .await
+            .map_err(|e| ProbeError::from_error(ProbeStage::Request, &e))?;
+        read_probe_response(AsyncNormalCodec::new(AsyncReader::new(stream))).await
+    }
+}
+
+async fn read_probe_response<R: MyAsyncCodecReader + Send + Unpin>(
+    mut reader: R,
+) -> Result<(String, String), ProbeError> {
+    diagnostics::phase("response_wait");
     let mut response = Vec::with_capacity(512);
-    let mut chunk = [0_u8; 1024];
     loop {
-        if let Some(cryptor) = cryptor.as_mut() {
-            let mut frame = AsyncReaderWriterRef::new(&mut stream);
-            let length = proxy_core::get_data_size(&mut frame)
-                .await
-                .map_err(|e| ProbeError::new(ProbeStage::Response, error_report(&e)))?
-                as usize;
-            if !(16..=MAX_ECHO_RESPONSE + 16).contains(&length) {
-                return Err(ProbeError::new(
-                    ProbeStage::Response,
-                    "invalid encrypted echo length",
-                ));
-            }
-            let mut data = vec![0; length];
-            stream
-                .read_exact(&mut data)
-                .await
-                .map_err(|e| ProbeError::new(ProbeStage::Response, error_report(&e)))?;
-            let payload = cryptor
-                .decrypt_with_tag(&mut data)
-                .map_err(|e| ProbeError::new(ProbeStage::Response, e.to_string()))?;
-            response.extend_from_slice(payload);
-        } else {
-            let read = stream
-                .read(&mut chunk)
-                .await
-                .map_err(|e| ProbeError::new(ProbeStage::Response, error_report(&e)))?;
-            if read == 0 {
-                break;
-            }
-            response.extend_from_slice(&chunk[..read]);
+        let first = response.is_empty();
+        let received = reader
+            .codec_and_write(&mut AsyncWriter::new(&mut response))
+            .await
+            .map_err(|e| ProbeError::from_error(ProbeStage::Response, &e))?;
+        if received == 0 {
+            break;
+        }
+        if first && !response.is_empty() {
+            diagnostics::phase("response_body");
         }
         if response.len() > MAX_ECHO_RESPONSE {
             return Err(ProbeError::new(
@@ -405,6 +453,171 @@ pub unsafe extern "C" fn proxy_free_node_probe_result(result: *mut NodeProbeResu
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reset_classification_does_not_depend_on_a_windows_numeric_code() {
+        let error = super::ProbeError::from_error(
+            super::ProbeStage::Response,
+            &std::io::Error::new(std::io::ErrorKind::ConnectionReset, "fixture reset"),
+        );
+        assert!(error.is_connection_reset);
+        assert_eq!(error.os_error, None);
+        assert!(
+            !super::ProbeError::new(super::ProbeStage::Decode, "invalid reply").is_connection_reset
+        );
+    }
+
+    #[tokio::test]
+    async fn default_probe_negotiates_legacy_session_encryption_with_historical_peer() {
+        use proxy_core::protocol::get_check_sum;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let peer = async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let checksum = stream.read_u32().await.unwrap();
+            let len = stream.read_u32().await.unwrap();
+            assert_eq!(checksum, get_check_sum(len));
+            assert!(len < 4096);
+            let mut header = vec![0; len as usize];
+            stream.read_exact(&mut header).await.unwrap();
+            let mut cipher = proxy_core::crypto::configured_cryption().unwrap();
+            let header: serde_json::Value =
+                serde_json::from_slice(cipher.decrypt_with_tag(&mut header).unwrap()).unwrap();
+            assert_eq!(header["host"], super::ECHO_HOST);
+            assert_eq!(header["port"], super::ECHO_PORT);
+            assert_eq!(header.as_object().unwrap().len(), 3);
+            let key = header["key"]
+                .as_str()
+                .expect("probes follow the TCP encryption policy");
+            let mut cipher = proxy_core::Aes256GcmCryption::try_new(key.as_bytes()).unwrap();
+            let checksum = stream.read_u32().await.unwrap();
+            let len = stream.read_u32().await.unwrap();
+            assert_eq!(checksum, get_check_sum(len));
+            assert!(len < 4096);
+            let mut request = vec![0; len as usize];
+            stream.read_exact(&mut request).await.unwrap();
+            assert_eq!(
+                cipher.decrypt_with_tag(&mut request).unwrap(),
+                super::ECHO_REQUEST.as_bytes()
+            );
+            let mut response = b"HTTP/1.1 200 OK\r\n\r\nsuccess\nSG\n203.0.113.1\n".to_vec();
+            let tag = cipher.encrypt(&mut response).unwrap();
+            response.extend_from_slice(tag.as_ref());
+            let len = response.len() as u32;
+            stream.write_u32(get_check_sum(len)).await.unwrap();
+            stream.write_u32(len).await.unwrap();
+            for chunk in response.chunks(3) {
+                stream.write_all(chunk).await.unwrap();
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let ((), answer) = tokio::join!(
+                peer,
+                super::probe("127.0.0.1", port, super::WireProtocol::Legacy)
+            );
+            assert_eq!(answer.unwrap(), ("SG".into(), "203.0.113.1".into()));
+        })
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn socket_reset_keeps_its_native_code_without_attributing_its_origin() {
+        let error = super::ProbeError::from_error(
+            super::ProbeStage::Response,
+            &std::io::Error::from_raw_os_error(10054),
+        );
+        assert_eq!(error.os_error, Some(10054));
+        assert_eq!(error.stage, super::ProbeStage::Response);
+        assert!(error.user_message().contains("10054"));
+    }
+
+    #[test]
+    fn wrapped_transport_reset_retains_the_error_chain_and_native_code() {
+        let cause = proxy_core::transport::TransportError::Io {
+            uri: Some("127.0.0.1:1081".into()),
+            detail: "fixture header write",
+            source: std::io::Error::from_raw_os_error(10054),
+        };
+        let error = super::ProbeError::from_error(super::ProbeStage::Connect, &cause);
+        assert_eq!(error.os_error, Some(10054));
+        assert!(error.user_message().contains("fixture header write"));
+        assert!(error.user_message().contains("127.0.0.1:1081"));
+        assert!(error.user_message().contains("10054"));
+        #[cfg(windows)]
+        assert!(error.is_connection_reset);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_exchange_retains_phase_and_live_socket_observations() {
+        use std::sync::{Arc, Mutex};
+
+        use tokio::net::{TcpListener, TcpStream};
+
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let capture = Capture(output.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || capture.clone())
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (client, server) = tokio::join!(
+            TcpStream::connect(listener.local_addr().unwrap()),
+            listener.accept()
+        );
+        let client = client.unwrap();
+        let (mut server, _) = server.unwrap();
+        let local = client.local_addr().unwrap();
+        let peer = client.peer_addr().unwrap();
+        let trace = proxy_core::diagnostics::ConnectionTrace::default();
+        let consume = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut request = vec![0; super::ECHO_REQUEST.len()];
+            server.read_exact(&mut request).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_millis(25),
+            trace.scope(async move {
+                let mut observed = super::ObservedProbeSocket {
+                    stream: client.into(),
+                    outcome: "probe_cancelled",
+                };
+                super::exchange_probe(&mut observed.stream, None).await
+            }),
+        )
+        .await;
+        assert!(outcome.is_err());
+        assert_eq!(trace.phase(), "response_wait");
+        consume.abort();
+        let _ = consume.await;
+        let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        let endpoints = output
+            .lines()
+            .find(|line| line.contains("socket endpoints") && line.contains("probe_cancelled"))
+            .expect("timeout must log the live socket while its trace is installed");
+        assert!(endpoints.contains(&format!("connection_id={}", trace.id())));
+        assert!(endpoints.contains(&format!("local_addr=Some({local})")));
+        assert!(endpoints.contains(&format!("peer_addr=Some({peer})")));
+    }
+
     #[tokio::test]
     async fn secure_node_probe_flushes_request_under_backpressure() {
         use proxy_core::secure_transport::{accept_v3, connect_v3};
@@ -453,7 +666,7 @@ mod tests {
                 .unwrap();
             let mut request = vec![0; size as usize];
             stream.read_exact(&mut request).await.unwrap();
-            let mut crypto = super::Aes256GcmCryption::try_new(key.as_bytes()).unwrap();
+            let mut crypto = proxy_core::Aes256GcmCryption::try_new(key.as_bytes()).unwrap();
             assert_eq!(
                 crypto.decrypt_with_tag(&mut request).unwrap(),
                 super::ECHO_REQUEST.as_bytes()
