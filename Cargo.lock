@@ -748,7 +748,7 @@ checksum = "b365fabc795046672053e29c954733ec3b05e4be654ab130fe8f1f94d7051f35"
 
 [[package]]
 name = "daemonize"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab8bfdaacb3c887a54d41bdf48d3af8873b3f5566469f8ba21b92057509f116e"
 dependencies = [
@@ -908,7 +908,7 @@ dependencies = [
 
 [[package]]
 name = "dirs-sys"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e01a3366d27ee9890022452ee61b2b63a67e6f13f58900b651ff5665f0bb1fab"
 dependencies = [
@@ -1360,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "heck"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
@@ -1781,7 +1781,7 @@ dependencies = [
 
 [[package]]
 name = "iptools"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8434ef3032478a499e586d2eda027eb5f839e27d74c5e9e82f4d59b47a00571f"
 dependencies = [
@@ -2888,7 +2888,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-client"
-version = "0.4.40"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "async-broadcast",
@@ -2925,7 +2925,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-core"
-version = "0.4.40"
+version = "0.6.0"
 dependencies = [
  "arc-swap",
  "async-broadcast",
@@ -2965,7 +2965,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-crypto"
-version = "0.4.40"
+version = "0.6.0"
 dependencies = [
  "futures",
  "ring",
@@ -2974,7 +2974,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-ffi"
-version = "0.4.40"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "libc",
@@ -2991,7 +2991,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-server"
-version = "0.4.40"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3013,7 +3013,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-tui"
-version = "0.4.40"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "clap",
@@ -4678,7 +4678,7 @@ dependencies = [
 
 [[package]]
 name = "wasm-streams"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d1ec4f6517c9e11ae630e200b2b65d193279042e28edd4a2cda233e46670bbb"
 dependencies = [
