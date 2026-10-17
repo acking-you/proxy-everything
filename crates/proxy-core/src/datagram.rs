@@ -4,11 +4,12 @@
 //! module centralizes the framing needed to preserve those boundaries and the
 //! direct/SOCKS5 relay implementations shared by the client and server.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use dashmap::DashMap;
+use parking_lot::Mutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 
@@ -340,7 +341,7 @@ fn direct_datagram_relay(sockets: UdpSocketSet) -> DatagramRelay {
         ipv6_socket = ?sockets.v6.as_ref().and_then(|socket| socket.local_addr().ok()),
         "direct UDP relay sockets initialized"
     );
-    let peers = Arc::new(DashMap::new());
+    let peers = Arc::new(Mutex::new(HashMap::new()));
     DatagramRelay {
         reader: DatagramRelayReader::Direct(DirectDatagramReader {
             sockets: sockets.clone(),
@@ -521,7 +522,7 @@ impl UdpSocketSet {
 
 pub struct DirectDatagramReader {
     sockets: UdpSocketSet,
-    peers: Arc<DashMap<SocketAddr, ()>>,
+    peers: Arc<Mutex<HashMap<SocketAddr, DirectPeer>>>,
     v4_buffer: Vec<u8>,
     v6_buffer: Vec<u8>,
 }
@@ -568,7 +569,7 @@ impl DirectDatagramReader {
                     (size, source, false)
                 }
             };
-            if !self.peers.contains_key(&source) {
+            if !self.peers.lock().contains_key(&source) {
                 tracing::debug!(%source, "discarding UDP response from an unknown peer");
                 continue;
             }
@@ -590,7 +591,52 @@ impl DirectDatagramReader {
 
 pub struct DirectDatagramWriter {
     sockets: UdpSocketSet,
-    peers: Arc<DashMap<SocketAddr, ()>>,
+    peers: Arc<Mutex<HashMap<SocketAddr, DirectPeer>>>,
+}
+
+#[derive(Default)]
+struct DirectPeer {
+    pending: usize,
+    contacted: bool,
+}
+
+// Register before send_to can yield, and roll back failed/cancelled sends.
+// Concurrent sends to the same peer must not revoke a successful send's grant.
+struct PendingPeer<'a> {
+    peers: &'a Mutex<HashMap<SocketAddr, DirectPeer>>,
+    destination: SocketAddr,
+}
+
+impl<'a> PendingPeer<'a> {
+    fn new(
+        peers: &'a Mutex<HashMap<SocketAddr, DirectPeer>>,
+        destination: SocketAddr,
+    ) -> crate::Result<Self> {
+        let mut entries = peers.lock();
+        if !entries.contains_key(&destination) && entries.len() >= MAX_DIRECT_UDP_PEERS {
+            return protocol_error("UDP association exceeded its destination limit");
+        }
+        entries.entry(destination).or_default().pending += 1;
+        Ok(Self { peers, destination })
+    }
+
+    fn confirm(&self) {
+        if let Some(peer) = self.peers.lock().get_mut(&self.destination) {
+            peer.contacted = true;
+        }
+    }
+}
+
+impl Drop for PendingPeer<'_> {
+    fn drop(&mut self) {
+        let mut entries = self.peers.lock();
+        if let Some(peer) = entries.get_mut(&self.destination) {
+            peer.pending -= 1;
+            if peer.pending == 0 && !peer.contacted {
+                entries.remove(&self.destination);
+            }
+        }
+    }
 }
 
 impl DirectDatagramWriter {
@@ -602,23 +648,16 @@ impl DirectDatagramWriter {
             let Some(socket) = self.sockets.socket_for(destination) else {
                 continue;
             };
-            // Only destinations contacted by this association may send data
-            // back. Besides rejecting unsolicited packets, the bounded set
-            // prevents a local client from growing per-association state
-            // indefinitely by cycling through arbitrary destination tuples.
-            if !self.peers.contains_key(&destination) && self.peers.len() >= MAX_DIRECT_UDP_PEERS {
-                return protocol_error("UDP association exceeded its destination limit");
-            }
-            // Authorize before yielding to send_to: a fast reply can reach the
-            // reader before this task resumes after a successful send.
-            self.peers.insert(destination, ());
+            let authorization = PendingPeer::new(&self.peers, destination)?;
             match socket.send_to(packet.payload, destination).await {
                 Ok(_) => {
+                    authorization.confirm();
+                    let tracked_peers = self.peers.lock().len();
                     tracing::debug!(
                         direction = "tunnel_to_remote",
                         remote = %destination,
                         payload_bytes = packet.payload.len(),
-                        tracked_peers = self.peers.len(),
+                        tracked_peers,
                         "sent direct UDP request"
                     );
                     return Ok(());
@@ -872,6 +911,38 @@ mod tests {
     use super::*;
     use crate::codec::{AsyncReader, AsyncWriter};
     use crate::protocol::get_check_sum;
+
+    #[tokio::test]
+    async fn failed_udp_send_revokes_only_unconfirmed_peers() {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let destination = DatagramAddress::Ip(socket.local_addr().unwrap());
+        let (mut reader, writer, _) = create_direct_datagram_relay().await.unwrap().into_parts();
+        let DatagramRelayWriter::Direct(writer) = writer else {
+            unreachable!()
+        };
+        // A valid SOCKS frame can still exceed the IPv4 UDP payload limit.
+        let oversized = encode_socks5_udp_packet(&destination, &vec![0; 65508]).unwrap();
+        assert!(writer.send(&oversized).await.is_err());
+        assert!(writer.peers.lock().is_empty());
+
+        writer
+            .send(&encode_socks5_udp_packet(&destination, b"request").unwrap())
+            .await
+            .unwrap();
+        let mut buffer = [0; 32];
+        let (_, peer) = socket.recv_from(&mut buffer).await.unwrap();
+        assert!(writer.send(&oversized).await.is_err());
+        socket.send_to(b"reply", peer).await.unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(1), reader.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parse_socks5_udp_packet(&response).unwrap().payload,
+            b"reply"
+        );
+        assert_eq!(writer.peers.lock().len(), 1);
+    }
 
     #[test]
     fn socks5_udp_packet_round_trips_all_address_types() {

@@ -262,33 +262,14 @@ pub async fn handle_client(mut context: ClientProxyContext) -> Result<()> {
         None
     };
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-    let direct_interface = if policy
-        .as_ref()
-        .is_some_and(tun2proxy::SessionPolicy::bypass)
-    {
-        Some(
-            process_bypass::physical_interface(
-                context
-                    .process_matcher
-                    .as_ref()
-                    .expect("matched policy")
-                    .virtual_dns
-                    .clone(),
-                context
-                    .process_matcher
-                    .as_ref()
-                    .expect("matched policy")
-                    .dns_fallback,
-            )
-            .await
-            .context(IoSnafu {
-                uri: None,
-                detail: "select process-bypass physical interface",
-            })?,
-        )
-    } else {
-        None
-    };
+    let direct_interface = context.process_matcher.as_ref().and_then(|matcher| {
+        policy
+            .as_ref()
+            .is_some_and(tun2proxy::SessionPolicy::bypass)
+            .then(|| {
+                process_bypass::DirectRoute::new(matcher.virtual_dns.clone(), matcher.dns_fallback)
+            })
+    });
     let header_context = HeaderContext { header };
     let proxy_context = ProxyContext {
         handshake_deadline: deadline,

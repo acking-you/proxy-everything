@@ -16,9 +16,10 @@ const PREFIX: &str = "proxy-native-";
 
 enum Command {
     Entry(String),
-    Flush(mpsc::SyncSender<()>),
+    Flush(mpsc::SyncSender<io::Result<()>>),
 }
 
+#[derive(Clone)]
 struct DiskLog {
     directory: PathBuf,
     sender: mpsc::SyncSender<Command>,
@@ -57,7 +58,7 @@ impl DiskLog {
                     if let Ok(Command::Entry(line)) = &command {
                         bytes.fetch_sub(line.len(), Ordering::Relaxed);
                     }
-                    if let Err(error) = result {
+                    if let Err(error) = &result {
                         // Never feed writer failures back into the same queue.
                         eprintln!("native log persistence failed: {error}");
                         if !failed {
@@ -76,7 +77,7 @@ impl DiskLog {
                         failed = false;
                     }
                     if let Ok(Command::Flush(done)) = &command {
-                        let _ = done.send(());
+                        let _ = done.send(result);
                     }
                     if matches!(command, Err(mpsc::RecvTimeoutError::Disconnected)) {
                         break;
@@ -111,27 +112,33 @@ impl DiskLog {
         }
     }
 
-    fn flush(&self) {
+    fn flush(&self) -> io::Result<()> {
         let (done, received) = mpsc::sync_channel(1);
-        if self.sender.try_send(Command::Flush(done)).is_ok() {
-            let _ = received.recv_timeout(Duration::from_secs(1));
-        }
+        // Shutdown is the only blocking producer: enqueue the barrier even
+        // when the data queue is full, then wait for the worker's flush result.
+        self.sender
+            .send(Command::Flush(done))
+            .map_err(io::Error::other)?;
+        received.recv().map_err(io::Error::other)?
     }
 }
 
 struct LogFiles {
     directory: PathBuf,
     writer: BufWriter<File>,
+    lease: File,
     bytes: u64,
     sequence: u64,
 }
 
 impl LogFiles {
     fn new(directory: PathBuf) -> io::Result<Self> {
-        let (writer, sequence) = Self::open(&directory, 0)?;
+        let _directory_lock = Self::lock_directory(&directory)?;
+        let (writer, lease, sequence) = Self::open(&directory, 0)?;
         let mut files = Self {
             directory,
             writer,
+            lease,
             bytes: 0,
             sequence,
         };
@@ -139,23 +146,48 @@ impl LogFiles {
         Ok(files)
     }
 
-    fn open(directory: &Path, mut sequence: u64) -> io::Result<(BufWriter<File>, u64)> {
+    fn lock_directory(directory: &Path) -> io::Result<File> {
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(directory.join(".proxy-native.lock"))?;
+        // Serialize creation and cleanup so a new log cannot be removed before
+        // its lifetime lock is acquired. Dropping the handle releases the lock.
+        lock.lock()?;
+        Ok(lock)
+    }
+
+    fn open(directory: &Path, mut sequence: u64) -> io::Result<(BufWriter<File>, File, u64)> {
         loop {
             let name = format!(
                 "{PREFIX}{}-{}-{sequence:04}.log",
                 chrono::Local::now().format("%Y%m%d-%H%M%S"),
                 std::process::id()
             );
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(directory.join(name))
-            {
-                Ok(file) => return Ok((BufWriter::new(file), sequence)),
+            let path = directory.join(name);
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => {
+                    // Lock a sidecar, so diagnostics remain readable on
+                    // Windows where byte-range locks also exclude readers.
+                    let lease = Self::open_lease(&path)?;
+                    lease.lock()?;
+                    return Ok((BufWriter::new(file), lease, sequence));
+                }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => sequence += 1,
                 Err(error) => return Err(error),
             }
         }
+    }
+
+    fn open_lease(path: &Path) -> io::Result<File> {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path.with_extension("log.lock"))
     }
 
     fn cleanup(&mut self) -> io::Result<()> {
@@ -175,17 +207,30 @@ impl LogFiles {
                 .and_then(|metadata| metadata.modified())
                 .ok()
         });
-        for entry in files.iter().take(files.len().saturating_sub(MAX_FILES)) {
-            // Another running instance may still hold an older file open.
-            let _ = fs::remove_file(entry.path());
+        let mut remaining = files.len();
+        for entry in files {
+            if remaining <= MAX_FILES {
+                break;
+            }
+            let Ok(lease) = Self::open_lease(&entry.path()) else {
+                continue;
+            };
+            // Windows, Linux and macOS all keep this exclusive lock while the
+            // owning worker writes. Never unlink another live writer's file.
+            if lease.try_lock().is_ok() && fs::remove_file(entry.path()).is_ok() {
+                let _ = fs::remove_file(entry.path().with_extension("log.lock"));
+                remaining -= 1;
+            }
         }
         Ok(())
     }
 
     fn write(&mut self, line: &str) -> io::Result<()> {
         if self.bytes + line.len() as u64 > MAX_FILE_BYTES {
+            let _directory_lock = Self::lock_directory(&self.directory)?;
             self.writer.flush()?;
-            (self.writer, self.sequence) = Self::open(&self.directory, self.sequence + 1)?;
+            (self.writer, self.lease, self.sequence) =
+                Self::open(&self.directory, self.sequence + 1)?;
             self.bytes = 0;
             self.cleanup()?;
         }
@@ -218,18 +263,87 @@ pub(crate) fn write(level: i32, message: &str) {
 }
 
 pub(crate) fn flush() {
-    if let Some(sink) = SINK
+    let sink = SINK
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .as_ref()
+        .cloned();
+    // Never hold the global producer lock while waiting on I/O or callbacks.
+    if let Some(sink) = sink
+        && let Err(error) = sink.flush()
     {
-        sink.flush();
+        eprintln!("native log flush failed: {error}");
+        crate::logging::send_callback(4, &format!("Native log flush failed: {error}"));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shutdown_flush_waits_for_a_full_queue_and_the_worker() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.send(Command::Entry("queued record".into())).unwrap();
+        let sink = DiskLog {
+            directory: PathBuf::new(),
+            sender,
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
+            dropped: Arc::new(AtomicUsize::new(0)),
+        };
+        let (started, start) = mpsc::sync_channel(1);
+        let (finished, finish) = mpsc::sync_channel(1);
+        let flush = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            let result = sink.flush();
+            finished.send(()).unwrap();
+            result
+        });
+        start.recv().unwrap();
+        assert!(finish.recv_timeout(Duration::from_millis(25)).is_err());
+        assert!(matches!(receiver.recv().unwrap(), Command::Entry(_)));
+        let Command::Flush(done) = receiver.recv_timeout(Duration::from_secs(1)).unwrap() else {
+            panic!("missing flush barrier");
+        };
+        assert!(finish.try_recv().is_err());
+        done.send(Ok(())).unwrap();
+        flush.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn native_retention_keeps_live_files_readable_and_removes_closed_files() {
+        let directory = std::env::temp_dir().join(format!(
+            "proxy-retention-test-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let mut live = Vec::new();
+        for _ in 0..MAX_FILES + 1 {
+            let mut files = LogFiles::new(directory.clone()).unwrap();
+            files.write("live diagnostics\n").unwrap();
+            files.writer.flush().unwrap();
+            live.push(files);
+        }
+        let log_paths = || {
+            fs::read_dir(&directory)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "log"))
+                .collect::<Vec<_>>()
+        };
+        let paths = log_paths();
+        assert_eq!(paths.len(), MAX_FILES + 1);
+        for path in &paths {
+            assert_eq!(fs::read_to_string(path).unwrap(), "live diagnostics\n");
+        }
+        drop(live);
+        let files = LogFiles::new(directory.clone()).unwrap();
+        assert_eq!(log_paths().len(), MAX_FILES);
+        drop(files);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn native_disk_keeps_complete_records_independently_of_the_ui() {
         let directory = std::env::temp_dir().join(format!(
@@ -244,10 +358,14 @@ mod tests {
                 &format!("CONNECT example.test:443 request={i} 中文\nCaused by: connection reset"),
             );
         }
-        sink.flush();
+        sink.flush().unwrap();
         let file = fs::read_dir(&directory)
             .unwrap()
-            .next()
+            .find(|entry| {
+                entry
+                    .as_ref()
+                    .is_ok_and(|entry| entry.path().extension().is_some_and(|ext| ext == "log"))
+            })
             .unwrap()
             .unwrap()
             .path();

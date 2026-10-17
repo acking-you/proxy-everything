@@ -319,6 +319,13 @@ Other bypassed processes connect directly to their original destinations and
 therefore do not use the proxy. Do not add an application to the bypass list if
 its traffic should remain proxied.
 
+For excluded local HTTP/SOCKS clients, loopback destinations do not require a
+physical adapter. `localhost` supports both loopback families, including an
+IPv6-only service. Physical DNS resolution and socket binding are deferred
+until a non-local destination is used. If an IPv4 domain connection fails, the
+client resolves and tries IPv6; UDP retries the other family only when sending
+fails, since a successful UDP send cannot confirm that a service is reachable.
+
 The Windows picker combines live processes with installed Win32 applications
 registered through App Paths, Uninstall metadata, and Start Menu Shell links.
 For registrations that only expose an application directory, scanning is
@@ -383,7 +390,10 @@ unbounded memory growth.
 Native FFI logs also go to `logs/proxy-native-*.log` in the existing application
 support directory, before UI filtering or callback throttling. This independent
 writer preserves complete request destinations and error chains, uses an 8 MiB
-bounded queue, and rotates at 64 MiB with at most eight files of its own. Queue
+bounded queue, and rotates at 64 MiB, retaining eight native log files where
+possible. Files still owned by a running instance are exempt from cleanup and
+remain readable; small `.log.lock` sidecars coordinate ownership. Shutdown waits
+for queued records and the final flush, even when the queue is full. Queue
 overflow and disk failures are reported rather than silently truncating records.
 UDP relay lifecycle logs include the selected interface, socket endpoints,
 datagram counts and close reason. Receiving a large UDP reply now produces IP
