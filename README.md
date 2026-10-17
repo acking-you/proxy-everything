@@ -161,7 +161,9 @@ client executable in the process-bypass policy. Additional processes can bypass
 TUN with repeatable `--tun-bypass-process` options. Use `--tun-list-processes`
 to list currently running Windows executable names.
 
-Desktop DNS prefers AliDNS and Tencent DNSPod through the physical interface.
+Ordinary TUN DNS queries use TCP through the proxy, including when UDP relay is
+disabled. DNS queries owned by explicitly excluded processes use the physical
+interface and prefer AliDNS and Tencent DNSPod.
 Explicit process exclusions also apply to local HTTP/SOCKS clients using the
 system proxy; their hostname lookups and outbound sockets use the physical
 interface. See [DNS, exclusions and diagnostic logs](docs/client-usage.md#tun-mode)

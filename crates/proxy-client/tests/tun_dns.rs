@@ -4,10 +4,11 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use etherparse::{PacketBuilder, SlicedPacket, TransportSlice};
+use proxy_client::client::tun::TunConfig;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
-use tun2proxy::{ArgDns, ArgProxy, ArgUdpStrategy, Args, VirtualDnsState};
+use tun2proxy::{ArgProxy, ArgUdpStrategy, Args, VirtualDnsState};
 
 const CLIENT: [u8; 4] = [10, 77, 0, 2];
 const PORTAL: [u8; 4] = [10, 77, 0, 1];
@@ -98,7 +99,7 @@ async fn real_listener_forces_dns_through_remote_without_forcing_other_traffic()
             let args = Args {
                 setup: false,
                 proxy: ArgProxy::try_from(format!("socks5://{local_addr}").as_str()).unwrap(),
-                dns: ArgDns::OverTcp,
+                dns: TunConfig::new(Vec::<String>::new()).unwrap().dns_mode(),
                 dns_addr: resolver.parse().unwrap(),
                 udp_strategy: ArgUdpStrategy::Block,
                 ..Args::default()
@@ -253,7 +254,10 @@ async fn disabling_fake_ip_proxies_udp_and_tcp_dns_and_preserves_cached_domains(
                 format!("socks5://{}", listener.local_addr().unwrap()).as_str(),
             )
             .unwrap(),
-            dns: ArgDns::Virtual,
+            dns: TunConfig::new(Vec::<String>::new())
+                .unwrap()
+                .with_fake_ip(true)
+                .dns_mode(),
             dns_addr: "192.0.2.53".parse().unwrap(),
             // DNS must work even when ordinary UDP forwarding is disabled.
             udp_strategy: ArgUdpStrategy::Block,
@@ -285,7 +289,7 @@ async fn disabling_fake_ip_proxies_udp_and_tcp_dns_and_preserves_cached_domains(
         // Upgrade reloads the mapping but disables creation of new Fake-IPs.
         let state = VirtualDnsState::default();
         assert_eq!(state.enable_persistence_in(&dir.0).await.unwrap(), 1);
-        args.dns = ArgDns::OverTcp;
+        args.dns = TunConfig::new(Vec::<String>::new()).unwrap().dns_mode();
         let (mut host, device) = tokio::io::duplex(65536);
         let cancel = CancellationToken::new();
         let _cancel_guard = cancel.clone().drop_guard();

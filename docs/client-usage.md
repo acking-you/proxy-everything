@@ -21,8 +21,8 @@ Without `--set-system-proxy`, manually configure system proxy to `127.0.0.1:<loc
 | `-m, --msg-key` | Enable random message key |
 | `--udp <true\|false>` | Enable SOCKS5 UDP ASSOCIATE (default: `true`) |
 | `--tun` | Capture device traffic with a local TUN interface |
-| `--tun-fake-ip true` | Opt into virtual DNS; desktop defaults to real answers over the physical interface |
-| `--tun-dns-server <IP>` | Additional desktop physical DNS fallback; platform VPN proxy resolver (default: `223.5.5.5`) |
+| `--tun-fake-ip true` | Opt into virtual DNS; defaults to real answers resolved through the proxy |
+| `--tun-dns-server <IP>` | Resolver reached through the proxy for the TUN DNS portal (default: `223.5.5.5`) |
 | `--tun-udp-direct-fallback <true\|false>` | Send UDP directly when proxy UDP is off; `false` blocks it (default: `true`) |
 | `--tun-bypass-process <name>` | Bypass TUN for an executable name (repeatable) |
 | `--tun-list-processes` | List running Windows executable names and exit |
@@ -90,16 +90,21 @@ capture policy by application package name.
 The local port is a protocol-multiplexed HTTP/SOCKS5 listener, but tun2proxy
 deliberately uses its SOCKS5 endpoint because SOCKS5 preserves both TCP and UDP
 semantics. A successful local listener bind is therefore a prerequisite for
-starting TUN. Desktop TUN resolves captured DNS queries (UDP or TCP on port 53)
-through sockets bound to the physical interface, returning real addresses. The
-ordered resolvers are AliDNS `223.5.5.5`, Tencent DNSPod `119.29.29.29`, AliDNS
-`223.6.6.6`, then the physical adapter's DNS and the configured fallback. UDP
-retries and TCP fallback precede moving to the next resolver; a valid NXDOMAIN
-is final. This also works when ordinary UDP forwarding is disabled. Windows'
-shared DNS service hides the original application, so the desktop DNS portal
-and excluded processes use the same physical resolver path, avoiding a shared
-cache populated with CDN addresses selected for the proxy exit. Android, iOS
-and the macOS Network Extension keep their platform-managed proxy DNS path.
+starting TUN. Captured DNS queries (UDP or TCP on port 53) use TCP through the
+proxy, returning real addresses even when ordinary UDP forwarding is disabled.
+Keeping DNS inside the proxy prevents incorrect answers from the local network
+from directing proxied connections to unrelated servers.
+
+On desktop, DNS sockets owned by explicitly excluded processes instead bind to
+the physical interface. Their ordered resolvers are AliDNS `223.5.5.5`, Tencent
+DNSPod `119.29.29.29`, AliDNS `223.6.6.6`, then the physical adapter's DNS and the
+configured fallback. UDP retries and TCP fallback precede moving to the next
+resolver; a valid NXDOMAIN is final. Windows' shared DNS service can hide the
+original application: queries without a matching process exclusion remain
+proxied. Excluded applications using that service may therefore receive cached
+answers selected for the proxy exit. Excluding the shared DNS service would
+send other applications' DNS outside the proxy as well.
+
 Fake-IP is optional: enable **Fake-IP DNS**
 in the GUI configuration or pass `--tun-fake-ip true` to the CLI to allocate
 virtual addresses and forward the original domain. Missing settings in older
@@ -110,13 +115,13 @@ its DNS portal at `172.19.0.2`, outside the
 collide with an allocated application hostname.
 
 **TUN DNS resolver IP** / `--tun-dns-server` defaults to `223.5.5.5`; saved values
-are preserved. On desktop it is an additional fallback, not an override of the
-ordered public resolvers; split-horizon enterprise DNS is not provided by this
-policy. In platform-managed VPNs it remains the resolver behind the private
-DNS portal, reached through the proxy. Restart the proxy connection after
+are preserved. It is the resolver behind the private TUN DNS portal, reached
+through the proxy. For explicitly bypassed DNS on desktop it is an additional
+fallback, not an override of the ordered physical resolvers; split-horizon
+enterprise DNS is not provided by that policy. Restart the proxy connection after
 changing it. IPv4-only TUN sessions remove AAAA records from UDP and TCP replies.
-Large upstream answers set DNS truncation when they exceed the client's UDP
-limit, allowing that client to retry over TCP.
+The physical DNS relay for excluded processes sets DNS truncation when an
+upstream answer exceeds the client's UDP limit, allowing a retry over TCP.
 
 Native embedders can call the additive `proxy_set_tun_dns_server` before startup;
 it accepts a literal IPv4/IPv6 address (null resets the default), rejects invalid
@@ -343,7 +348,7 @@ does not control multicast egress. Without the multicast-specific binding, an
 SSDP packet such as `239.255.255.250:1900` can return through Wintun, create a
 new proxy-ui UDP socket, and amplify into a self-sustaining relay loop.
 
-TUN TCP continues to work with `--udp false`. DNS still uses the platform path
+TUN TCP continues to work with `--udp false`. DNS still uses the proxy path
 described above (or the virtual resolver when Fake-IP is enabled), while other captured UDP
 is relayed directly instead
 of being sent to the local SOCKS5 listener. This matches the practical fallback

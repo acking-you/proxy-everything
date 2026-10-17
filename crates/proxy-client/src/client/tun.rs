@@ -220,7 +220,7 @@ pub struct TunConfig {
     pub virtual_dns_state: TunVirtualDnsState,
     /// Allocate synthetic DNS addresses only when explicitly enabled.
     pub fake_ip: bool,
-    /// Extra resolver for the desktop physical DNS portal; mobile uses TCP proxy DNS.
+    /// Resolver reached through the proxy for DNS queries to the TUN portal.
     pub dns_server: IpAddr,
     pub ipv6_enabled: bool,
     pub mtu: u16,
@@ -269,25 +269,22 @@ impl TunConfig {
         self
     }
 
-    /// Use Fake-IP DNS instead of real answers from the platform's DNS path.
+    /// Use Fake-IP DNS instead of real answers resolved through the proxy.
     pub fn with_fake_ip(mut self, enabled: bool) -> Self {
         self.fake_ip = enabled;
         self
     }
 
-    pub(crate) fn dns_mode(&self) -> ArgDns {
+    /// DNS strategy for captured traffic that does not match process bypass.
+    /// Explicitly bypassed DNS uses the physical interface independently.
+    pub fn dns_mode(&self) -> ArgDns {
         if self.fake_ip {
             ArgDns::Virtual
         } else {
-            if cfg!(any(
-                target_os = "windows",
-                target_os = "linux",
-                target_os = "macos"
-            )) {
-                ArgDns::Physical
-            } else {
-                ArgDns::OverTcp
-            }
+            // Direct DNS can return unusable destinations even when subsequent
+            // connections are proxied. Only explicitly bypassed DNS may use the
+            // physical interface; a shared OS resolver is not a bypass match.
+            ArgDns::OverTcp
         }
     }
 
@@ -748,8 +745,8 @@ async fn run_with_ready_inner(
         // Android's VpnService already owns addresses, routes, DNS, and the
         // per-application policy. Desktop platforms remain managed here.
         setup: !platform_owned_tun,
-        // Desktop DNS uses physical egress; platform VPNs keep protected proxy
-        // DNS. Both work with ordinary UDP disabled. Fake-IP is opt-in.
+        // DNS stays inside the proxy even when ordinary UDP is disabled.
+        // tun2proxy handles explicitly bypassed DNS on the physical interface.
         dns: config.dns_mode(),
         dns_addr: config.dns_server,
         udp_strategy: tun_udp_strategy(config.udp_enabled, config.udp_direct_fallback),
@@ -945,22 +942,6 @@ async fn resolve_remote_addresses(endpoint: Option<&(String, u16)>) -> io::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tun_dns_uses_physical_resolvers_on_desktop_and_fake_ip_is_opt_in() {
-        let config = TunConfig::new(Vec::<String>::new()).unwrap();
-        let mode = if cfg!(any(
-            target_os = "windows",
-            target_os = "linux",
-            target_os = "macos"
-        )) {
-            ArgDns::Physical
-        } else {
-            ArgDns::OverTcp
-        };
-        assert_eq!(config.dns_mode(), mode);
-        assert_eq!(config.with_fake_ip(true).dns_mode(), ArgDns::Virtual);
-    }
 
     /// The picker is only useful if it can actually see this user's applications
     /// without privileges, and if every row it offers is a name the TUN policy
