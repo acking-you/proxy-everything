@@ -186,7 +186,7 @@ pub async fn connect_tcp_host(host: &str, port: u16) -> std::io::Result<TcpStrea
     crate::diagnostics::phase("resolve");
     let addresses = resolve_host_addresses(host).await?;
     crate::diagnostics::phase("tcp_connect");
-    match race_addresses(&addresses, port, connect_socket).await {
+    match connect_tcp_addresses(&addresses, port).await {
         Ok(stream) => Ok(stream),
         Err(error) if host.parse::<IpAddr>().is_err() => {
             crate::diagnostics::phase("resolve_refresh");
@@ -195,10 +195,17 @@ pub async fn connect_tcp_host(host: &str, port: u16) -> std::io::Result<TcpStrea
                 return Err(error);
             }
             crate::diagnostics::phase("tcp_connect");
-            race_addresses(&refreshed, port, connect_socket).await
+            connect_tcp_addresses(&refreshed, port).await
         }
         Err(error) => Err(error),
     }
+}
+
+/// Connect only to addresses whose route policy the caller has already prepared.
+/// Uses the normal family staggering and TCP diagnostics without resolving a
+/// different address behind the caller's installed bypass routes.
+pub async fn connect_tcp_addresses(addresses: &[IpAddr], port: u16) -> std::io::Result<TcpStream> {
+    race_addresses(addresses, port, connect_socket).await
 }
 
 async fn connect_socket(address: SocketAddr) -> std::io::Result<TcpStream> {
@@ -338,19 +345,27 @@ pub(crate) async fn get_proxy_stream(
     uri: &str,
     protocol: WireProtocol,
 ) -> Result<ProxyStream> {
+    let stream = get_tcp_stream(proxy_server, proxy_server_port, detail).await?;
+    setup_proxy_stream(proxy_header, stream, uri, protocol).await
+}
+
+pub(crate) async fn setup_proxy_stream(
+    proxy_header: &ProxyHeader,
+    mut proxy_server_stream: TcpStream,
+    uri: &str,
+    protocol: WireProtocol,
+) -> Result<ProxyStream> {
     // Do not log the session key or the encrypted header. The transport and
     // boolean encryption flag are enough to diagnose protocol negotiation
     // without leaking credentials into debug output.
     tracing::debug!(
-        proxy_server,
-        proxy_server_port,
+        peer = ?proxy_server_stream.peer_addr().ok(),
         target = uri,
         transport = ?proxy_header.transport,
         wire_protocol = ?protocol,
         session_encrypted = protocol == WireProtocol::V3 || proxy_header.key.is_some(),
         "opening proxy transport connection"
     );
-    let mut proxy_server_stream = get_tcp_stream(proxy_server, proxy_server_port, detail).await?;
     crate::diagnostics::phase("proxy_header_prepare");
     // One snapshot binds header encryption and framing to the same credential.
     let (key, checksum_key) =
@@ -423,8 +438,7 @@ pub(crate) async fn get_proxy_stream(
     })?;
     crate::diagnostics::phase("proxy_header_written");
     tracing::debug!(
-        proxy_server,
-        proxy_server_port,
+        peer = ?proxy_server_stream.peer_addr().ok(),
         target = uri,
         transport = ?proxy_header.transport,
         encrypted_header_bytes = len,

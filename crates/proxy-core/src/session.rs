@@ -3,9 +3,11 @@
 
 use std::borrow::Cow;
 
+use tokio::net::TcpStream;
+
 use crate::protocol::{ProxyHeader, ProxyTransport};
 use crate::secure_transport::{ProxyStream, WireProtocol};
-use crate::transport::{Result, TransportError, get_proxy_stream};
+use crate::transport::{Result, TransportError, get_tcp_stream, setup_proxy_stream};
 
 /// An encrypted session to a native node. Legacy peers use their existing
 /// payload frames; v3 protects the stream itself and needs no inner codec.
@@ -38,6 +40,33 @@ impl NativeSession {
         transport: ProxyTransport,
         protocol: WireProtocol,
     ) -> Result<Self> {
+        let stream = get_tcp_stream(node, node_port, "connect native proxy session").await?;
+        Self::from_tcp_stream_with_protocol(host, port, transport, stream, protocol).await
+    }
+
+    /// Negotiate on a connection whose route and peer the caller has already
+    /// selected. No DNS lookup or alternative connection can occur here.
+    pub async fn from_tcp_stream(
+        host: &str,
+        port: u16,
+        transport: ProxyTransport,
+        stream: TcpStream,
+    ) -> Result<Self> {
+        let protocol = WireProtocol::configured().map_err(|source| TransportError::Io {
+            uri: None,
+            detail: "select native session protocol",
+            source,
+        })?;
+        Self::from_tcp_stream_with_protocol(host, port, transport, stream, protocol).await
+    }
+
+    async fn from_tcp_stream_with_protocol(
+        host: &str,
+        port: u16,
+        transport: ProxyTransport,
+        stream: TcpStream,
+        protocol: WireProtocol,
+    ) -> Result<Self> {
         let legacy_key = match protocol {
             WireProtocol::Legacy => Some(Cow::Owned(crate::config::gen_random_key())),
             WireProtocol::V3 => None,
@@ -48,15 +77,8 @@ impl NativeSession {
             key: legacy_key,
             transport,
         };
-        let stream = get_proxy_stream(
-            &header,
-            node,
-            node_port,
-            "connect native proxy session",
-            &format!("{host}:{port}"),
-            protocol,
-        )
-        .await?;
+        let stream =
+            setup_proxy_stream(&header, stream, &format!("{host}:{port}"), protocol).await?;
         Ok(Self {
             stream,
             legacy_key: header.key,

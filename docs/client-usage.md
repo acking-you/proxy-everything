@@ -291,12 +291,34 @@ through the setup guard. On Windows a retained Wintun session keeps the adapter
 alive until that restoration finishes, including when forwarding fails or the
 outer task is cancelled. Releasing the adapter first makes restoration fail
 with Windows error 1168 (interface not found).
-This prevents old relays from surviving a node hot switch while network state
+This prevents old relays from surviving a TUN restart while network state
 is already being replaced. A hard process termination or machine crash can
 still prevent user-space cleanup; after such an event, inspect and remove only
 the two `/1` rows and the `0.0.0.0/0` row whose interface and next hop identify
 the proxy-everything Wintun adapter. Never use an unqualified default-route
 deletion.
+
+On Windows, selecting a node while TUN is running keeps the existing adapter,
+capture routes, DNS configuration, and local listener. The client resolves the
+new endpoint, confirms its physical host routes through the TUN's route owner,
+and checks reachability before atomically publishing the new upstream. Route
+confirmation has a five-second deadline; TCP reachability has a separate
+five-second deadline, or a twelve-second UDP association preflight when SOCKS5
+UDP is enabled. These bounds apply to the UI switch, not ordinary relay TCP
+connections. Both probes connect only to the addresses whose bypasses were
+prepared, including the TCP connection carrying the UDP association. A failed
+preparation keeps the previous upstream active, rolls back newly created
+provisional routes, and reports its stage/error. Failed route removals remain
+owned and are retried by the worker. The FFI work runs off the UI thread and is serialized
+with start/stop and handle destruction.
+
+Existing connections stay on their original node until they reconnect; new
+connections use the selected node. Old upstream host routes remain owned by
+the current TUN session so those connections cannot loop back through capture.
+They are removed at TUN shutdown only if this session created them. A route
+operation that finishes after its caller timed out cannot publish a node later.
+Diagnostic logs distinguish `resolve`, `bypass`, `connect`/`udp_preflight`, and
+the final upstream commit. Other platforms retain the capture restart workflow.
 
 Only one application should own the fixed proxy-everything Wintun adapter and
 its capture routes. If another VPN/TUN application or another proxy-everything
@@ -309,16 +331,16 @@ for native ABI compatibility.
 
 Loop prevention does not depend on one best-effort process lookup. Before the
 capture routes are installed, the client resolves its remote proxy endpoint and
-adds each address as a physical route bypass. While TUN is active, it also
-suppresses auto-proxy direct connections so every client-owned outbound session
-uses that protected endpoint. Finally, the current executable is always kept in
+adds each address as a physical route bypass. Live Windows node switches install
+the new bypass before changing that endpoint. The current executable is also kept in
 the runtime process-bypass policy and cannot be removed through CLI, TOML,
 Flutter, or FFI input. Without these protections, the remote connection would
 be captured by Wintun, returned to the local SOCKS5 listener, and repeated.
 
-The Auto Proxy preference is retained, but its direct-routing branch is paused
-while TUN is active and resumes after TUN is disabled. This guarantees that
-"all traffic through TUN" does not create client-owned direct-socket loops.
+The desktop GUI retains the Auto Proxy preference during TUN capture. The
+mandatory self-process bypass forwards captured client-owned direct sockets
+through the physical interface instead of sending them into the local SOCKS
+listener again.
 
 Other bypassed processes connect directly to their original destinations and
 therefore do not use the proxy. Do not add an application to the bypass list if
