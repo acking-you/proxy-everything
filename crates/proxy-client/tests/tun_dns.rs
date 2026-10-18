@@ -16,6 +16,104 @@ const QUERY: &[u8] =
     b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x04test\x00\x00\x01\x00\x01";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn udp_dns_retries_and_id_collisions_survive_one_tcp_relay() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let args = Args {
+            setup: false,
+            proxy: ArgProxy::try_from(
+                format!("socks5://{}", listener.local_addr().unwrap()).as_str(),
+            )
+            .unwrap(),
+            dns: TunConfig::new(Vec::<String>::new()).unwrap().dns_mode(),
+            dns_addr: "192.0.2.53".parse().unwrap(),
+            udp_strategy: ArgUdpStrategy::Block,
+            ..Args::default()
+        };
+        // A TUN read contains one packet; a plain DuplexStream can concatenate
+        // back-to-back writes and would lose retransmissions in the test itself.
+        let (packets, mut input) = tokio::sync::mpsc::unbounded_channel();
+        let reader = tokio_util::io::StreamReader::new(futures::stream::poll_fn(move |cx| {
+            input
+                .poll_recv(cx)
+                .map(|packet| packet.map(Ok::<std::io::Cursor<Vec<u8>>, std::io::Error>))
+        }));
+        let (mut host, output) = tokio::io::duplex(65536);
+        let device = tokio::io::join(reader, output);
+        let cancel = CancellationToken::new();
+        let _guard = cancel.clone().drop_guard();
+        let tunnel = tokio::spawn(tun2proxy::run_with_system_managed_network(
+            device,
+            1500,
+            args,
+            cancel.clone(),
+            None,
+        ));
+        let upstream = async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut greeting = [0; 2];
+            stream.read_exact(&mut greeting).await.unwrap();
+            let mut methods = vec![0; greeting[1] as usize];
+            stream.read_exact(&mut methods).await.unwrap();
+            stream.write_all(&[5, 0]).await.unwrap();
+            let mut connect = [0; 10];
+            stream.read_exact(&mut connect).await.unwrap();
+            assert_eq!(connect, [5, 1, 0, 1, 192, 0, 2, 53, 0, 53]);
+            stream
+                .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
+                .await
+                .unwrap();
+            let mut requests = Vec::new();
+            for _ in 0..2 {
+                let len = stream.read_u16().await.unwrap();
+                let mut request = vec![0; len as usize];
+                stream.read_exact(&mut request).await.unwrap();
+                requests.push(request);
+            }
+            assert_ne!(requests[0][..2], requests[1][..2]);
+            assert_eq!(&requests[0][2..], &QUERY[2..]);
+            assert_eq!(requests[1][13], b'a');
+            // Fragment the reversed responses to also exercise TCP framing.
+            for mut response in requests.into_iter().rev() {
+                response[2..4].copy_from_slice(&[0x81, 0x80]);
+                stream.write_u16(response.len() as u16).await.unwrap();
+                for chunk in response.chunks(3) {
+                    stream.write_all(chunk).await.unwrap();
+                }
+            }
+        };
+        let client = async {
+            let mut other = QUERY.to_vec();
+            other[13] = b'a';
+            for query in [QUERY, QUERY, other.as_slice()] {
+                let mut bytes = Vec::new();
+                PacketBuilder::ipv4(CLIENT, PORTAL, 64)
+                    .udp(43000, 53)
+                    .write(&mut bytes, query)
+                    .unwrap();
+                packets.send(std::io::Cursor::new(bytes)).unwrap();
+            }
+            for expected in [other.as_slice(), QUERY] {
+                let reply = packet(&mut host).await;
+                let Some(TransportSlice::Udp(udp)) =
+                    SlicedPacket::from_ip(&reply).unwrap().transport
+                else {
+                    panic!("expected a UDP DNS reply");
+                };
+                assert_eq!(udp.destination_port(), 43000);
+                assert_eq!(&udp.payload()[..2], &QUERY[..2]);
+                assert_eq!(&udp.payload()[12..], &expected[12..]);
+            }
+        };
+        tokio::join!(upstream, client);
+        cancel.cancel();
+        tunnel.await.unwrap().unwrap();
+    })
+    .await
+    .expect("DNS retry/collision regression timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_listener_forces_dns_through_remote_without_forcing_other_traffic() {
     use proxy_client::client::auto_proxy::PROXY_CACHE;
     use proxy_client::client::{ClientConfig, run_client_with_listener};
