@@ -175,7 +175,12 @@ fn packet_round_trips(with_echo: bool) {
                 reverse_geo: false,
             },
             dir.0.join(format!("{protocol:?}-{}", endpoint.port())),
-            Runtime::new().unwrap(),
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .max_blocking_threads(32)
+                .enable_all()
+                .build()
+                .unwrap(),
         )
         .unwrap();
 
@@ -368,6 +373,38 @@ fn packet_round_trips(with_echo: bool) {
             }
         }
 
+        // Keep more TCP sessions alive than the desktop runtime has blocking
+        // threads. Cancelling their relays must not synchronously wait inside
+        // stream destructors and starve the packet workers needed to finish.
+        for source_port in 44000..44128 {
+            packet.clear();
+            PacketBuilder::ipv4([10, 77, 0, 2], [127, 0, 0, 1], 64)
+                .tcp(source_port, tcp_port, 100, 65535)
+                .syn()
+                .write(&mut packet, &[])
+                .unwrap();
+            send(&tunnel, &packet);
+            let syn_ack = receive(
+                &tunnel,
+                |parsed| matches!(&parsed.transport, Some(TransportSlice::Tcp(tcp)) if tcp.destination_port() == source_port && tcp.syn() && tcp.ack()),
+            );
+            let parsed = SlicedPacket::from_ip(&syn_ack).unwrap();
+            let Some(TransportSlice::Tcp(tcp)) = parsed.transport else {
+                panic!("expected SYN ACK")
+            };
+            packet.clear();
+            PacketBuilder::ipv4([10, 77, 0, 2], [127, 0, 0, 1], 64)
+                .tcp(source_port, tcp_port, 101, 65535)
+                .ack(tcp.sequence_number().wrapping_add(1))
+                .write(&mut packet, &[])
+                .unwrap();
+            send(&tunnel, &packet);
+            receive(
+                &tunnel,
+                |parsed| matches!(&parsed.transport, Some(TransportSlice::Tcp(tcp)) if tcp.destination_port() == source_port && tcp.payload() == b"server-ready\r\n"),
+            );
+        }
+
         let port = tunnel.local_port;
         let shutdown = std::time::Instant::now();
         std::thread::scope(|scope| {
@@ -386,6 +423,10 @@ fn packet_round_trips(with_echo: bool) {
         );
         assert_eq!(tunnel.write_packet(&packet).unwrap(), PacketWrite::Closed);
         drop(tunnel);
+        assert!(
+            shutdown.elapsed() < Duration::from_secs(5),
+            "active TCP sessions must drain before the shutdown deadline"
+        );
         // Cancellation releases the listener as well as packet forwarding.
         assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
     }

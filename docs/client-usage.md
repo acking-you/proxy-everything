@@ -210,6 +210,24 @@ upgrade; a subsequently saved off value is preserved. Native callers can use
 process-attributed DNS use the same physical-interface policy, including when
 ordinary proxy UDP is disabled.
 
+Native 0.6.4 also attributes questions sent by the shared Windows DNS Client
+service to the original caller using an owned, temporary ETW session. Every
+process exclusion (including launcher children and the WeGame family) applies
+to these DNS questions, with AliDNS and Tencent DNS preferred on the physical
+interface. TCP DNS and Fake-IP mode use the same per-question policy. Other
+callers retain the configured proxy/Fake-IP DNS path; changing process rules
+affects subsequent questions without restarting TUN. No domain allowlist is
+needed, and a shared DNS socket can carry both physical and proxied questions.
+
+The event session requires the administrator access already needed for Windows
+TUN setup. Its startup or delivery failures are logged explicitly; direct
+socket attribution continues to work if event attribution is unavailable.
+Queries performed inside an application's encrypted DNS connection follow
+that connection's process policy. Windows can share/coalesce answers between
+applications, and previously cached answers are not rewritten or flushed:
+after upgrading, reconnect the affected application once its old DNS answers
+expire. This avoids changing other running applications' caches or connections.
+
 The same explicit rules apply to local HTTP, CONNECT and SOCKS clients, including
 applications using the Windows system proxy. Their TCP and UDP sockets and
 hostname lookups bind to the physical interface; loopback destinations stay on
@@ -315,6 +333,15 @@ through the setup guard. On Windows a retained Wintun session keeps the adapter
 alive until that restoration finishes, including when forwarding fails or the
 outer task is cancelled. Releasing the adapter first makes restoration fail
 with Windows error 1168 (interface not found).
+TCP stream destruction cancels its packet worker without synchronously waiting
+on the runtime. Waiting there can exhaust the blocking worker pool when many
+sessions close together, preventing both shutdown and its timeout from running
+and leaving the desktop Stop switch disabled. Session-table removal also runs
+when a packet worker is cancelled. Normal TCP FIN handling remains in the
+asynchronous shutdown path. The native log records the child-task count and
+drain duration before network restoration.
+The final `sessions_at_shutdown` field is the count before draining, not a
+count of leaked or still-running sessions after cleanup.
 This prevents old relays from surviving a TUN restart while network state
 is already being replaced. A hard process termination or machine crash can
 still prevent user-space cleanup; after such an event, inspect and remove only
