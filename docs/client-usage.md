@@ -122,6 +122,10 @@ enterprise DNS is not provided by that policy. Restart the proxy connection afte
 changing it. IPv4-only TUN sessions remove AAAA records from UDP and TCP replies.
 The physical DNS relay for excluded processes sets DNS truncation when an
 upstream answer exceeds the client's UDP limit, allowing a retry over TCP.
+The proxied DNS relay coalesces identical UDP retransmissions while their TCP
+query is pending. Distinct queries reusing an ID receive separate upstream IDs;
+responses are validated and restored to the client's ID instead of closing the
+shared connection.
 
 Native embedders can call the additive `proxy_set_tun_dns_server` before startup;
 it accepts a literal IPv4/IPv6 address (null resets the default), rejects invalid
@@ -194,6 +198,18 @@ or disappears. The mixed checkbox indicates inherited bypass; checking that
 child explicitly keeps it excluded after the launcher exits. Rules lost by an
 older version cannot be inferred: add the desired executable again once.
 
+On Windows, **Exclude WeGame games and services** selects an application family
+instead of a single launcher. It covers known WeGame/LOL executables, their live
+descendants, executables under `WeGame`, `WeGameApps` and `AntiCheatExpert`
+directories, and independent SGuard/ACE services. It does not exclude the shared
+`services.exe` parent or generic `client.exe`/`launcher.exe` names. Custom game
+installations whose launcher has already exited may still need an explicit
+executable rule. Existing saved LOL/WeGame exclusions enable this family on
+upgrade; a subsequently saved off value is preserved. Native callers can use
+`--tun-bypass-process '@group:wegame'` with native 0.6.3 or later. TCP, UDP and
+process-attributed DNS use the same physical-interface policy, including when
+ordinary proxy UDP is disabled.
+
 The same explicit rules apply to local HTTP, CONNECT and SOCKS clients, including
 applications using the Windows system proxy. Their TCP and UDP sockets and
 hostname lookups bind to the physical interface; loopback destinations stay on
@@ -215,6 +231,14 @@ the next datagram creates a relay under the updated policy. The TUN adapter,
 physical egress binding, fake-IP mappings, and system routes remain in place.
 
 ### Flutter UI
+
+Configuration remains accessible while the proxy is starting or running.
+Edits and imported configurations are drafts until **Apply configuration** is
+pressed. Only applying is disabled during another proxy/TUN operation. Applying
+only process exclusions updates the live policy without restarting TUN; other
+connection changes reconnect the listener and active TUN. If startup fails, the
+previous configuration is restored where possible and the failure is shown.
+Desktop tray and sign-in preferences are also saved only after confirmation.
 
 Start the local proxy from the primary Proxy page, then enable the top-level
 **TUN Mode** switch. The switch is disabled until `127.0.0.1:<client-port>` is
