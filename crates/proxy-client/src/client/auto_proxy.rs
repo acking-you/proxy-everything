@@ -285,13 +285,13 @@ pub async fn run_auto_proxy_by_country(receiver: ReceiverChan, cache_dir: Option
                 match receiver.recv().await {
                     Ok(item) => batch_buffer.push(item),
                     Err(e) => {
-                        tracing::error!(channel_msg_error = %error_report(&e));
+                        tracing::info!(reason = %e, "Auto-proxy request channel closed");
                         return;
                     }
                 }
             }
             Err(e) => {
-                tracing::error!(drain_error = %error_report(&e));
+                tracing::info!(reason = %e, "Auto-proxy request channel closed");
                 return;
             }
         }

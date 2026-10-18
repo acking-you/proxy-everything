@@ -1319,7 +1319,10 @@ where
         }
         match result {
             Ok(sessions) => {
-                tracing::info!(remaining_sessions = sessions, "TUN traffic capture stopped")
+                tracing::info!(
+                    sessions_at_shutdown = sessions,
+                    "TUN traffic capture stopped"
+                )
             }
             Err(error)
                 if setup_succeeded && generation_state.load(Ordering::Acquire) == generation =>

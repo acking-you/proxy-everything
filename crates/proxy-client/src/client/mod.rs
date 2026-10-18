@@ -422,7 +422,10 @@ pub async fn run_client_with_listener_runtime_config(
             };
             match tun::run(local_port, tun_config, token.clone()).await {
                 Ok(sessions) => {
-                    tracing::info!(remaining_sessions = sessions, "TUN traffic capture stopped");
+                    tracing::info!(
+                        sessions_at_shutdown = sessions,
+                        "TUN traffic capture stopped"
+                    );
                 }
                 Err(error) => {
                     tracing::error!(%error, "TUN traffic capture failed");
