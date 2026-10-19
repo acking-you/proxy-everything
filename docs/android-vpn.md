@@ -36,6 +36,53 @@ look offline. The cache is append-only during normal allocation and is compacted
 after enough entries become stale. A truncated final record is repaired at the
 next start.
 
+### IPv4 DNS on exits without IPv6
+
+The Android VPN keeps both `0.0.0.0/0` and `::/0` capture routes. These routes
+prevent bypass; they do not prove that a proxy server has an IPv6 Internet
+connection. Like the desktop default, Android now uses the native TUN's IPv4
+DNS policy instead of unconditionally enabling AAAA answers. Ordinary UDP and
+TCP DNS replies retain A records and remove AAAA records. Fake-IP remains an
+independent, opt-in setting. This does not change native protocol framing or
+the Android VPN's IPv6 capture route.
+
+With an IPv4-only exit, a captured IPv6 TCP connection can complete its local
+handshake before the remote connection fails. TLS then closes or resets even
+though an IPv4 request to the same website succeeds. Racing initial TCP
+connections does not necessarily recover a later TLS failure; see
+[RFC 8305, section 9](https://www.rfc-editor.org/rfc/rfc8305.html#section-9).
+Node latency/egress probes use an HTTP endpoint and do not certify IPv6 or
+HTTPS reachability.
+
+This was reproduced with Android 2.0.6+71 through the UAE and Poland exits:
+certificate-validated IPv4 HTTPS succeeded, while IPv6 TLS failed. Switching
+the same APK to Fake-IP removed the failing IPv6 choices. The UAE exit had
+no global IPv6 route. The Singapore control also failed IPv6, so this finding
+is not specific to one country. Desktop IPv4 HTTPS and HTTP/2 controls passed.
+The user's physical phone/browser was not available for direct validation.
+
+Follow-up controls also covered the Hong Kong node. Build 72 fetched Google
+and YouTube pages through its Android VPN with Fake-IP and UDP disabled. A
+fresh desktop browser using an Android-owned CONNECT socket through that VPN
+received HTTP 200 for both sites over HTTP/2 and TLS 1.3. This exercises browser
+TLS through Android forwarding, but is not a test of Android Chrome's own DNS
+selection. Separate native sockets bound to the physical Windows interface
+also established TLS without passing through the active Singapore TUN.
+These controls do not reproduce or explain the reported difference between
+Singapore and the other nodes on the physical phone; the IPv6 defect and its
+fix should not be presented as proof of that complete diagnosis.
+
+Restart the VPN and the affected application after an upgrade if it retained
+old DNS answers. Literal IPv6 destinations and application-managed encrypted
+DNS are outside this DNS compatibility policy and still need an IPv6-capable
+exit. Do not remove the `::/0` capture route as a workaround.
+
+UDP readiness is separate: an old server can pass the TCP node probe but close
+the UDP association before acknowledging it. Upgrade that server for SOCKS5
+UDP support, or disable SOCKS5 UDP; disable direct UDP fallback as well when
+all captured traffic must stay inside the proxy. The client deliberately
+reports this preflight failure instead of silently leaking UDP directly.
+
 `ProxyVpnService` retains the `ParcelFileDescriptor`. The platform channel
 passes its integer descriptor to `proxy_start_android_tun`, which duplicates
 it synchronously. Rust owns and closes only that duplicate. Closing either the

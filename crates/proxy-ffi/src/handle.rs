@@ -1181,7 +1181,11 @@ pub unsafe extern "C" fn proxy_start_android_tun(
             .with_udp_direct_fallback(handle.tun_udp_direct_fallback.load(Ordering::Acquire))
             .with_fake_ip(handle.tun_fake_ip.load(Ordering::Acquire))
             .with_dns_server(dns_server)
-            .with_ipv6_enabled(true)
+            // VpnService still captures ::/0 to prevent bypass. Capturing IPv6
+            // does not establish that the selected exit can forward it: legacy
+            // TCP has no destination-connect acknowledgement, so its local SYN
+            // ACK can win Happy Eyeballs before the exit rejects IPv6 at TLS.
+            // Keep TunConfig's IPv4 DNS default, like the desktop frontends.
             .with_mtu(mtu)
             .with_virtual_dns_state(handle.tun_virtual_dns.clone()),
         Err(error) => {
