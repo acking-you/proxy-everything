@@ -48,6 +48,11 @@ v3 records), `proxy-core` (wire format, native sessions and shared forwarding),
 and the client/server/FFI frontends. Forwarding uses static trait dispatch and
 preserves error sources through to connection traces.
 
+`galaxy-geometry` owns the Flutter galaxy's allocation-free batch projection
+and viewport clipping. It has no network or graphics dependencies and is shared
+by every native FFI target. See [geometry and FFI contracts](docs/galaxy-geometry.md)
+for buffer ownership, compatibility and the repeatable compute benchmark.
+
 ## Low-latency encrypted transport
 
 Native **0.4.34** and UI **1.2.20+46** provide v3 encryption with **no additional
