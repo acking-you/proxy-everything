@@ -46,9 +46,12 @@ pub use logging::{
     proxy_free_string, proxy_init_logging, proxy_set_log_callback, proxy_set_log_level,
 };
 pub use nodes::{proxy_free_nodes_result, proxy_get_server_nodes};
-pub use probe::{proxy_free_node_probe_result, proxy_probe_node, proxy_probe_node_v3};
+pub use probe::{
+    proxy_free_node_probe_result, proxy_probe_node, proxy_probe_node_v3, proxy_probe_nodes_v1,
+    proxy_release_node_probe_result,
+};
 pub use types::{
-    GroupsResult, LatencyResult, LogCallback, NodeGroupInfo, NodeInfoWithGeo, NodeProbeResult,
-    NodesResult, ProxyConfig, ProxyConfigV2, ProxyConfigV3, ProxyConfigV4, ProxyConfigV5,
-    ProxyConfigV7, ProxyConfigV8, ProxyResult,
+    GroupsResult, LatencyResult, LogCallback, NodeGroupInfo, NodeInfoWithGeo, NodeProbeCallback,
+    NodeProbeResult, NodesResult, ProxyConfig, ProxyConfigV2, ProxyConfigV3, ProxyConfigV4,
+    ProxyConfigV5, ProxyConfigV7, ProxyConfigV8, ProxyResult,
 };
