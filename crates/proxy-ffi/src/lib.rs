@@ -4,6 +4,7 @@
 //! It reuses the existing client module logic.
 
 mod disk_log;
+mod galaxy;
 mod groups;
 mod handle;
 mod latency;
@@ -28,6 +29,7 @@ pub(crate) fn init_process_policy() {
 }
 
 // Re-export all public FFI functions and types
+pub use galaxy::proxy_galaxy_project_segments_v1;
 pub use groups::{proxy_free_groups_result, proxy_get_server_groups};
 #[cfg(target_os = "android")]
 pub use handle::proxy_start_android_tun;

@@ -1251,6 +1251,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "galaxy-geometry"
+version = "0.6.5"
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2888,7 +2892,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-client"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "anyhow",
  "async-broadcast",
@@ -2925,7 +2929,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-core"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "arc-swap",
  "async-broadcast",
@@ -2965,7 +2969,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-crypto"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "futures",
  "ring",
@@ -2974,9 +2978,10 @@ dependencies = [
 
 [[package]]
 name = "proxy-ffi"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "chrono",
+ "galaxy-geometry",
  "libc",
  "proxy-client",
  "proxy-core",
@@ -2991,7 +2996,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-server"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -3013,7 +3018,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-tui"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "chrono",
  "clap",

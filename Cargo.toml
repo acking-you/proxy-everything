@@ -7,6 +7,7 @@ members = [
     "crates/proxy-server",
     "crates/proxy-tui",
     "crates/proxy-ffi",
+    "crates/galaxy-geometry",
 ]
 exclude = [
     "deps/kanal",
@@ -17,7 +18,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.6.4"
+version = "0.6.5"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/acking-you/proxy-everything"
