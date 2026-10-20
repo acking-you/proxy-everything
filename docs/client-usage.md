@@ -602,35 +602,17 @@ emulator verification, follow [Android VPN Development](android-vpn.md).
 
 ## iOS
 
-**Option 1: iSH (Alpine Linux emulator)**
+The native Flutter app includes an iOS Packet Tunnel extension. A paid Apple
+Developer account can sign and install it on registered personal devices without
+publishing it on the App Store. The app and extension must share a signing team,
+Network Extensions capability, and Keychain access group.
 
-1. Install [iSH](https://apps.apple.com/app/ish-shell/id1436902243) from App Store
+Build locally on a Mac:
 
-2. In iSH terminal:
-   ```bash
-   # Install dependencies
-   apk add curl tar
+```bash
+python3 scripts/ios/build.py --team TEAM_ID --install DEVICE_UDID
+```
 
-   # Download ARM binary (iSH emulates x86)
-   curl -LO https://github.com/acking-you/proxy-everything/releases/latest/download/http-proxy-cli-x86_64-unknown-linux-musl.tar.gz
-   tar -xzf http-proxy-cli-*.tar.gz
-   chmod +x http-proxy-cli
-   ./http-proxy-cli -s YOUR_SERVER_IP -c 7890
-   ```
-
-3. Configure Wi-Fi proxy:
-   - Settings → Wi-Fi → Tap (i) on connected network
-   - HTTP Proxy → Manual
-   - Server: `127.0.0.1`, Port: `7890`
-
-> Note: iSH performance is limited due to emulation.
-
-**Option 2: Wi-Fi Proxy (direct connection)**
-- Settings → Wi-Fi → Tap (i) on connected network
-- HTTP Proxy → Manual
-- Server: `YOUR_SERVER_IP`, Port: `1081`
-
-> This connects directly to server without local encryption layer.
-
-**Option 3: Third-party proxy apps**
-- Apps like Shadowrocket, Quantumult X, or Surge support custom proxy configurations
+See [iOS development and device installation](ios-development.md) for prerequisites,
+simulator builds, signing verification, current feature limits, and physical-device
+acceptance checks. The simulator cannot validate a real system VPN connection.

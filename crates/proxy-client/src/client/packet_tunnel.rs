@@ -185,11 +185,27 @@ impl PacketTunnelRuntime {
         let listener = runtime.block_on(TcpListener::bind(("127.0.0.1", config.local_port)))?;
         let local_port = listener.local_addr()?.port();
         proxy_core::config::runtime::init_config(
-            config.server_host,
+            config.server_host.clone(),
             config.server_port,
             config.reverse_geo,
             config.session_key,
         );
+        // Do not install routes and report a connected VPN when the selected
+        // server rejects the UDP transport the user explicitly enabled.
+        if config.udp_enabled {
+            runtime.block_on(async {
+                tokio::time::timeout(
+                    Duration::from_secs(12),
+                    super::udp::connect_native_udp(&config.server_host, config.server_port),
+                )
+                .await
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::TimedOut, "UDP readiness check timed out")
+                })?
+                .map_err(|error| io::Error::other(proxy_core::util::error_report(&error)))?;
+                Ok::<_, io::Error>(())
+            })?;
+        }
         let virtual_dns = VirtualDnsState::default();
         runtime
             .block_on(virtual_dns.enable_persistence_in(cache_dir.clone()))
@@ -237,8 +253,14 @@ impl PacketTunnelRuntime {
                 ArgUdpStrategy::Block
             },
             mtu: PACKET_MTU,
-            max_sessions: 4096,
-            tcp_read_buffer_size: 64 * 1024,
+            // iOS enforces a 50 MB hard limit for the entire provider.
+            // Admission control must bound the multiplier on per-flow state.
+            max_sessions: if cfg!(target_os = "ios") { 128 } else { 4096 },
+            tcp_read_buffer_size: if cfg!(target_os = "ios") {
+                16 * 1024
+            } else {
+                64 * 1024
+            },
             ..Args::default()
         };
         let cancel = CancellationToken::new();

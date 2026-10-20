@@ -37,12 +37,19 @@ pub unsafe extern "C" fn proxy_packet_tunnel_create(
         if json.len() > 65536 {
             return Err("tunnel configuration is too large".into());
         }
-        let mut config: PacketTunnelConfig =
+        let config: PacketTunnelConfig =
             serde_json::from_str(json).map_err(|_| "invalid tunnel configuration")?;
         // The Store edition does not send destinations to a geographic service,
-        // including configurations restored from older Keychain entries.
-        config.auto_proxy = false;
-        config.reverse_geo = false;
+        // including configurations restored from older Keychain entries. iOS
+        // retains the user's routing policy independently of that Store rule.
+        let config = PacketTunnelConfig {
+            auto_proxy: config.auto_proxy && !cfg!(feature = "mac-app-store"),
+            reverse_geo: config.reverse_geo && !cfg!(feature = "mac-app-store"),
+            // Restored Keychain configurations from early iOS builds allowed
+            // QUIC/STUN to bypass the selected node when UDP was disabled.
+            udp_direct_fallback: config.udp_direct_fallback && !cfg!(target_os = "ios"),
+            ..config
+        };
         let cache_dir = unsafe { CStr::from_ptr(cache_dir) }
             .to_str()
             .map_err(|_| "invalid cache directory")?;

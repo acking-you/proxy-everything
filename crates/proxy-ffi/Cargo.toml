@@ -28,7 +28,8 @@ sysproxy = { workspace = true }
 libc = "0.2"
 
 [features]
-mac-app-store = ["proxy-client/network-extension", "proxy-core/no-external-geo"]
+network-extension = ["proxy-client/network-extension"]
+mac-app-store = ["network-extension", "proxy-core/no-external-geo"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
