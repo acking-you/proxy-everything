@@ -28,9 +28,9 @@ jobs:
           toolchain: nightly-2026-01-26
           components: clippy, rustfmt
       - name: cargo fmt
-        run: cargo fmt -p proxy-crypto -p proxy-core -p proxy-client -p proxy-server -p proxy-tui -p proxy-ffi -- --check
+        run: cargo fmt -p proxy-crypto -p proxy-core -p proxy-client -p proxy-server -p proxy-tui -p proxy-ffi -p proxy-updater -p proxy-ui-services -p galaxy-geometry -- --check
       - name: cargo clippy
-        run: cargo clippy -p proxy-crypto -p proxy-core -p proxy-client -p proxy-server -p proxy-tui -p proxy-ffi --all-targets --all-features --no-deps --locked -- -D warnings
+        run: cargo clippy -p proxy-crypto -p proxy-core -p proxy-client -p proxy-server -p proxy-tui -p proxy-ffi -p proxy-updater -p proxy-ui-services -p galaxy-geometry --all-targets --all-features --no-deps --locked -- -D warnings
       - name: cargo test
         run: cargo test --workspace --locked
       - name: Check client without automatic routing

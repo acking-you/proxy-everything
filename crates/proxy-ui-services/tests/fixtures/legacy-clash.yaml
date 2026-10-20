@@ -1,0 +1,26 @@
+port: 7890
+socks-port: 7891
+allow-lan: false
+mode: rule
+log-level: info
+
+proxies:
+  - name: "LocalProxy"
+    type: socks5
+    server: 127.0.0.1
+    port: 1080
+    udp: true
+
+proxy-groups:
+  - name: "PROXY"
+    type: select
+    proxies:
+      - LocalProxy
+      - DIRECT
+
+rules:
+  - DST-PORT,1080,DIRECT
+  - IP-CIDR,127.0.0.0/8,DIRECT
+  - GEOIP,LAN,DIRECT
+  - GEOIP,CN,DIRECT
+  - MATCH,PROXY

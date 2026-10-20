@@ -3,6 +3,10 @@
 A self-hosted encrypted proxy with AES-256-GCM encryption and a cross-platform client.
 The source repository remains `proxy-everything`; existing protocols, CLI binaries and application identifiers remain compatible.
 
+Native 0.6.7 / CipherRelay 2.0.8 adds a Rust Windows updater, recovers orphaned
+Windows DNS attribution sessions, and moves shared update, logging,
+subscription and galaxy work into Rust. See [runtime changes and validation](docs/rust-ui-runtime.md).
+
 ```
 Client (local) ──► [encrypted] ──► Server (remote) ──► Internet
 ```

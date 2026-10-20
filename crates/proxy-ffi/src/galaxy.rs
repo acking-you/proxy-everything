@@ -4,6 +4,114 @@ use galaxy_geometry::{Camera, ProjectionError, ScreenSegment, WorldSegment, proj
 
 const MAX_SEGMENTS: usize = 100_000;
 
+/// Relax at most 256 country positions. Returns 0 or -1 for invalid input.
+/// This quadratic, bounded setup operation must not be a Dart leaf call.
+///
+/// # Safety
+/// Input contains `count` aligned Seeds and output has `count * 2` doubles;
+/// buffers must be valid and nonoverlapping throughout the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_galaxy_layout_v1(
+    input: *const galaxy_geometry::layout::Seed,
+    count: u32,
+    output: *mut f64,
+) -> i32 {
+    if count == 0 {
+        return 0;
+    }
+    if count > 256
+        || input.is_null()
+        || output.is_null()
+        || !input.is_aligned()
+        || !output.is_aligned()
+    {
+        return -1;
+    }
+    let input = unsafe { std::slice::from_raw_parts(input, count as usize) };
+    if input.iter().any(|seed| {
+        !seed.x.is_finite() || !seed.z.is_finite() || !seed.extent.is_finite() || seed.extent < 0.0
+    }) {
+        return -1;
+    }
+    let output = unsafe { std::slice::from_raw_parts_mut(output, count as usize * 2) };
+    galaxy_geometry::layout::relax(input, output);
+    0
+}
+
+/// Animate and project planets into reusable buffers (one output per input).
+/// Returns zero on success or -1 for invalid arguments. Bounded and allocation
+/// free, suitable for leaf FFI.
+///
+/// # Safety
+/// Camera and buffers must be aligned, valid and nonoverlapping for `count`
+/// entries. The caller owns them throughout the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_galaxy_place_bodies_v1(
+    camera: *const Camera,
+    input: *const galaxy_geometry::bodies::Body,
+    count: u32,
+    output: *mut galaxy_geometry::bodies::PlacedBody,
+    orbit_time: f64,
+    time: f64,
+) -> i32 {
+    if camera.is_null()
+        || !camera.is_aligned()
+        || count > 10_000
+        || !orbit_time.is_finite()
+        || !time.is_finite()
+    {
+        return -1;
+    }
+    let camera = unsafe { &*camera };
+    if !camera.valid() {
+        return -1;
+    }
+    if count == 0 {
+        return 0;
+    }
+    if input.is_null() || output.is_null() || !input.is_aligned() || !output.is_aligned() {
+        return -1;
+    }
+    let input = unsafe { std::slice::from_raw_parts(input, count as usize) };
+    let output = unsafe { std::slice::from_raw_parts_mut(output, count as usize) };
+    galaxy_geometry::bodies::place_bodies(camera, input, output, orbit_time, time);
+    0
+}
+
+/// Transform unit stars (x, y, parallax triples) into pixel x/y pairs.
+///
+/// # Safety
+/// Input contains count*3 floats and output count*2 floats. Regions must be
+/// aligned, nonoverlapping and valid throughout this bounded leaf call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_galaxy_place_stars_v1(
+    input: *const f32,
+    count: u32,
+    output: *mut f32,
+    width: f64,
+    height: f64,
+    yaw: f64,
+    tilt: f64,
+) -> i32 {
+    if count > 10_000
+        || ![width, height, yaw, tilt].into_iter().all(f64::is_finite)
+        || width <= 0.0
+        || height <= 0.0
+    {
+        return -1;
+    }
+    if count == 0 {
+        return 0;
+    }
+    if input.is_null() || output.is_null() || !input.is_aligned() || !output.is_aligned() {
+        return -1;
+    }
+    let input = unsafe { std::slice::from_raw_parts(input, count as usize * 3) };
+    let output = unsafe { std::slice::from_raw_parts_mut(output, count as usize * 2) };
+    galaxy_geometry::bodies::place_stars(input, output, width, height, yaw, tilt);
+    0
+}
+
 /// Project and clip a batch, returning its visible count, or -1 for invalid
 /// arguments, -2 for insufficient output capacity, -3 for an invalid camera.
 /// Work is bounded and allocation-free, so this is safe for Dart's leaf FFI.
@@ -59,6 +167,8 @@ mod tests {
 
     #[test]
     fn dart_buffer_layout_is_stable() {
+        assert_eq!(size_of::<galaxy_geometry::bodies::Body>(), 104);
+        assert_eq!(size_of::<galaxy_geometry::bodies::PlacedBody>(), 64);
         assert_eq!(size_of::<Camera>(), 160);
         assert_eq!(size_of::<WorldSegment>(), 56);
         assert_eq!(size_of::<ScreenSegment>(), 24);

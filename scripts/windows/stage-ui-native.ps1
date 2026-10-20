@@ -25,7 +25,7 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
 Push-Location $repoRoot
 try {
     if (-not $SkipBuild) {
-        $cargoArgs = @("build", "-p", "proxy-ffi")
+        $cargoArgs = @("build", "-p", "proxy-ffi", "-p", "proxy-updater")
         if ($Configuration -eq "Release") {
             $cargoArgs += "--release"
         }
@@ -39,6 +39,10 @@ try {
     if (-not (Test-Path -LiteralPath $sourceDll)) {
         throw "Native library was not produced: $sourceDll"
     }
+    $sourceUpdater = Join-Path $repoRoot "target\$cargoProfile\cipherrelay-updater.exe"
+    if (-not (Test-Path -LiteralPath $sourceUpdater)) {
+        throw "Native updater was not produced: $sourceUpdater"
+    }
     $sourceWintunDll = Join-Path $repoRoot "target\$cargoProfile\wintun.dll"
     if (-not (Test-Path -LiteralPath $sourceWintunDll)) {
         throw "Wintun runtime was not produced: $sourceWintunDll"
@@ -46,6 +50,7 @@ try {
 
     $nativeDir = Join-Path $repoRoot "ui\flutter\native\windows\$flutterArchitecture"
     New-Item -ItemType Directory -Force -Path $nativeDir | Out-Null
+    Copy-Item -LiteralPath $sourceUpdater -Destination (Join-Path $nativeDir "cipherrelay-updater.exe") -Force
     $destinationDll = Join-Path $nativeDir "http_proxy.dll"
     Copy-Item -LiteralPath $sourceDll -Destination $destinationDll -Force
     Write-Host "Staged Flutter native library: $destinationDll"
