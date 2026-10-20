@@ -430,6 +430,36 @@ fn packet_round_trips(with_echo: bool) {
         // Cancellation releases the listener as well as packet forwarding.
         assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
     }
+    // A legacy/rejecting server must fail startup before any packet forwarding
+    // is advertised, and the failed attempt must release its local listener.
+    let rejecting = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
+    let rejecting_address = rejecting.local_addr().unwrap();
+    let rejection = runtime.spawn(async move {
+        let (stream, _) = rejecting.accept().await.unwrap();
+        drop(stream);
+    });
+    let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let local_port = reserved.local_addr().unwrap().port();
+    drop(reserved);
+    let failed = PacketTunnelRuntime::start(
+        PacketTunnelConfig {
+            server_host: rejecting_address.ip().to_string(),
+            server_port: rejecting_address.port(),
+            local_port,
+            session_key: Some(DEFAULT_SECRET_KEY.into()),
+            auto_proxy: false,
+            udp_enabled: true,
+            udp_direct_fallback: false,
+            tun_fake_ip: true,
+            tun_dns_server: proxy_client::client::tun::DEFAULT_TUN_DNS_SERVER,
+            reverse_geo: false,
+        },
+        dir.0.join("rejected"),
+        Runtime::new().unwrap(),
+    );
+    assert!(failed.is_err(), "unsupported UDP must fail VPN startup");
+    assert!(std::net::TcpListener::bind(("127.0.0.1", local_port)).is_ok());
+    runtime.block_on(rejection).unwrap();
     cancel.cancel();
     runtime.block_on(server).unwrap();
     runtime.block_on(relay).unwrap();
