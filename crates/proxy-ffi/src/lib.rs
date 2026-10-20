@@ -10,11 +10,13 @@ mod handle;
 mod latency;
 mod logging;
 mod nodes;
+mod operations;
 #[cfg(feature = "network-extension")]
 mod packet_tunnel;
 mod probe;
 mod runtime;
 mod types;
+mod updates;
 
 /// Apply the process-wide startup policy shared by every FFI entry point.
 ///
@@ -29,7 +31,10 @@ pub(crate) fn init_process_policy() {
 }
 
 // Re-export all public FFI functions and types
-pub use galaxy::proxy_galaxy_project_segments_v1;
+pub use disk_log::proxy_log_write_v1;
+pub use galaxy::{
+    proxy_galaxy_place_bodies_v1, proxy_galaxy_place_stars_v1, proxy_galaxy_project_segments_v1,
+};
 pub use groups::{proxy_free_groups_result, proxy_get_server_groups};
 #[cfg(target_os = "android")]
 pub use handle::proxy_start_android_tun;
@@ -46,6 +51,7 @@ pub use logging::{
     proxy_free_string, proxy_init_logging, proxy_set_log_callback, proxy_set_log_level,
 };
 pub use nodes::{proxy_free_nodes_result, proxy_get_server_nodes};
+pub use operations::proxy_operation_start_v1;
 pub use probe::{
     proxy_free_node_probe_result, proxy_probe_node, proxy_probe_node_v3, proxy_probe_nodes_v1,
     proxy_release_node_probe_result,
@@ -55,3 +61,4 @@ pub use types::{
     NodeProbeResult, NodesResult, ProxyConfig, ProxyConfigV2, ProxyConfigV3, ProxyConfigV4,
     ProxyConfigV5, ProxyConfigV7, ProxyConfigV8, ProxyResult,
 };
+pub use updates::{proxy_update_cancel_v1, proxy_update_free_event_v1, proxy_update_start_v1};

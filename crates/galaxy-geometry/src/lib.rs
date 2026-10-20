@@ -3,6 +3,9 @@
 //! This crate has no proxy, platform, allocator or graphics dependencies. Callers
 //! prepare stable world-space geometry once and reuse their output buffers.
 
+pub mod bodies;
+pub mod layout;
+
 /// A world-space position, or a camera-space direction.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]

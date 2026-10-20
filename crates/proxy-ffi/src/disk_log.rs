@@ -93,8 +93,12 @@ impl DiskLog {
     }
 
     fn write(&self, level: i32, message: &str) {
+        self.write_at(level, message, chrono::Local::now());
+    }
+
+    fn write_at(&self, level: i32, message: &str, timestamp: chrono::DateTime<chrono::Local>) {
         let level = ["TRACE", "DEBUG", "INFO", "WARN", "ERROR"][level.clamp(0, 4) as usize];
-        let line = format!("{} {level} {message}\n", chrono::Local::now().to_rfc3339());
+        let line = format!("{} {level} {message}\n", timestamp.to_rfc3339());
         let length = line.len();
         if self
             .queued_bytes
@@ -263,17 +267,48 @@ pub(crate) fn write(level: i32, message: &str) {
 }
 
 pub(crate) fn flush() {
+    if let Err(error) = flush_result() {
+        eprintln!("native log flush failed: {error}");
+        crate::logging::send_callback(4, &format!("Native log flush failed: {error}"));
+    }
+}
+
+pub(crate) fn flush_result() -> io::Result<()> {
     let sink = SINK
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .as_ref()
         .cloned();
     // Never hold the global producer lock while waiting on I/O or callbacks.
-    if let Some(sink) = sink
-        && let Err(error) = sink.flush()
-    {
-        eprintln!("native log flush failed: {error}");
-        crate::logging::send_callback(4, &format!("Native log flush failed: {error}"));
+    sink.map_or(Ok(()), |sink| sink.flush())
+}
+
+/// Append a UI diagnostic to the same bounded native writer without echoing it
+/// through the native log callback (which would duplicate it in the UI).
+///
+/// # Safety
+/// `message` must be a valid NUL-terminated UTF-8 string during this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_log_write_v1(
+    level: i32,
+    message: *const std::ffi::c_char,
+    timestamp_ms: i64,
+) -> i32 {
+    if message.is_null() {
+        return -1;
+    }
+    let Ok(message) = (unsafe { std::ffi::CStr::from_ptr(message) }).to_str() else {
+        return -1;
+    };
+    let timestamp = chrono::DateTime::from_timestamp_millis(timestamp_ms)
+        .map(|value| value.with_timezone(&chrono::Local))
+        .unwrap_or_else(chrono::Local::now);
+    let sink = SINK.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(sink) = sink.as_ref() {
+        sink.write_at(level, &format!("[ui] {message}"), timestamp);
+        0
+    } else {
+        -1
     }
 }
 

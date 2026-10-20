@@ -1,0 +1,20 @@
+[package]
+name = "proxy-ui-services"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+base64.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+
+[dev-dependencies]
+reqwest.workspace = true
+rustls.workspace = true

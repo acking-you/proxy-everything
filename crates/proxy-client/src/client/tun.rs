@@ -392,7 +392,9 @@ impl TunConfig {
         self
     }
 
-    /// Enable or disable IPv6 forwarding in the userspace network stack.
+    /// Enable IPv6 DNS answers and the managed desktop IPv6 default route.
+    /// A platform-owned device keeps its own capture routes and can still
+    /// deliver IPv6 packets independently of this DNS policy.
     pub fn with_ipv6_enabled(mut self, enabled: bool) -> Self {
         self.ipv6_enabled = enabled;
         self

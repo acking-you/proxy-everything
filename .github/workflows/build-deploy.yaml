@@ -282,6 +282,10 @@ jobs:
           if [ '${{ matrix.target }}' = aarch64-unknown-linux-gnu ]; then builder=cross; fi
           "$builder" build -p proxy-ffi --verbose --locked --release --target '${{ matrix.target }}'
 
+      - name: Build Windows installer helper
+        if: contains(matrix.target, 'windows')
+        run: cargo build -p proxy-updater --locked --release --target '${{ matrix.target }}'
+
       # macOS TUN requires an elevated helper alongside the FFI library.
       - name: Build privileged TUN helper
         if: contains(matrix.target, 'apple-darwin')
@@ -299,6 +303,7 @@ jobs:
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             cp "target/${{ matrix.target }}/release/http_proxy.lib" "$dirname/"
             cp "target/${{ matrix.target }}/release/http_proxy.dll" "$dirname/"
+            cp "target/${{ matrix.target }}/release/cipherrelay-updater.exe" "$dirname/"
             cp "target/${{ matrix.target }}/release/http_proxy.dll.lib" "$dirname/" 2>/dev/null || true
             cp "target/${{ matrix.target }}/release/wintun.dll" "$dirname/"
           else

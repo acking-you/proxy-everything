@@ -1252,7 +1252,7 @@ dependencies = [
 
 [[package]]
 name = "galaxy-geometry"
-version = "0.6.5"
+version = "0.6.7"
 
 [[package]]
 name = "generic-array"
@@ -1484,6 +1484,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
+name = "httpdate"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
 name = "hyper"
 version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1495,6 +1501,7 @@ dependencies = [
  "http",
  "http-body",
  "httparse",
+ "httpdate",
  "itoa",
  "pin-project-lite",
  "smallvec 1.16.2",
@@ -2892,7 +2899,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-client"
-version = "0.6.5"
+version = "0.6.7"
 dependencies = [
  "anyhow",
  "async-broadcast",
@@ -2929,7 +2936,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-core"
-version = "0.6.5"
+version = "0.6.7"
 dependencies = [
  "arc-swap",
  "async-broadcast",
@@ -2969,7 +2976,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-crypto"
-version = "0.6.5"
+version = "0.6.7"
 dependencies = [
  "futures",
  "ring",
@@ -2978,14 +2985,17 @@ dependencies = [
 
 [[package]]
 name = "proxy-ffi"
-version = "0.6.5"
+version = "0.6.7"
 dependencies = [
  "chrono",
  "galaxy-geometry",
  "libc",
  "proxy-client",
  "proxy-core",
+ "proxy-ui-services",
+ "proxy-updater",
  "reqwest",
+ "serde",
  "serde_json",
  "sysproxy",
  "tokio",
@@ -2996,7 +3006,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-server"
-version = "0.6.5"
+version = "0.6.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -3018,7 +3028,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-tui"
-version = "0.6.5"
+version = "0.6.7"
 dependencies = [
  "chrono",
  "clap",
@@ -3028,6 +3038,40 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "proxy-ui-services"
+version = "0.6.7"
+dependencies = [
+ "base64 0.23.1",
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "reqwest",
+ "rustls",
+ "serde",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "proxy-updater"
+version = "0.6.7"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "proxy-core",
+ "reqwest",
+ "ring",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
