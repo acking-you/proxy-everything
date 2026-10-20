@@ -1,4 +1,4 @@
-//! Egress verification for a single node.
+//! Egress verification for one node or a whole batch of them.
 //!
 //! The node catalogue reports where a server is registered, which is not
 //! necessarily where its traffic leaves from: a node can be fronted, relayed, or
@@ -7,6 +7,7 @@
 
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::ptr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use proxy_core::codec::{
@@ -19,9 +20,10 @@ use proxy_core::session::NativeSession;
 use proxy_core::util::error_report;
 use proxy_core::{Aes256GcmDecryptor, MyAsyncCodecReader, MyAsyncWriteExt};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::Semaphore;
 
 use crate::latency::DEFAULT_TIMEOUT_MS;
-use crate::types::NodeProbeResult;
+use crate::types::{NodeProbeCallback, NodeProbeResult, ProxyResult};
 
 /// Plain HTTP on purpose: the request travels inside the node tunnel, and the
 /// same service already backs geo lookups elsewhere in the workspace.
@@ -122,16 +124,69 @@ impl ProbeError {
     }
 }
 
-fn failure(message: impl AsRef<str>, latency_ms: u64) -> NodeProbeResult {
-    NodeProbeResult {
-        success: 0,
-        country_code: CString::new("").unwrap().into_raw(),
-        egress_ip: CString::new("").unwrap().into_raw(),
-        latency_ms,
-        error: CString::new(message.as_ref())
-            .unwrap_or_else(|_| CString::new("Probe failed").unwrap())
-            .into_raw(),
+/// What one probe found, kept in Rust until it crosses the FFI boundary.
+struct ProbeReport {
+    latency_ms: u64,
+    /// `(country_code, egress_ip)`, or the message a person reads.
+    answer: Result<(String, String), String>,
+}
+
+impl ProbeReport {
+    fn failed(message: impl Into<String>) -> Self {
+        Self {
+            latency_ms: 0,
+            answer: Err(message.into()),
+        }
     }
+
+    fn into_ffi(self) -> NodeProbeResult {
+        match self.answer {
+            Ok((country_code, egress_ip)) => NodeProbeResult {
+                success: 1,
+                country_code: owned_c_string(&country_code),
+                egress_ip: owned_c_string(&egress_ip),
+                latency_ms: self.latency_ms,
+                error: ptr::null_mut(),
+            },
+            Err(message) => NodeProbeResult {
+                success: 0,
+                country_code: owned_c_string(""),
+                egress_ip: owned_c_string(""),
+                latency_ms: self.latency_ms,
+                error: owned_c_string(&message),
+            },
+        }
+    }
+}
+
+/// A string the caller frees. The address comes from a remote answer, so an
+/// interior NUL is dropped instead of aborting the process across the FFI.
+fn owned_c_string(value: &str) -> *mut c_char {
+    CString::new(value.replace('\0', ""))
+        .unwrap_or_default()
+        .into_raw()
+}
+
+fn probe_timeout(timeout_ms: u32) -> Duration {
+    Duration::from_millis(u64::from(if timeout_ms == 0 {
+        DEFAULT_TIMEOUT_MS
+    } else {
+        timeout_ms
+    }))
+}
+
+/// Copy a caller's host before the call returns.
+///
+/// # Safety
+/// `host` must be null or a valid C string.
+unsafe fn owned_host(host: *const c_char) -> Result<String, &'static str> {
+    if host.is_null() {
+        return Err("Invalid server host");
+    }
+    unsafe { CStr::from_ptr(host) }
+        .to_str()
+        .map(str::to_owned)
+        .map_err(|_| "Invalid server host encoding")
 }
 
 /// Measure a real round trip through a node and report where it egresses.
@@ -151,7 +206,7 @@ pub unsafe extern "C" fn proxy_probe_node(
 ) -> NodeProbeResult {
     let protocol = match WireProtocol::configured() {
         Ok(protocol) => protocol,
-        Err(error) => return failure(error.to_string(), 0),
+        Err(error) => return ProbeReport::failed(error.to_string()).into_ffi(),
     };
     unsafe { probe_node_inner(server_host, server_port, force_codec, timeout_ms, protocol) }
 }
@@ -170,7 +225,7 @@ pub unsafe extern "C" fn proxy_probe_node_v3(
 ) -> NodeProbeResult {
     let protocol = match WireProtocol::from_version(wire_protocol) {
         Ok(protocol) => protocol,
-        Err(_) => return failure("Invalid wire protocol", 0),
+        Err(_) => return ProbeReport::failed("Invalid wire protocol").into_ffi(),
     };
     unsafe { probe_node_inner(server_host, server_port, force_codec, timeout_ms, protocol) }
 }
@@ -182,84 +237,189 @@ unsafe fn probe_node_inner(
     timeout_ms: u32,
     protocol: WireProtocol,
 ) -> NodeProbeResult {
-    if server_host.is_null() {
-        return failure("Invalid server host", 0);
-    }
-    let Ok(host) = (unsafe { CStr::from_ptr(server_host) }).to_str() else {
-        return failure("Invalid server host encoding", 0);
+    let host = match unsafe { owned_host(server_host) } {
+        Ok(host) => host,
+        Err(message) => return ProbeReport::failed(message).into_ffi(),
     };
-    let host = host.to_string();
-
-    let timeout = Duration::from_millis(if timeout_ms == 0 {
-        DEFAULT_TIMEOUT_MS
-    } else {
-        timeout_ms
-    } as u64);
-
     let Some(runtime) = crate::runtime::control() else {
-        return failure("Runtime unavailable", 0);
+        return ProbeReport::failed("Runtime unavailable").into_ffi();
+    };
+    runtime
+        .block_on(measure(
+            &host,
+            server_port,
+            probe_timeout(timeout_ms),
+            protocol,
+        ))
+        .into_ffi()
+}
+
+/// Most probes one batch runs at once. Each is a socket and a small task on
+/// the shared runtime, so this bounds the burst sent through the upstream, not
+/// threads.
+const MAX_BATCH_CONCURRENCY: u32 = 64;
+
+/// Most nodes one batch accepts.
+const MAX_BATCH_TARGETS: u32 = 4096;
+
+/// Probe many nodes without blocking the caller.
+///
+/// Returns at once. Up to `concurrency` probes run together on the shared
+/// control runtime, each with its own `timeout_ms`, and `callback` receives
+/// every node's result as it finishes: exactly once per index, in completion
+/// order, from a runtime thread. Probing a node one call at a time instead
+/// costs the caller a blocked thread for as long as that node takes to answer.
+///
+/// Returns `0`, `-1` for invalid arguments or `-3` when no runtime is
+/// available; the callback is never invoked unless this returns `0`.
+///
+/// # Safety
+/// For a nonzero `count`, `hosts` must point to `count` pointers that are each
+/// null or a valid C string, and `ports` to `count` ports. Both are copied
+/// before this returns. `callback` must remain callable until every result has
+/// been delivered.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn proxy_probe_nodes_v1(
+    hosts: *const *const c_char,
+    ports: *const u16,
+    count: u32,
+    concurrency: u32,
+    timeout_ms: u32,
+    wire_protocol: c_int,
+    callback: Option<NodeProbeCallback>,
+    batch: u64,
+) -> c_int {
+    let Some(callback) = callback else {
+        return ProxyResult::InvalidParam as c_int;
+    };
+    let Ok(protocol) = WireProtocol::from_version(wire_protocol) else {
+        return ProxyResult::InvalidParam as c_int;
+    };
+    if count > MAX_BATCH_TARGETS || (count > 0 && (hosts.is_null() || ports.is_null())) {
+        return ProxyResult::InvalidParam as c_int;
+    }
+    if count == 0 {
+        return ProxyResult::Ok as c_int;
+    }
+    crate::init_process_policy();
+    let Some(runtime) = crate::runtime::control() else {
+        return ProxyResult::RuntimeError as c_int;
     };
 
-    runtime.block_on(async move {
-        let start = Instant::now();
-        let diagnostic = ConnectionTrace::default();
-        let outcome = tokio::time::timeout(
-            timeout,
-            diagnostic.scope(probe(&host, server_port, protocol)),
-        )
-        .await;
-        let elapsed = start.elapsed().as_millis() as u64;
+    // SAFETY: the caller guarantees `count` readable entries in each array.
+    let hosts = unsafe { std::slice::from_raw_parts(hosts, count as usize) };
+    let ports = unsafe { std::slice::from_raw_parts(ports, count as usize) };
+    let timeout = probe_timeout(timeout_ms);
+    let permits = Arc::new(Semaphore::new(
+        concurrency.clamp(1, MAX_BATCH_CONCURRENCY) as usize
+    ));
+    for (index, (&host, &port)) in hosts.iter().zip(ports).enumerate() {
+        let host = unsafe { owned_host(host) };
+        let delivery = Delivery {
+            callback,
+            batch,
+            index: index as u32,
+            sent: false,
+        };
+        let permits = Arc::clone(&permits);
+        runtime.spawn(async move {
+            let report = match host {
+                // The semaphore is fair, so nodes start in the order given.
+                Ok(host) => match permits.acquire_owned().await {
+                    Ok(_permit) => measure(&host, port, timeout, protocol).await,
+                    Err(_) => ProbeReport::failed("the batch was closed"),
+                },
+                Err(message) => ProbeReport::failed(message),
+            };
+            delivery.send(report);
+        });
+    }
+    ProxyResult::Ok as c_int
+}
 
-        // A probe traverses whatever routing and capture policy is active, so
-        // the stage it stopped at is the diagnosis. Record it: the result
-        // reaches the user as a transient message that cannot be read later.
-        match outcome {
-            Ok(Ok((country_code, egress_ip))) => {
-                tracing::info!(
-                    connection_id = diagnostic.id(),
-                    node = %host,
-                    port = server_port,
-                    country_code = %country_code,
-                    egress_ip = %egress_ip,
-                    latency_ms = elapsed,
-                    "node probe completed"
-                );
-                NodeProbeResult {
-                    success: 1,
-                    country_code: CString::new(country_code).unwrap().into_raw(),
-                    egress_ip: CString::new(egress_ip).unwrap().into_raw(),
-                    latency_ms: elapsed,
-                    error: ptr::null_mut(),
-                }
-            }
-            Ok(Err(error)) => {
-                tracing::warn!(
-                    connection_id = diagnostic.id(),
-                    node = %host,
-                    port = server_port,
-                    stage = %error.stage,
-                    detail = %error.detail,
-                    os_error = error.os_error,
-                    connection_phase = diagnostic.phase(),
-                    reset_origin = if error.is_connection_reset { Some("unattributed; requires packet/event correlation") } else { None },
-                    latency_ms = elapsed,
-                    "node probe failed"
-                );
-                failure(error.user_message(), elapsed)
-            }
-            Err(_) => {
-                tracing::warn!(
-                    connection_id = diagnostic.id(),
-                    node = %host,
-                    port = server_port,
-                    connection_phase = diagnostic.phase(),
-                    latency_ms = elapsed,
-                    "node probe timed out before an answer returned"
-                );
-                failure("timed out waiting for an answer through the node", elapsed)
-            }
+/// Hands one node's result to the caller exactly once, even when its probe
+/// panics or its task is dropped before finishing; otherwise the caller would
+/// wait for that node forever.
+struct Delivery {
+    callback: NodeProbeCallback,
+    batch: u64,
+    index: u32,
+    sent: bool,
+}
+
+impl Delivery {
+    fn send(mut self, report: ProbeReport) {
+        self.sent = true;
+        self.deliver(report);
+    }
+
+    fn deliver(&self, report: ProbeReport) {
+        let result = Box::into_raw(Box::new(report.into_ffi()));
+        (self.callback)(self.batch, self.index, result);
+    }
+}
+
+impl Drop for Delivery {
+    fn drop(&mut self) {
+        if !self.sent {
+            self.deliver(ProbeReport::failed("the probe stopped before it finished"));
         }
-    })
+    }
+}
+
+/// One probe, bounded by `timeout` from the moment it starts.
+async fn measure(host: &str, port: u16, timeout: Duration, protocol: WireProtocol) -> ProbeReport {
+    let start = Instant::now();
+    let diagnostic = ConnectionTrace::default();
+    let outcome =
+        tokio::time::timeout(timeout, diagnostic.scope(probe(host, port, protocol))).await;
+    let latency_ms = start.elapsed().as_millis() as u64;
+
+    // A probe traverses whatever routing and capture policy is active, so the
+    // stage it stopped at is the diagnosis. Record it: the result reaches the
+    // user as a transient message that cannot be read later.
+    let answer = match outcome {
+        Ok(Ok((country_code, egress_ip))) => {
+            tracing::info!(
+                connection_id = diagnostic.id(),
+                node = %host,
+                port,
+                country_code = %country_code,
+                egress_ip = %egress_ip,
+                latency_ms,
+                "node probe completed"
+            );
+            Ok((country_code, egress_ip))
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                connection_id = diagnostic.id(),
+                node = %host,
+                port,
+                stage = %error.stage,
+                detail = %error.detail,
+                os_error = error.os_error,
+                connection_phase = diagnostic.phase(),
+                reset_origin = if error.is_connection_reset { Some("unattributed; requires packet/event correlation") } else { None },
+                latency_ms,
+                "node probe failed"
+            );
+            Err(error.user_message())
+        }
+        Err(_) => {
+            tracing::warn!(
+                connection_id = diagnostic.id(),
+                node = %host,
+                port,
+                connection_phase = diagnostic.phase(),
+                latency_ms,
+                "node probe timed out before an answer returned"
+            );
+            Err("timed out waiting for an answer through the node".to_owned())
+        }
+    };
+    ProbeReport { latency_ms, answer }
 }
 
 struct ObservedProbeSocket {
@@ -451,6 +611,21 @@ pub unsafe extern "C" fn proxy_free_node_probe_result(result: *mut NodeProbeResu
     }
 }
 
+/// Release a result delivered to a `proxy_probe_nodes_v1` callback.
+///
+/// # Safety
+/// `result` must be one delivered result, released once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_release_node_probe_result(result: *mut NodeProbeResult) {
+    if result.is_null() {
+        return;
+    }
+    unsafe {
+        proxy_free_node_probe_result(result);
+        drop(Box::from_raw(result));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -550,9 +725,17 @@ mod tests {
         assert!(error.is_connection_reset);
     }
 
+    /// Serializes the test that captures logs through a thread-scoped
+    /// subscriber with the batch test, which emits the same callsites from
+    /// runtime threads. Callsite interest is cached process-wide, and the two
+    /// racing can leave the capture's interest stale.
+    static LOG_CAPTURE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test(start_paused = true)]
     async fn cancelled_exchange_retains_phase_and_live_socket_observations() {
         use std::sync::{Arc, Mutex};
+
+        let _serial = LOG_CAPTURE.lock().await;
 
         use tokio::net::{TcpListener, TcpStream};
 
@@ -750,5 +933,116 @@ mod tests {
         // user sees, not only into the log.
         let error = ProbeError::new(ProbeStage::Connect, "connection refused");
         assert_eq!(error.user_message(), "connect: connection refused");
+    }
+
+    mod batch {
+        use std::ffi::{CStr, c_char};
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        use super::super::{proxy_probe_nodes_v1, proxy_release_node_probe_result};
+        use crate::types::NodeProbeResult;
+
+        /// `(batch, index, success, error)` for every delivered result.
+        static DELIVERED: Mutex<Vec<(u64, u32, i32, String)>> = Mutex::new(Vec::new());
+
+        extern "C" fn record(batch: u64, index: u32, result: *mut NodeProbeResult) {
+            let entry = unsafe {
+                let result = &*result;
+                let error = if result.error.is_null() {
+                    String::new()
+                } else {
+                    CStr::from_ptr(result.error).to_string_lossy().into_owned()
+                };
+                (batch, index, result.success, error)
+            };
+            unsafe { proxy_release_node_probe_result(result) };
+            DELIVERED.lock().unwrap().push(entry);
+        }
+
+        fn delivered(batch: u64) -> Vec<(u32, i32, String)> {
+            DELIVERED
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry.0 == batch)
+                .map(|(_, index, success, error)| (*index, *success, error.clone()))
+                .collect()
+        }
+
+        #[test]
+        fn every_node_is_reported_once_and_no_more_than_the_limit_run_together() {
+            const BATCH: u64 = 0xBA7C4;
+            let _serial = super::LOG_CAPTURE.blocking_lock();
+            // A peer that accepts and never answers, so every probe runs to its
+            // timeout and the next one can only start when a slot frees up.
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let accepted = Arc::new(Mutex::new(Vec::new()));
+            std::thread::spawn({
+                let accepted = Arc::clone(&accepted);
+                move || {
+                    let mut open = Vec::new();
+                    for stream in listener.incoming() {
+                        accepted.lock().unwrap().push(Instant::now());
+                        open.push(stream);
+                    }
+                }
+            });
+
+            let host = c"127.0.0.1";
+            let mut hosts = vec![host.as_ptr(); 4];
+            hosts.push(std::ptr::null::<c_char>());
+            let ports = vec![port; hosts.len()];
+            let code = unsafe {
+                proxy_probe_nodes_v1(
+                    hosts.as_ptr(),
+                    ports.as_ptr(),
+                    hosts.len() as u32,
+                    2,
+                    300,
+                    0,
+                    Some(record),
+                    BATCH,
+                )
+            };
+            assert_eq!(code, 0);
+
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while delivered(BATCH).len() < hosts.len() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let mut results = delivered(BATCH);
+            results.sort_by_key(|entry| entry.0);
+            assert_eq!(
+                results.iter().map(|entry| entry.0).collect::<Vec<_>>(),
+                [0, 1, 2, 3, 4]
+            );
+            assert!(results.iter().all(|entry| entry.1 == 0));
+            assert_eq!(results[4].2, "Invalid server host");
+            assert!(results[0].2.contains("timed out"));
+
+            let accepted = accepted.lock().unwrap();
+            assert_eq!(accepted.len(), 4);
+            // The third node waited for one of the first two to give up.
+            assert!(accepted[2] - accepted[0] >= Duration::from_millis(250));
+        }
+
+        #[test]
+        fn invalid_arguments_are_rejected_without_a_callback() {
+            const BATCH: u64 = 0xBAD;
+            let host = c"127.0.0.1".as_ptr();
+            let port = 1u16;
+            let call = |hosts, ports, count, protocol, callback| unsafe {
+                proxy_probe_nodes_v1(hosts, ports, count, 4, 100, protocol, callback, BATCH)
+            };
+            assert_eq!(call(&host, &port, 1, 0, None), -1);
+            assert_eq!(call(std::ptr::null(), &port, 1, 0, Some(record)), -1);
+            assert_eq!(call(&host, &port, 1, 7, Some(record)), -1);
+            assert_eq!(call(&host, &port, 5000, 0, Some(record)), -1);
+            assert_eq!(call(&host, &port, 0, 0, Some(record)), 0);
+            std::thread::sleep(Duration::from_millis(200));
+            assert!(delivered(BATCH).is_empty());
+        }
     }
 }

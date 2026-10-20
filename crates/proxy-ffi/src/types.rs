@@ -162,6 +162,13 @@ pub struct NodeProbeResult {
     pub error: *mut c_char,
 }
 
+/// Receives one finished probe of a batch started by `proxy_probe_nodes_v1`.
+///
+/// `batch` is the caller's own id and `index` the node's position in the
+/// arrays it passed. Ownership of `result` moves to the callee, which releases
+/// it with `proxy_release_node_probe_result`. Called from a runtime thread.
+pub type NodeProbeCallback = extern "C" fn(batch: u64, index: u32, result: *mut NodeProbeResult);
+
 /// Node info with geo location.
 #[repr(C)]
 pub struct NodeInfoWithGeo {
