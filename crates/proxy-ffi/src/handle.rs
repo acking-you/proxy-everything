@@ -551,8 +551,9 @@ fn proxy_start_inner(
         wire_protocol,
         tun_fake_ip,
     } = options;
-    // The store dylib must fail closed even if an old UI/config reaches FFI.
-    if cfg!(feature = "mac-app-store") && (enable_tun || config.set_system_proxy != 0) {
+    // System-hosted tunnel builds must reject desktop capture even if an old
+    // UI/config reaches FFI.
+    if cfg!(feature = "network-extension") && (enable_tun || config.set_system_proxy != 0) {
         return ProxyResult::InvalidParam;
     }
 
@@ -981,7 +982,7 @@ pub unsafe extern "C" fn proxy_start_tun(
     handle: *mut ProxyHandle,
     processes: *const c_char,
 ) -> ProxyResult {
-    if cfg!(feature = "mac-app-store") {
+    if cfg!(feature = "network-extension") {
         return ProxyResult::InvalidParam;
     }
 
@@ -1481,7 +1482,7 @@ pub extern "C" fn proxy_is_elevated() -> c_int {
 /// repeatedly and when nothing was left behind.
 #[unsafe(no_mangle)]
 pub extern "C" fn proxy_restore_system_proxy() -> c_int {
-    if cfg!(feature = "mac-app-store") {
+    if cfg!(feature = "network-extension") {
         return 0;
     }
 
@@ -1668,7 +1669,7 @@ pub unsafe extern "C" fn proxy_set_tun_bypass_processes(
 /// The caller must release the returned pointer with `proxy_free_string`.
 #[unsafe(no_mangle)]
 pub extern "C" fn proxy_list_tun_processes() -> *mut c_char {
-    if cfg!(feature = "mac-app-store") {
+    if cfg!(feature = "network-extension") {
         return CString::new("[]").expect("literal").into_raw();
     }
 
@@ -1693,7 +1694,7 @@ pub extern "C" fn proxy_list_tun_processes() -> *mut c_char {
 /// returned pointer with `proxy_free_string`.
 #[unsafe(no_mangle)]
 pub extern "C" fn proxy_list_tun_processes_v2() -> *mut c_char {
-    if cfg!(feature = "mac-app-store") {
+    if cfg!(feature = "network-extension") {
         return CString::new("[]").expect("literal").into_raw();
     }
 
@@ -2004,9 +2005,9 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "mac-app-store")]
+    #[cfg(feature = "network-extension")]
     #[test]
-    fn store_build_rejects_privileged_tun_before_touching_handle_or_system() {
+    fn packet_tunnel_build_rejects_privileged_tun_before_touching_handle_or_system() {
         assert_eq!(
             unsafe { proxy_start_tun(ptr::null_mut(), ptr::null()) },
             ProxyResult::InvalidParam
@@ -2057,7 +2058,7 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "mac-app-store"))]
+    #[cfg(not(feature = "network-extension"))]
     #[test]
     fn tun_cannot_start_before_local_listener() {
         let handle = proxy_create();

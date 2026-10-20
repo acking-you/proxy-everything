@@ -102,7 +102,7 @@ cargo fmt --manifest-path deps/tun2proxy/Cargo.toml -- --check
 cd ui/flutter
 fvm flutter analyze --no-fatal-infos
 fvm flutter test
-fvm flutter test test/macos_vpn_service_test.dart --dart-define=MAC_APP_STORE=true
+fvm flutter test test/apple_vpn_service_test.dart --dart-define=MAC_APP_STORE=true
 ```
 
 `crates/proxy-client/tests/packet_tunnel.rs` 在回环端口启动真正的代理服务器与 echo 服务，

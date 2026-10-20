@@ -10,7 +10,7 @@ mod handle;
 mod latency;
 mod logging;
 mod nodes;
-#[cfg(feature = "mac-app-store")]
+#[cfg(feature = "network-extension")]
 mod packet_tunnel;
 mod probe;
 mod runtime;
