@@ -295,3 +295,29 @@ Verify APK zip alignment and ELF load-segment alignment before release:
   policy are ignored when Android rebuilds the interface.
 - Do not remove the CipherRelay package exclusion in Kotlin. Rust socket
   protection cannot replace Android's per-UID loop barrier in this design.
+
+## Android HTTPS certificate verification
+
+Rust HTTP clients on Android use the shared `proxy_core::util::http_client_builder`
+and bundled Mozilla public roots from `webpki-roots`. Certificate chains,
+hostnames, and validity periods remain verified; update manifests and downloads
+also retain their signature and SHA-256 checks. This path does not require Java
+VM initialization when Flutter loads the library through Dart FFI. Desktop
+clients continue using their platform certificate verifier. Android custom
+user-installed certificate authorities are not included in this public-root store.
+
+For an Android update hotfix, install the previous release on a persistent test
+device, upgrade with `adb install -r`, and exercise **Check for updates** in the
+release APK. Confirm the signed manifest is retrieved, repeated checks and a
+background/foreground cycle preserve the process, and an unavailable network
+shows an error without exiting. A launch or proxy-start smoke test alone does
+not cover the update HTTPS path.
+
+With an English or Chinese UI, run the repeatable release smoke check:
+
+```powershell
+python scripts/android/verify-update-check.py --adb "$env:LOCALAPPDATA/Android/Sdk/platform-tools/adb.exe" --serial emulator-5554 --expected-code 4077 --output target/android-update-check.json
+```
+
+It checks the installed version, taps the actual update control, waits for a
+successful signed-manifest result, and repeats after backgrounding the app.

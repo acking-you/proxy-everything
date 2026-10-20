@@ -2971,6 +2971,7 @@ dependencies = [
  "tracing-subscriber",
  "uni-stream",
  "ureq",
+ "webpki-roots",
  "windows-sys 0.61.2",
 ]
 
