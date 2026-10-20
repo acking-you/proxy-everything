@@ -397,12 +397,13 @@ fn execute(handle: *mut ProxyHandle, request: Request) -> Result<Value, String> 
                 return Ok(json!({}));
             }
             Request::Processes => {
-                let pointer = crate::proxy_list_tun_processes_v2();
-                let value = serde_json::from_str::<Value>(&text(pointer));
-                crate::proxy_free_string(pointer);
-                return value
-                    .map(|processes| json!({"processes": processes}))
-                    .map_err(|error| error.to_string());
+                if cfg!(feature = "network-extension") {
+                    return Ok(json!({"processes": []}));
+                }
+                crate::init_process_policy();
+                // Icons can make this snapshot large. Do not serialize through
+                // the legacy C-string API only to parse and serialize it again.
+                return Ok(json!({"processes": proxy_client::client::tun::running_processes()}));
             }
         }
     };
