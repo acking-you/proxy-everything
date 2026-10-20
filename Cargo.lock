@@ -1252,7 +1252,7 @@ dependencies = [
 
 [[package]]
 name = "galaxy-geometry"
-version = "0.6.5"
+version = "0.6.6"
 
 [[package]]
 name = "generic-array"
@@ -2892,7 +2892,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-client"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "anyhow",
  "async-broadcast",
@@ -2929,7 +2929,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-core"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "arc-swap",
  "async-broadcast",
@@ -2969,7 +2969,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-crypto"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "futures",
  "ring",
@@ -2978,7 +2978,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-ffi"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "chrono",
  "galaxy-geometry",
@@ -2996,7 +2996,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-server"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -3018,7 +3018,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-tui"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "chrono",
  "clap",

@@ -71,6 +71,9 @@ also established TLS without passing through the active Singapore TUN.
 These controls do not reproduce or explain the reported difference between
 Singapore and the other nodes on the physical phone; the IPv6 defect and its
 fix should not be presented as proof of that complete diagnosis.
+The user subsequently confirmed that build 72 resolved the reported failures
+on the physical phone. This confirms the fix's practical result without adding
+a packet trace explaining the original per-node difference.
 
 Restart the VPN and the affected application after an upgrade if it retained
 old DNS answers. Literal IPv6 destinations and application-managed encrypted
