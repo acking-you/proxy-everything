@@ -51,8 +51,7 @@ impl Failure {
 }
 
 fn client(proxy_port: Option<u16>) -> Result<reqwest::Client, Failure> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let mut builder = reqwest::Client::builder()
+    let mut builder = proxy_core::util::http_client_builder()
         .no_proxy()
         .user_agent("CipherRelay-updater")
         .connect_timeout(Duration::from_secs(15))

@@ -12,12 +12,43 @@ use tokio_util::task::TaskTracker;
 /// Creates an HTTP client builder with the process TLS provider initialized.
 /// reqwest's `rustls-no-provider` mode requires explicit initialization; retain
 /// a provider already installed by an embedding application.
+/// Android uses bundled public roots because a library opened by Dart FFI has
+/// no Java VM/context registered with rustls-platform-verifier.
 pub fn http_client_builder() -> reqwest::ClientBuilder {
     if rustls::crypto::CryptoProvider::get_default().is_none() {
         // Another thread may install its provider between the check and call.
         let _ = rustls::crypto::ring::default_provider().install_default();
     }
-    reqwest::Client::builder()
+    let builder = reqwest::Client::builder();
+    #[cfg(target_os = "android")]
+    let builder = builder.tls_backend_preconfigured(android_http_tls());
+    builder
+}
+
+#[cfg(any(target_os = "android", test))]
+fn android_http_tls() -> rustls::ClientConfig {
+    let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .expect("ring supports the default TLS versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth()
+}
+
+#[cfg(test)]
+mod http_tls_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn android_http_client_builds_without_a_java_vm() {
+        let client = reqwest::Client::builder()
+            .tls_backend_preconfigured(android_http_tls())
+            .no_proxy()
+            .build()
+            .unwrap();
+        // Creating a request must not initialize the Android platform verifier.
+        client.get("https://localhost/").build().unwrap();
+    }
 }
 
 pub type TaskId = i64;
