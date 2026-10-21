@@ -63,6 +63,11 @@ enum Request {
         id: u64,
     },
     Processes,
+    #[cfg(all(
+        any(target_os = "macos", target_os = "windows"),
+        not(feature = "mac-app-store")
+    ))]
+    AppProxies(crate::app_proxies::Request),
 }
 
 #[derive(Deserialize)]
@@ -87,6 +92,13 @@ struct StartConfig {
 
 impl Request {
     fn borrows_handle(&self) -> bool {
+        #[cfg(all(
+            any(target_os = "macos", target_os = "windows"),
+            not(feature = "mac-app-store")
+        ))]
+        if matches!(self, Self::AppProxies(_)) {
+            return false;
+        }
         !matches!(
             self,
             Self::Nodes { .. }
@@ -396,6 +408,11 @@ fn execute(handle: *mut ProxyHandle, request: Request) -> Result<Value, String> 
                 }
                 return Ok(json!({}));
             }
+            #[cfg(all(
+                any(target_os = "macos", target_os = "windows"),
+                not(feature = "mac-app-store")
+            ))]
+            Request::AppProxies(request) => return crate::app_proxies::execute(request),
             Request::Processes => {
                 if cfg!(feature = "network-extension") {
                     return Ok(json!({"processes": []}));
@@ -416,4 +433,43 @@ fn subscriptions()
         Mutex<std::collections::HashMap<u64, proxy_ui_services::subscription::Server>>,
     > = OnceLock::new();
     SERVERS.get_or_init(Mutex::default)
+}
+
+#[cfg(test)]
+#[cfg(all(
+    any(target_os = "macos", target_os = "windows"),
+    not(feature = "mac-app-store")
+))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ui_requests_reach_the_app_proxy_service_without_a_handle() {
+        let request: super::Request = serde_json::from_value(json!({
+            "operation": "app_proxies",
+            "action": "save",
+            "entry": {
+                "name": "Codex Proxy Launcher",
+                "appPath": "/Applications/Codex.app",
+                "mode": "chromium",
+                "port": 10801,
+                "bypassRules": ["*oa*"],
+                "applicationId": "com.openai.codex",
+            },
+        }))
+        .unwrap();
+        assert!(!request.borrows_handle());
+        let super::Request::AppProxies(crate::app_proxies::Request::Save { entry }) = request
+        else {
+            panic!("not an app proxy save");
+        };
+        assert_eq!(entry.port, 10801);
+        assert!(
+            serde_json::from_value::<super::Request>(json!({
+                "operation": "app_proxies",
+                "action": "delete_everything",
+            }))
+            .is_err()
+        );
+    }
 }

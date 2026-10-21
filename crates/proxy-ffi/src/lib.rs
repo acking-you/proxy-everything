@@ -3,6 +3,11 @@
 //! This module provides a C-compatible interface for external applications to use the proxy client.
 //! It reuses the existing client module logic.
 
+#[cfg(all(
+    any(target_os = "macos", target_os = "windows"),
+    not(feature = "mac-app-store")
+))]
+mod app_proxies;
 mod disk_log;
 mod galaxy;
 mod groups;

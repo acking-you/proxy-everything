@@ -8,13 +8,45 @@ repository.workspace = true
 [dependencies]
 base64.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 bytes = "1"
 http-body-util = "0.1"
-hyper = { version = "1", features = ["server", "http1"] }
+hyper = { version = "1", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+
+# App proxies exist only in the macOS and Windows desktop apps.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+dirs.workspace = true
+rand.workspace = true
+trash = "5.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+plist = "1.7"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+sysinfo.workspace = true
+winreg = "0.56"
+windows = { version = "0.62", features = [
+    "ApplicationModel",
+    "Foundation_Collections",
+    "Management_Deployment",
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# The launcher each generated app proxy runs: reads its own settings, then
+# starts the target app with them. It works while CipherRelay is closed.
+[[bin]]
+name = "cipherrelay-app-launcher"
+path = "src/bin/app_launcher.rs"
 
 [dev-dependencies]
 reqwest.workspace = true
 rustls.workspace = true
+tempfile = "3"
