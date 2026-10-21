@@ -42,11 +42,12 @@ def verify(directory, version, source_commit):
             if "windows" in target and binary == "http-proxy-cli":
                 required.append("wintun.dll")
         elif "windows" in target:
-            required = ["http_proxy.dll", "http_proxy.lib", "wintun.dll"]
+            # App proxies copy cipherrelay-app-launcher into every launcher.
+            required = ["http_proxy.dll", "http_proxy.lib", "wintun.dll", "cipherrelay-app-launcher.exe"]
         else:
             required = ["libhttp_proxy.a"]
             if "apple-darwin" in target:
-                required += ["libhttp_proxy.dylib", "http-proxy-tun-helper"]
+                required += ["libhttp_proxy.dylib", "http-proxy-tun-helper", "cipherrelay-app-launcher"]
             elif "apple-ios" not in target:
                 required += ["libhttp_proxy.so"]
         with (zipfile.ZipFile(path) if extension == ".zip" else tarfile.open(path)) as archive:

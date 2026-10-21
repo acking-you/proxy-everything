@@ -23,7 +23,7 @@ class ReleaseAssetsTest(unittest.TestCase):
                 stem = f"{component}-{self.version}-{target}"
                 files = {"build-info.json": json.dumps({"version": self.version, "source_commit": self.commit, "target": target, "component": component}).encode()}
                 if component == "libhttp_proxy":
-                    names = ["http_proxy.dll", "http_proxy.lib", "wintun.dll", "libhttp_proxy.a", "libhttp_proxy.dylib", "libhttp_proxy.so", "http-proxy-tun-helper"]
+                    names = ["http_proxy.dll", "http_proxy.lib", "wintun.dll", "libhttp_proxy.a", "libhttp_proxy.dylib", "libhttp_proxy.so", "http-proxy-tun-helper", "cipherrelay-app-launcher", "cipherrelay-app-launcher.exe"]
                 else:
                     names = [component, component + ".exe", "wintun.dll"]
                 files.update({name: b"fixture" for name in names})
