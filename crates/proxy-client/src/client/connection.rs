@@ -8,7 +8,7 @@ use proxy_core::util::error_report;
 use snafu::ResultExt;
 
 #[cfg(feature = "auto-proxy")]
-use super::{ClientError, LocalHostSnafu, auto_proxy::SenderChan};
+use super::{ClientError, LocalHostSnafu, auto_proxy::RouteSelector};
 use super::{IoSnafu, Result, TransportSnafu};
 
 /// Result of server connection resolution.
@@ -45,7 +45,7 @@ pub struct ServerConnection {
 pub async fn resolve_server_connection(
     host: &str,
     port: u16,
-    #[cfg(feature = "auto-proxy")] sender: Option<&SenderChan>,
+    #[cfg(feature = "auto-proxy")] sender: Option<&RouteSelector>,
     upstream_proxy: Option<&ExternalProxyTarget>,
     honor_forced_direct: bool,
 ) -> Result<ServerConnection> {
@@ -57,6 +57,9 @@ pub async fn resolve_server_connection(
     #[cfg(feature = "auto-proxy")]
     let sender = if port == 53 { None } else { sender };
     let honor_forced_direct = honor_forced_direct && port != 53;
+    #[cfg(feature = "network-extension")]
+    let honor_forced_direct =
+        honor_forced_direct && !matches!(sender, Some(RouteSelector::Packet(_)));
 
     // Ahead of the upstream proxy and of every keyword or geo rule: these hosts
     // are compiled in as direct, so no configuration can route them elsewhere.
@@ -99,6 +102,20 @@ pub async fn resolve_server_connection(
     if let Some(sender) = sender {
         match need_proxy(host, port, sender).await? {
             ProxyStatus::NormalProxy => {}
+            #[cfg(feature = "network-extension")]
+            ProxyStatus::DirectAddresses(addresses) => {
+                let stream = proxy_core::transport::connect_tcp_addresses(&addresses, port)
+                    .await
+                    .with_context(|_| IoSnafu {
+                        uri: Some(get_uri(host, port)),
+                        detail: "connect classified direct address",
+                    })?;
+                return Ok(ServerConnection {
+                    stream: stream.into(),
+                    need_proxy: false,
+                    msg_key: None,
+                });
+            }
             ProxyStatus::NoProxy(detail) => {
                 return Ok(ServerConnection {
                     stream: get_tcp_stream(host, port, detail).await?,
@@ -125,6 +142,8 @@ pub fn get_uri(host: impl AsRef<str>, port: u16) -> String {
 }
 
 pub enum ProxyStatus {
+    #[cfg(feature = "network-extension")]
+    DirectAddresses(std::sync::Arc<[std::net::IpAddr]>),
     NormalProxy,
     NoProxy(&'static str),
     NeedSpecialProxy(String),
@@ -151,10 +170,22 @@ pub(super) const AUTO_PROXY_DECISION_TIMEOUT: std::time::Duration =
 pub async fn need_proxy(
     host: impl AsRef<str>,
     port: u16,
-    sender: &SenderChan,
+    sender: &RouteSelector,
 ) -> Result<ProxyStatus> {
     use proxy_core::config::runtime;
 
+    let sender = match sender {
+        #[cfg(feature = "network-extension")]
+        RouteSelector::Packet(router) => {
+            return Ok(match router.route(host.as_ref(), false).await {
+                super::packet_routing::PacketRoute::Proxy => ProxyStatus::NormalProxy,
+                super::packet_routing::PacketRoute::Direct(ips) => {
+                    ProxyStatus::DirectAddresses(ips)
+                }
+            });
+        }
+        RouteSelector::Online(sender) => sender,
+    };
     if host.as_ref() == "127.0.0.1" {
         LocalHostSnafu { port }.fail()?;
     }

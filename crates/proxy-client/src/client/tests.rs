@@ -204,7 +204,7 @@ async fn a_full_geo_queue_falls_back_to_proxy_without_waiting() {
     sender.try_send(("queued.example".into(), notify)).unwrap();
     let status = tokio::time::timeout(
         std::time::Duration::from_millis(50),
-        need_proxy("full-queue.example", 443, &sender),
+        need_proxy("full-queue.example", 443, &sender.into()),
     )
     .await
     .unwrap()
@@ -228,7 +228,7 @@ async fn a_slow_geo_lookup_does_not_block_the_connection() {
     });
 
     let started = std::time::Instant::now();
-    let status = need_proxy(&host, 443, &sender).await.unwrap();
+    let status = need_proxy(&host, 443, &sender.into()).await.unwrap();
     let waited = started.elapsed();
 
     assert!(
@@ -255,7 +255,7 @@ async fn a_prompt_geo_lookup_still_decides_the_connection() {
         notifier.send(false).await.unwrap();
     });
 
-    let status = need_proxy(&host, 443, &sender).await.unwrap();
+    let status = need_proxy(&host, 443, &sender.into()).await.unwrap();
     assert!(
         matches!(status, ProxyStatus::NoProxy(_)),
         "a resolved direct decision must be honoured"
@@ -292,6 +292,7 @@ async fn start_client_for_test(upstream_proxy: ExternalProxyTarget) -> (String, 
             tun: None,
             force_proxy: None,
             process_bypass: None,
+            packet_routing: None,
         }),
     ));
     (addr, token)

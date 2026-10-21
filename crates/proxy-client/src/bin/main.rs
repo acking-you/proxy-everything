@@ -505,6 +505,7 @@ async fn main() -> Result<()> {
         tun,
         force_proxy: None,
         process_bypass: None,
+        packet_routing: None,
     };
     let env_listen_host = std::env::var("LISTEN_HOST").ok();
     let listen_host = cli

@@ -320,7 +320,19 @@ impl DatagramRelay {
 /// Create a relay that sends UDP datagrams directly from this process.
 pub async fn create_direct_datagram_relay() -> crate::Result<DatagramRelay> {
     let sockets = UdpSocketSet::bind().await?;
-    Ok(direct_datagram_relay(sockets))
+    Ok(direct_datagram_relay(sockets, MAX_SOCKS5_UDP_DATAGRAM_SIZE))
+}
+
+/// Bound response buffers for a packet tunnel with a known MTU. Oversized
+/// datagrams are dropped, never delivered as truncated application data.
+pub async fn create_direct_datagram_relay_with_max_payload(
+    max_payload: usize,
+) -> crate::Result<DatagramRelay> {
+    if max_payload == 0 || max_payload >= MAX_SOCKS5_UDP_DATAGRAM_SIZE {
+        return protocol_error("invalid direct UDP payload limit");
+    }
+    let sockets = UdpSocketSet::bind().await?;
+    Ok(direct_datagram_relay(sockets, max_payload))
 }
 
 /// Reuse the direct relay's source validation and framing with sockets bound
@@ -329,13 +341,16 @@ pub fn create_direct_datagram_relay_with_sockets(
     v4: UdpSocket,
     v6: Option<UdpSocket>,
 ) -> DatagramRelay {
-    direct_datagram_relay(UdpSocketSet {
-        v4: Arc::new(v4),
-        v6: v6.map(Arc::new),
-    })
+    direct_datagram_relay(
+        UdpSocketSet {
+            v4: Arc::new(v4),
+            v6: v6.map(Arc::new),
+        },
+        MAX_SOCKS5_UDP_DATAGRAM_SIZE,
+    )
 }
 
-fn direct_datagram_relay(sockets: UdpSocketSet) -> DatagramRelay {
+fn direct_datagram_relay(sockets: UdpSocketSet, max_payload: usize) -> DatagramRelay {
     tracing::info!(
         ipv4_socket = ?sockets.v4.local_addr().ok(),
         ipv6_socket = ?sockets.v6.as_ref().and_then(|socket| socket.local_addr().ok()),
@@ -346,8 +361,19 @@ fn direct_datagram_relay(sockets: UdpSocketSet) -> DatagramRelay {
         reader: DatagramRelayReader::Direct(DirectDatagramReader {
             sockets: sockets.clone(),
             peers: peers.clone(),
-            v4_buffer: vec![0u8; MAX_SOCKS5_UDP_DATAGRAM_SIZE],
-            v6_buffer: vec![0u8; MAX_SOCKS5_UDP_DATAGRAM_SIZE],
+            v4_buffer: vec![
+                0u8;
+                max_payload
+                    .saturating_add(1)
+                    .min(MAX_SOCKS5_UDP_DATAGRAM_SIZE)
+            ],
+            v6_buffer: vec![
+                0u8;
+                max_payload
+                    .saturating_add(1)
+                    .min(MAX_SOCKS5_UDP_DATAGRAM_SIZE)
+            ],
+            max_payload,
         }),
         writer: DatagramRelayWriter::Direct(DirectDatagramWriter { sockets, peers }),
         _control_stream: None,
@@ -525,6 +551,7 @@ pub struct DirectDatagramReader {
     peers: Arc<Mutex<HashMap<SocketAddr, DirectPeer>>>,
     v4_buffer: Vec<u8>,
     v6_buffer: Vec<u8>,
+    max_payload: usize,
 }
 
 impl DirectDatagramReader {
@@ -534,41 +561,43 @@ impl DirectDatagramReader {
         // IPv4 peers into IPv6 addresses, which would make peer validation
         // inconsistent across supported platforms.
         loop {
-            let (size, source, is_v6) = match &self.sockets.v6 {
+            let (received, is_v6) = match &self.sockets.v6 {
                 Some(v6) => {
                     tokio::select! {
                         result = self.sockets.v4.recv_from(&mut self.v4_buffer) => {
-                            let (size, source) = result.map_err(|source| ProxyError::Io {
-                                context: "udp_relay",
-                                detail: "receive IPv4 datagram".to_string(),
-                                source,
-                            })?;
-                            (size, source, false)
+                            (result, false)
                         }
                         result = v6.recv_from(&mut self.v6_buffer) => {
-                            let (size, source) = result.map_err(|source| ProxyError::Io {
-                                context: "udp_relay",
-                                detail: "receive IPv6 datagram".to_string(),
-                                source,
-                            })?;
-                            (size, source, true)
+                            (result, true)
                         }
                     }
                 }
-                None => {
-                    let (size, source) = self
-                        .sockets
-                        .v4
-                        .recv_from(&mut self.v4_buffer)
-                        .await
-                        .map_err(|source| ProxyError::Io {
-                            context: "udp_relay",
-                            detail: "receive IPv4 datagram".to_string(),
-                            source,
-                        })?;
-                    (size, source, false)
+                None => (self.sockets.v4.recv_from(&mut self.v4_buffer).await, false),
+            };
+            let (size, source) = match received {
+                Ok(datagram) => datagram,
+                // Winsock consumes an oversized datagram but reports an error
+                // instead of the truncated size returned by Unix sockets.
+                #[cfg(windows)]
+                Err(error)
+                    if error.raw_os_error()
+                        == Some(windows_sys::Win32::Networking::WinSock::WSAEMSGSIZE) =>
+                {
+                    tracing::debug!(is_v6, "discarding oversized direct UDP response");
+                    continue;
+                }
+                Err(source) => {
+                    return Err(ProxyError::Io {
+                        context: "udp_relay",
+                        detail: format!("receive IPv{} datagram", if is_v6 { 6 } else { 4 }),
+                        source,
+                    });
                 }
             };
+            if size > self.max_payload {
+                tracing::debug!(%source, size, "discarding oversized direct UDP response");
+                continue;
+            }
             if !self.peers.lock().contains_key(&source) {
                 tracing::debug!(%source, "discarding UDP response from an unknown peer");
                 continue;
@@ -911,6 +940,37 @@ mod tests {
     use super::*;
     use crate::codec::{AsyncReader, AsyncWriter};
     use crate::protocol::get_check_sum;
+
+    #[tokio::test]
+    async fn packet_relay_drops_oversized_responses_without_truncation() {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let (mut reader, writer, _) = create_direct_datagram_relay_with_max_payload(100)
+            .await
+            .unwrap()
+            .into_parts();
+        writer
+            .send(
+                &encode_socks5_udp_packet(
+                    &DatagramAddress::Ip(socket.local_addr().unwrap()),
+                    b"request",
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut buffer = [0; 32];
+        let (_, peer) = socket.recv_from(&mut buffer).await.unwrap();
+        socket.send_to(&[0; 150], peer).await.unwrap();
+        socket.send_to(b"valid", peer).await.unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(1), reader.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parse_socks5_udp_packet(&response).unwrap().payload,
+            b"valid"
+        );
+    }
 
     #[tokio::test]
     async fn failed_udp_send_revokes_only_unconfirmed_peers() {
