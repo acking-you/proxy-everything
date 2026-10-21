@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Build and stage the macOS native artifacts the Flutter UI loads.
 #
-# Two files are needed, not one: the FFI library the app links against, and the
-# privileged TUN helper that creates the utun device. macOS refuses to create
-# that device without root and cannot elevate a running GUI, so the helper is
-# started through an administrator prompt and must ship inside the bundle.
+# Three files are needed: the FFI library the app links against, the
+# privileged TUN helper that creates the utun device, and the app-proxy
+# launcher copied into each generated launcher. macOS refuses to create the
+# utun device without root and cannot elevate a running GUI, so the TUN helper
+# is started through an administrator prompt and must ship inside the bundle.
 set -euo pipefail
 
 CONFIGURATION="Debug"
@@ -15,7 +16,8 @@ usage() {
     cat <<'EOF'
 Usage: stage-ui-native.sh [--configuration Debug|Release] [--universal] [--skip-build]
 
-Builds proxy-ffi and http-proxy-tun-helper, then stages both into
+Builds proxy-ffi, http-proxy-tun-helper and cipherrelay-app-launcher, then
+stages them into
 ui/flutter/native/macos/ where the Xcode embed phase picks them up.
 Use --universal for a distributable arm64 + x86_64 macOS release.
 EOF
@@ -76,6 +78,7 @@ fi
 
 SOURCE_DYLIBS=()
 SOURCE_HELPERS=()
+SOURCE_LAUNCHERS=()
 for target in "${targets[@]}"; do
     profile_args=()
     if [[ "$CONFIGURATION" == "Release" ]]; then
@@ -92,15 +95,17 @@ for target in "${targets[@]}"; do
     if [[ "$SKIP_BUILD" -eq 0 ]]; then
         cargo build --locked -p proxy-ffi "${profile_args[@]}"
         cargo build --locked -p proxy-client --bin http-proxy-tun-helper "${profile_args[@]}"
+        cargo build --locked -p proxy-ui-services --bin cipherrelay-app-launcher "${profile_args[@]}"
     fi
     SOURCE_DYLIBS+=("$SOURCE_DIR/libhttp_proxy.dylib")
     SOURCE_HELPERS+=("$SOURCE_DIR/http-proxy-tun-helper")
+    SOURCE_LAUNCHERS+=("$SOURCE_DIR/cipherrelay-app-launcher")
 done
 
 NATIVE_DIR="$REPO_ROOT/ui/flutter/native/macos"
 mkdir -p "$NATIVE_DIR"
 
-for artifact in "${SOURCE_DYLIBS[@]}" "${SOURCE_HELPERS[@]}"; do
+for artifact in "${SOURCE_DYLIBS[@]}" "${SOURCE_HELPERS[@]}" "${SOURCE_LAUNCHERS[@]}"; do
     if [[ ! -f "$artifact" ]]; then
         echo "Native artifact was not produced: $artifact" >&2
         exit 1
@@ -127,3 +132,12 @@ else
 fi
 codesign --force --sign - "$DEST_HELPER"
 echo "Staged privileged TUN helper: $DEST_HELPER"
+
+DEST_LAUNCHER="$NATIVE_DIR/cipherrelay-app-launcher"
+if [[ "$UNIVERSAL" -eq 1 ]]; then
+    lipo -create "${SOURCE_LAUNCHERS[@]}" -output "$DEST_LAUNCHER"
+else
+    cp -f "${SOURCE_LAUNCHERS[0]}" "$DEST_LAUNCHER"
+fi
+codesign --force --sign - "$DEST_LAUNCHER"
+echo "Staged app-proxy launcher: $DEST_LAUNCHER"

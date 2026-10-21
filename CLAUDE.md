@@ -87,6 +87,7 @@ Application → Client(local:1080) → [AES-256-GCM] → Server(remote:1081) →
 | **Relay** | `crates/proxy-core/src/relay/` | Load balancing algorithms, relay configuration |
 | **Protocol** | `crates/proxy-core/src/protocol/mod.rs` | Data frame format definitions |
 | **TUI** | `crates/proxy-tui/src/tui/` | Terminal UI for monitoring |
+| **App proxies** | `crates/proxy-ui-services/src/app_proxies/` | Per-app proxies without TUN (macOS/Windows desktop only) |
 
 ## Directory Structure
 
@@ -797,6 +798,31 @@ Known limitations:
 - **iOS keeps forcing the proxy.** `tun2proxy`'s `process` module is not compiled
   there, so nothing keeps this process's sockets out of the tunnel. Android is
   fine because `VpnService` excludes the package before routing.
+
+## App Proxies
+
+The desktop UI's **App proxies** page sends single apps through the local proxy
+without TUN. All of its logic and storage live in
+`crates/proxy-ui-services/src/app_proxies/`; the Flutter page only draws, picks
+a file with `file_selector`, and draws macOS icons with `NSWorkspace`. It is
+compiled only for macOS and Windows and is absent from the Mac App Store build.
+
+| Piece | Where | Notes |
+|-------|-------|-------|
+| Claude | `claude.rs` + `router.rs` | Claude's own `egressProxyUrl` points at a loopback router that applies the host rules and forwards the rest to the chosen local port; runs on the FFI control runtime |
+| Other apps | `launchers.rs` | Generated launcher bundles (macOS) or shortcut folders (Windows), each with its own `launcher.json` |
+| Launching | `launch.rs`, `cipherrelay-app-launcher` | Passes Chromium flags and proxy variables; never quits a running app |
+| Detection | `apps.rs` | Claude and Codex in installed locations only |
+
+The UI calls it through `proxy_operation_start_v1` with
+`{"operation": "app_proxies", "action": ...}`, so no FFI symbol was added.
+`cipherrelay-app-launcher` ships in the macOS and Windows native archives next
+to the TUN helper and updater, and `stage-ui-native` stages it.
+
+File formats are those the first Dart/Swift/PowerShell version wrote
+(`CipherRelay/AppProxies/claude-native.json`, `launcher.json`), so existing
+settings and launchers keep working; launchers made by that version keep
+their old executable until they are edited.
 
 ## Geo Lookup Budget
 

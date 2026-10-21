@@ -286,6 +286,11 @@ jobs:
         if: contains(matrix.target, 'windows')
         run: cargo build -p proxy-updater --locked --release --target '${{ matrix.target }}'
 
+      # Each generated app-proxy launcher runs a copy of this executable.
+      - name: Build app-proxy launcher
+        if: contains(matrix.target, 'windows') || contains(matrix.target, 'apple-darwin')
+        run: cargo build -p proxy-ui-services --bin cipherrelay-app-launcher --locked --release --target '${{ matrix.target }}'
+
       # macOS TUN requires an elevated helper alongside the FFI library.
       - name: Build privileged TUN helper
         if: contains(matrix.target, 'apple-darwin')
@@ -304,6 +309,7 @@ jobs:
             cp "target/${{ matrix.target }}/release/http_proxy.lib" "$dirname/"
             cp "target/${{ matrix.target }}/release/http_proxy.dll" "$dirname/"
             cp "target/${{ matrix.target }}/release/cipherrelay-updater.exe" "$dirname/"
+            cp "target/${{ matrix.target }}/release/cipherrelay-app-launcher.exe" "$dirname/"
             cp "target/${{ matrix.target }}/release/http_proxy.dll.lib" "$dirname/" 2>/dev/null || true
             cp "target/${{ matrix.target }}/release/wintun.dll" "$dirname/"
           else
@@ -317,6 +323,7 @@ jobs:
           case "${{ matrix.target }}" in
             *apple-darwin)
               cp "target/${{ matrix.target }}/release/http-proxy-tun-helper" "$dirname/"
+              cp "target/${{ matrix.target }}/release/cipherrelay-app-launcher" "$dirname/"
               ;;
           esac
 

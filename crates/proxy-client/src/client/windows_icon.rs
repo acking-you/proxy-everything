@@ -17,7 +17,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{DI_NORMAL, DestroyIcon, DrawIc
 const ICON_SIZE: u32 = 32;
 
 /// Return the shell icon for an executable as PNG bytes.
-pub(super) fn executable_icon_png(path: &Path) -> Option<Vec<u8>> {
+pub fn executable_icon_png(path: &Path) -> Option<Vec<u8>> {
     let wide_path = path
         .as_os_str()
         .encode_wide()

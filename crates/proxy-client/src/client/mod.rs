@@ -25,7 +25,6 @@ mod udp;
 mod windows_apps;
 #[cfg(target_os = "windows")]
 mod windows_icon;
-
 use std::fmt::Debug;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -40,6 +39,8 @@ use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+#[cfg(target_os = "windows")]
+pub use windows_icon::executable_icon_png;
 
 use self::http::HttpProxierProvider;
 use self::socks::SocksProxierProvider;
