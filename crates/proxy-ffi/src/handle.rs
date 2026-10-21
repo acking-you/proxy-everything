@@ -693,6 +693,7 @@ fn proxy_start_inner(
             virtual_dns: handle.tun_virtual_dns.clone(),
             dns_fallback: Some(dns_server),
         }),
+        packet_routing: None,
     };
 
     // Bind listener synchronously before reporting start success.

@@ -14,6 +14,7 @@ mod icmp;
 pub mod macos_dns_restore;
 #[cfg(target_os = "macos")]
 pub mod macos_tun;
+pub mod packet_routing;
 #[cfg(feature = "network-extension")]
 pub mod packet_tunnel;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
@@ -31,7 +32,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(feature = "auto-proxy")]
-use auto_proxy::{SenderChan, run_auto_proxy_by_country};
+use auto_proxy::{RouteSelector, run_auto_proxy_by_country};
 use proxy_core::relay::ExternalProxyTarget;
 use proxy_core::util::{GracefulShutdownManager, GracefulShutdownManagerImpl, error_report};
 use snafu::ResultExt;
@@ -94,6 +95,8 @@ pub struct ClientRuntimeConfig {
     /// User-selected process rules, shared with a separately managed TUN.
     /// The mandatory self bypass is never a local-proxy direct rule.
     pub process_bypass: Option<ProcessBypassConfig>,
+    /// Only for OS-hosted sockets that are exempt from the tunnel in the kernel.
+    pub packet_routing: Option<Arc<packet_routing::PacketRouter>>,
 }
 
 impl From<ClientConfig> for ClientRuntimeConfig {
@@ -104,6 +107,7 @@ impl From<ClientConfig> for ClientRuntimeConfig {
             tun: None,
             force_proxy: None,
             process_bypass: None,
+            packet_routing: None,
         }
     }
 }
@@ -123,7 +127,7 @@ pub struct ProxyContext<'a> {
     /// header buffer for response [only http proxy use]
     buffer: &'a [u8],
     #[cfg(feature = "auto-proxy")]
-    sender: Option<&'a SenderChan>,
+    sender: Option<&'a RouteSelector>,
     /// Force all connections to go through proxy, bypassing auto-proxy rules.
     force_proxy: bool,
     /// Optional external upstream proxy used instead of the encrypted proxy server.
@@ -184,7 +188,7 @@ impl ProxyContext<'_> {
 pub struct ClientProxyContext {
     stream: TcpStream,
     #[cfg(feature = "auto-proxy")]
-    sender: Option<SenderChan>,
+    sender: Option<RouteSelector>,
     force_proxy: bool,
     upstream_proxy: Option<ExternalProxyTarget>,
     honor_forced_direct: bool,
@@ -446,22 +450,15 @@ pub async fn run_client_with_listener_runtime_config(
     }
 
     #[cfg(feature = "auto-proxy")]
-    let sender: Option<SenderChan> = if enable_auto_proxy {
-        let (tx, rx) = kanal::bounded_async(DEFAULT_CHAN_CAP);
-        let token = cancel_token.clone();
-        let cache_dir = cache_dir.clone();
-        let task = async move {
-            tokio::select! {
-                _ = token.cancelled() => {}
-                _ = run_auto_proxy_by_country(rx, cache_dir) => {}
-            }
-        };
-        if let Some(ref t) = tracker {
-            t.spawn(task);
+    let sender: Option<RouteSelector> = if enable_auto_proxy {
+        #[cfg(feature = "network-extension")]
+        if let Some(router) = config.as_ref().and_then(|c| c.packet_routing.clone()) {
+            Some(RouteSelector::Packet(router))
         } else {
-            tokio::spawn(task);
+            start_online_routing(cache_dir, cancel_token.clone(), tracker.as_ref())
         }
-        Some(tx)
+        #[cfg(not(feature = "network-extension"))]
+        start_online_routing(cache_dir, cancel_token.clone(), tracker.as_ref())
     } else {
         None
     };
@@ -576,3 +573,26 @@ pub async fn start_client(host: impl AsRef<str> + Debug, port: u16) -> Result<()
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(feature = "auto-proxy")]
+fn start_online_routing(
+    cache_dir: Option<PathBuf>,
+    cancel_token: CancellationToken,
+    tracker: Option<&TaskTracker>,
+) -> Option<RouteSelector> {
+    let (tx, rx) = kanal::bounded_async(DEFAULT_CHAN_CAP);
+    let token = cancel_token;
+
+    let task = async move {
+        tokio::select! {
+            _ = token.cancelled() => {}
+            _ = run_auto_proxy_by_country(rx, cache_dir) => {}
+        }
+    };
+    if let Some(t) = tracker {
+        t.spawn(task);
+    } else {
+        tokio::spawn(task);
+    }
+    Some(RouteSelector::Online(tx))
+}

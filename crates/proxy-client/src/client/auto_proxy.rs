@@ -128,6 +128,19 @@ fn apply_reverse(strategy: ProxyStrategy) -> ProxyStrategy {
 pub type IpAddress = String;
 pub type SendItem = (IpAddress, AsyncSender<bool>);
 pub type SenderChan = AsyncSender<SendItem>;
+
+/// The owning listener selects a policy; desktop online routing is unchanged.
+#[derive(Clone)]
+pub enum RouteSelector {
+    Online(SenderChan),
+    #[cfg(feature = "network-extension")]
+    Packet(Arc<super::packet_routing::PacketRouter>),
+}
+impl From<SenderChan> for RouteSelector {
+    fn from(sender: SenderChan) -> Self {
+        Self::Online(sender)
+    }
+}
 pub type ReceiverChan = AsyncReceiver<SendItem>;
 
 /// Data directory name for storing cache files.

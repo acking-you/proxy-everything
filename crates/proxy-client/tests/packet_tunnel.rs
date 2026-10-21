@@ -46,16 +46,17 @@ fn receive(tunnel: &PacketTunnelRuntime, accept: impl Fn(&SlicedPacket<'_>) -> b
 /// entirely on loopback. No OS tunnel, routes, DNS or public service is touched.
 #[test]
 fn provider_forwards_encrypted_dns_tcp_and_udp_and_stops() {
-    packet_round_trips(false);
+    packet_round_trips(false, false);
+    packet_round_trips(false, true);
 }
 
 #[test]
 #[ignore = "requires ICMP sockets; run inside an isolated network namespace"]
 fn provider_forwards_real_echo_v4_v6_legacy_and_v3() {
-    packet_round_trips(true);
+    packet_round_trips(true, false);
 }
 
-fn packet_round_trips(with_echo: bool) {
+fn packet_round_trips(with_echo: bool, auto_proxy: bool) {
     struct TestLog;
     impl log::Log for TestLog {
         fn enabled(&self, _: &log::Metadata<'_>) -> bool {
@@ -167,7 +168,7 @@ fn packet_round_trips(with_echo: bool) {
                 server_port: endpoint.port(),
                 local_port: 0,
                 session_key: Some(DEFAULT_SECRET_KEY.into()),
-                auto_proxy: false,
+                auto_proxy,
                 udp_enabled: true,
                 udp_direct_fallback: false,
                 tun_fake_ip: true,
@@ -405,6 +406,12 @@ fn packet_round_trips(with_echo: bool) {
             );
         }
 
+        if auto_proxy {
+            let counters = tunnel.routing_counters();
+            assert!(counters["directTcp"].as_u64().unwrap() > 0);
+            assert!(counters["directUdp"].as_u64().unwrap() > 0);
+            assert_eq!(counters["dnsFailures"], 0);
+        }
         let port = tunnel.local_port;
         let shutdown = std::time::Instant::now();
         std::thread::scope(|scope| {

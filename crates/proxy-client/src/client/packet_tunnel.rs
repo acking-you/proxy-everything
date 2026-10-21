@@ -172,6 +172,7 @@ pub struct PacketTunnelRuntime {
     output: Mutex<mpsc::Receiver<Vec<u8>>>,
     failure: Arc<Mutex<Option<String>>>,
     pub local_port: u16,
+    routing: Option<Arc<super::packet_routing::PacketRouter>>,
 }
 
 impl PacketTunnelRuntime {
@@ -210,6 +211,11 @@ impl PacketTunnelRuntime {
         runtime
             .block_on(virtual_dns.enable_persistence_in(cache_dir.clone()))
             .map_err(|error| io::Error::other(error.to_string()))?;
+        let routing = config
+            .auto_proxy
+            .then(|| super::packet_routing::PacketRouter::new(config.reverse_geo))
+            .transpose()?
+            .map(Arc::new);
         let client_config = ClientRuntimeConfig {
             client: ClientConfig {
                 enable_auto_proxy: config.auto_proxy,
@@ -223,6 +229,7 @@ impl PacketTunnelRuntime {
             // decisions made by the existing auto-proxy implementation.
             force_proxy: None,
             process_bypass: None,
+            packet_routing: routing.clone(),
         };
         let (input, input_rx) = mpsc::channel(QUEUE_CAPACITY);
         let (output_tx, output) = mpsc::channel(QUEUE_CAPACITY);
@@ -317,7 +324,14 @@ impl PacketTunnelRuntime {
             output: Mutex::new(output),
             failure,
             local_port,
+            routing,
         })
+    }
+
+    pub fn routing_counters(&self) -> serde_json::Value {
+        self.routing
+            .as_ref()
+            .map_or(serde_json::Value::Null, |router| router.counters())
     }
 
     pub fn write_packet(&self, bytes: &[u8]) -> io::Result<PacketWrite> {

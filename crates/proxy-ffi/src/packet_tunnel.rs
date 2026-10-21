@@ -158,3 +158,16 @@ pub unsafe extern "C" fn proxy_packet_tunnel_destroy(handle: *mut PacketTunnelRu
         drop(unsafe { Box::from_raw(handle) });
     }
 }
+
+/// Return owned aggregate routing counters. Free with `proxy_free_string`.
+///
+/// # Safety
+/// `handle` must be null or point to a live tunnel.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_packet_tunnel_routing_stats(
+    handle: *const PacketTunnelRuntime,
+) -> *mut c_char {
+    unsafe { handle.as_ref() }
+        .and_then(|handle| CString::new(handle.routing_counters().to_string()).ok())
+        .map_or(ptr::null_mut(), CString::into_raw)
+}

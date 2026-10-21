@@ -128,6 +128,7 @@ async fn protocol_round_trips(protocol: WireProtocol) {
             tun: None,
             force_proxy: None,
             process_bypass: None,
+            packet_routing: None,
         }),
     ));
 
@@ -169,6 +170,7 @@ async fn protocol_round_trips(protocol: WireProtocol) {
             tun: None,
             force_proxy: None,
             process_bypass: None,
+            packet_routing: None,
         }),
     ));
     assert_udp_round_trip(
@@ -274,6 +276,7 @@ async fn socks5_udp_associate_returns_command_not_supported_when_disabled() {
             tun: None,
             force_proxy: None,
             process_bypass: None,
+            packet_routing: None,
         }),
     ));
 
