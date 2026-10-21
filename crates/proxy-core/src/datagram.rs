@@ -561,39 +561,37 @@ impl DirectDatagramReader {
         // IPv4 peers into IPv6 addresses, which would make peer validation
         // inconsistent across supported platforms.
         loop {
-            let (size, source, is_v6) = match &self.sockets.v6 {
+            let (received, is_v6) = match &self.sockets.v6 {
                 Some(v6) => {
                     tokio::select! {
                         result = self.sockets.v4.recv_from(&mut self.v4_buffer) => {
-                            let (size, source) = result.map_err(|source| ProxyError::Io {
-                                context: "udp_relay",
-                                detail: "receive IPv4 datagram".to_string(),
-                                source,
-                            })?;
-                            (size, source, false)
+                            (result, false)
                         }
                         result = v6.recv_from(&mut self.v6_buffer) => {
-                            let (size, source) = result.map_err(|source| ProxyError::Io {
-                                context: "udp_relay",
-                                detail: "receive IPv6 datagram".to_string(),
-                                source,
-                            })?;
-                            (size, source, true)
+                            (result, true)
                         }
                     }
                 }
-                None => {
-                    let (size, source) = self
-                        .sockets
-                        .v4
-                        .recv_from(&mut self.v4_buffer)
-                        .await
-                        .map_err(|source| ProxyError::Io {
-                            context: "udp_relay",
-                            detail: "receive IPv4 datagram".to_string(),
-                            source,
-                        })?;
-                    (size, source, false)
+                None => (self.sockets.v4.recv_from(&mut self.v4_buffer).await, false),
+            };
+            let (size, source) = match received {
+                Ok(datagram) => datagram,
+                // Winsock consumes an oversized datagram but reports an error
+                // instead of the truncated size returned by Unix sockets.
+                #[cfg(windows)]
+                Err(error)
+                    if error.raw_os_error()
+                        == Some(windows_sys::Win32::Networking::WinSock::WSAEMSGSIZE) =>
+                {
+                    tracing::debug!(is_v6, "discarding oversized direct UDP response");
+                    continue;
+                }
+                Err(source) => {
+                    return Err(ProxyError::Io {
+                        context: "udp_relay",
+                        detail: format!("receive IPv{} datagram", if is_v6 { 6 } else { 4 }),
+                        source,
+                    });
                 }
             };
             if size > self.max_payload {
