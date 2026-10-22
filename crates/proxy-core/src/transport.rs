@@ -205,7 +205,7 @@ pub async fn connect_tcp_host(host: &str, port: u16) -> std::io::Result<TcpStrea
 /// Uses the normal family staggering and TCP diagnostics without resolving a
 /// different address behind the caller's installed bypass routes.
 pub async fn connect_tcp_addresses(addresses: &[IpAddr], port: u16) -> std::io::Result<TcpStream> {
-    race_addresses(addresses, port, connect_socket).await
+    race_addresses(addresses, port, cfg!(target_os = "ios"), connect_socket).await
 }
 
 async fn connect_socket(address: SocketAddr) -> std::io::Result<TcpStream> {
@@ -222,6 +222,7 @@ async fn connect_socket(address: SocketAddr) -> std::io::Result<TcpStream> {
 async fn race_addresses<T, F, Fut>(
     addresses: &[IpAddr],
     port: u16,
+    retry_stalled_single: bool,
     connect: F,
 ) -> std::io::Result<T>
 where
@@ -239,6 +240,16 @@ where
         let other = ordered.remove(other);
         ordered.insert(1, other);
     }
+    // On iOS a lost initial SYN otherwise adds a full kernel retransmission
+    // interval even when the next attempt would connect immediately. Give a
+    // single-address endpoint the same bounded fallback as a dual-stack one.
+    // Only a still-pending handshake gets one backup; immediate errors are
+    // returned, and no protocol bytes are sent until the winning socket returns.
+    let mut backup = if retry_stalled_single && ordered.len() == 1 {
+        ordered.first().copied()
+    } else {
+        None
+    };
     let mut remaining = ordered.into_iter();
     let mut pending = FuturesUnordered::new();
     let mut next_start = Instant::now();
@@ -250,6 +261,8 @@ where
                 next_start = Instant::now() + ADDRESS_STAGGER;
             } else if pending.is_empty() {
                 return Err(last_error);
+            } else if let Some(ip) = backup.take() {
+                pending.push(connect(SocketAddr::new(ip, port)));
             }
         }
         tokio::select! {
@@ -261,7 +274,7 @@ where
                 }
                 next_start = Instant::now();
             }
-            _ = tokio::time::sleep_until(next_start), if pending.len() < 2 && remaining.len() > 0 => {}
+            _ = tokio::time::sleep_until(next_start), if pending.len() < 2 && (remaining.len() > 0 || backup.is_some()) => {}
         }
     }
 }
@@ -684,7 +697,7 @@ mod tests {
             "::2".parse().unwrap(),
             "127.0.0.1".parse().unwrap(),
         ];
-        let connected = race_addresses(&ips, 80, |address| async move {
+        let connected = race_addresses(&ips, 80, false, |address| async move {
             if address.is_ipv6() {
                 std::future::pending::<()>().await;
             }
@@ -700,7 +713,7 @@ mod tests {
     async fn failed_candidates_advance_without_the_stagger_delay() {
         let started = Instant::now();
         let ips = ["127.0.0.1".parse().unwrap(), "127.0.0.2".parse().unwrap()];
-        let connected = race_addresses(&ips, 80, |address| async move {
+        let connected = race_addresses(&ips, 80, false, |address| async move {
             if address.ip() == "127.0.0.1".parse::<IpAddr>().unwrap() {
                 return Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused));
             }
@@ -726,27 +739,91 @@ mod tests {
         let ips = (1..=20)
             .map(|n| IpAddr::from([127, 0, 0, n]))
             .collect::<Vec<_>>();
-        let attempt = race_addresses(&ips, 80, |_| {
-            let active = Active(Arc::clone(&count));
-            peak.fetch_max(count.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
-            async move {
-                let _active = active;
-                std::future::pending::<std::io::Result<()>>().await
+        for addresses in [&ips[..1], &ips[..]] {
+            peak.store(0, Ordering::SeqCst);
+            let attempt = race_addresses(addresses, 80, true, |_| {
+                let active = Active(Arc::clone(&count));
+                peak.fetch_max(count.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                async move {
+                    let _active = active;
+                    std::future::pending::<std::io::Result<()>>().await
+                }
+            });
+            assert!(
+                tokio::time::timeout(Duration::from_secs(30), attempt)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(peak.load(Ordering::SeqCst), 2);
+            assert_eq!(count.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn single_address_backup_recovers_a_lost_syn_and_cancels_the_loser() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        struct Pending(Arc<AtomicBool>);
+        impl Drop for Pending {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
             }
-        });
-        assert!(
-            tokio::time::timeout(Duration::from_secs(30), attempt)
-                .await
-                .is_err()
+        }
+        let active = Arc::new(AtomicBool::new(false));
+        let attempts = AtomicUsize::new(0);
+        let started = Instant::now();
+        let ip = IpAddr::from([127, 0, 0, 1]);
+        let connected = race_addresses(&[ip], 80, true, |address| {
+            let first = attempts.fetch_add(1, Ordering::SeqCst) == 0;
+            let active = Arc::clone(&active);
+            async move {
+                if first {
+                    active.store(true, Ordering::SeqCst);
+                    let _guard = Pending(active);
+                    std::future::pending::<()>().await;
+                }
+                tokio::time::sleep(Duration::from_millis(60)).await;
+                Ok(address)
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(connected, SocketAddr::new(ip, 80));
+        assert_eq!(
+            started.elapsed(),
+            ADDRESS_STAGGER + Duration::from_millis(60)
         );
-        assert_eq!(peak.load(Ordering::SeqCst), 2);
-        assert_eq!(count.load(Ordering::SeqCst), 0);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(!active.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completed_single_address_handshakes_do_not_start_a_backup() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for refused in [false, true] {
+            let attempts = AtomicUsize::new(0);
+            let started = Instant::now();
+            let result = race_addresses(&[IpAddr::from([127, 0, 0, 1])], 80, true, |_| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    tokio::time::sleep(Duration::from_millis(60)).await;
+                    if refused {
+                        Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused))
+                    } else {
+                        Ok(())
+                    }
+                }
+            })
+            .await;
+            assert_eq!(result.is_err(), refused);
+            assert_eq!(started.elapsed(), Duration::from_millis(60));
+            assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        }
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_single_ip_can_connect_after_the_former_nested_deadlines() {
         let ip = "127.0.0.1".parse().unwrap();
-        let connected = race_addresses(&[ip], 80, |address| async move {
+        let connected = race_addresses(&[ip], 80, false, |address| async move {
             tokio::time::sleep(Duration::from_secs(20)).await;
             Ok(address)
         })
