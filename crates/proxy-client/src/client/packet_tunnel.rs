@@ -36,9 +36,10 @@ pub struct PacketTunnelConfig {
     pub auto_proxy: bool,
     #[serde(default)]
     pub udp_enabled: bool,
+    /// Retained for configuration compatibility; UDP now uses the fixed country policy.
     #[serde(default)]
     pub udp_direct_fallback: bool,
-    #[serde(default = "legacy_fake_ip")]
+    #[serde(default = "default_true")]
     pub tun_fake_ip: bool,
     #[serde(default = "super::tun::default_dns_server")]
     pub tun_dns_server: std::net::IpAddr,
@@ -46,7 +47,7 @@ pub struct PacketTunnelConfig {
     pub reverse_geo: bool,
 }
 
-fn legacy_fake_ip() -> bool {
+fn default_true() -> bool {
     true
 }
 
@@ -211,11 +212,9 @@ impl PacketTunnelRuntime {
         runtime
             .block_on(virtual_dns.enable_persistence_in(cache_dir.clone()))
             .map_err(|error| io::Error::other(error.to_string()))?;
-        let routing = config
-            .auto_proxy
-            .then(|| super::packet_routing::PacketRouter::new(config.reverse_geo))
-            .transpose()?
-            .map(Arc::new);
+        let routing = Arc::new(super::packet_routing::PacketRouter::new(
+            config.reverse_geo,
+        )?);
         let client_config = ClientRuntimeConfig {
             client: ClientConfig {
                 enable_auto_proxy: config.auto_proxy,
@@ -229,7 +228,7 @@ impl PacketTunnelRuntime {
             // decisions made by the existing auto-proxy implementation.
             force_proxy: None,
             process_bypass: None,
-            packet_routing: routing.clone(),
+            packet_routing: config.auto_proxy.then(|| routing.clone()),
         };
         let (input, input_rx) = mpsc::channel(QUEUE_CAPACITY);
         let (output_tx, output) = mpsc::channel(QUEUE_CAPACITY);
@@ -254,11 +253,10 @@ impl PacketTunnelRuntime {
             icmp_echo: true,
             udp_strategy: if config.udp_enabled {
                 ArgUdpStrategy::Proxy
-            } else if config.udp_direct_fallback {
-                ArgUdpStrategy::Direct
             } else {
                 ArgUdpStrategy::Block
             },
+            udp_router: Some(routing.clone()),
             mtu: PACKET_MTU,
             // iOS enforces a 50 MB hard limit for the entire provider.
             // Admission control must bound the multiplier on per-flow state.
@@ -324,7 +322,7 @@ impl PacketTunnelRuntime {
             output: Mutex::new(output),
             failure,
             local_port,
-            routing,
+            routing: Some(routing),
         })
     }
 

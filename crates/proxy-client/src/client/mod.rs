@@ -53,24 +53,12 @@ use error::*;
 pub type Result<T> = std::result::Result<T, ClientError>;
 
 /// Runtime configuration for client
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ClientConfig {
     pub enable_auto_proxy: bool,
     /// Accept RFC 1928 UDP ASSOCIATE requests on the local SOCKS5 listener.
     pub enable_udp: bool,
     pub cache_dir: Option<PathBuf>,
-}
-
-impl Default for ClientConfig {
-    fn default() -> Self {
-        Self {
-            // Preserve the previous explicit-config default while keeping UDP
-            // enabled for callers that have not learned about this option yet.
-            enable_auto_proxy: false,
-            enable_udp: true,
-            cache_dir: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -396,7 +384,10 @@ pub async fn run_client_with_listener_runtime_config(
             })
         });
     let force_proxy_controller = config.as_ref().and_then(|c| c.force_proxy.clone());
-    let enable_udp = config.as_ref().map(|c| c.client.enable_udp).unwrap_or(true);
+    let enable_udp = config
+        .as_ref()
+        .map(|c| c.client.enable_udp)
+        .unwrap_or(false);
     let tun_active = tun_config.is_some();
     let enable_auto_proxy = auto_proxy_applies(enable_auto_proxy, upstream_proxy.is_some());
     let force_proxy = !enable_auto_proxy;

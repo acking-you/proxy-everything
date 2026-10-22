@@ -20,7 +20,7 @@ pub enum PacketRoute {
 
 #[derive(Clone, Debug)]
 struct CachedRoute {
-    route: PacketRoute,
+    addresses: Arc<[IpAddr]>,
     expires: Instant,
 }
 
@@ -33,9 +33,10 @@ pub struct PacketRouter {
     slots: Semaphore,
     direct_tcp: AtomicU64,
     proxy_tcp: AtomicU64,
+    dns_failures: AtomicU64,
     direct_udp: AtomicU64,
     proxy_udp: AtomicU64,
-    dns_failures: AtomicU64,
+    rejected_udp: AtomicU64,
 }
 
 impl PacketRouter {
@@ -66,35 +67,33 @@ impl PacketRouter {
             slots: Semaphore::new(8),
             direct_tcp: AtomicU64::new(0),
             proxy_tcp: AtomicU64::new(0),
+            dns_failures: AtomicU64::new(0),
             direct_udp: AtomicU64::new(0),
             proxy_udp: AtomicU64::new(0),
-            dns_failures: AtomicU64::new(0),
+            rejected_udp: AtomicU64::new(0),
         })
     }
 
-    pub async fn route(&self, host: &str, udp: bool) -> PacketRoute {
+    pub async fn route(&self, host: &str) -> PacketRoute {
         let route = if let Ok(ip) = host.parse::<IpAddr>() {
             classify(&[ip], self.reverse)
         } else {
-            self.resolve_route(host).await
+            classify(&self.resolve_addresses(host).await, self.reverse)
         };
-        let counter = match (&route, udp) {
-            (PacketRoute::Direct(_), false) => &self.direct_tcp,
-            (PacketRoute::Proxy, false) => &self.proxy_tcp,
-            (PacketRoute::Direct(_), true) => &self.direct_udp,
-            (PacketRoute::Proxy, true) => &self.proxy_udp,
+        let counter = match &route {
+            PacketRoute::Direct(_) => &self.direct_tcp,
+            PacketRoute::Proxy => &self.proxy_tcp,
         };
         counter.fetch_add(1, Ordering::Relaxed);
         tracing::debug!(
             host,
-            udp,
             direct = matches!(route, PacketRoute::Direct(_)),
             "packet route selected"
         );
         route
     }
 
-    async fn resolve_route(&self, host: &str) -> PacketRoute {
+    async fn resolve_addresses(&self, host: &str) -> Arc<[IpAddr]> {
         let host = host.trim_end_matches('.').to_ascii_lowercase();
         let lookup = async {
             let lock = self
@@ -104,7 +103,7 @@ impl PacketRouter {
             if let Some(cached) = self.cache.get(&host)
                 && cached.expires > Instant::now()
             {
-                return Ok(cached.route);
+                return Ok(cached.addresses);
             }
             let _slot = self.slots.acquire().await.map_err(std::io::Error::other)?;
             let (v4, v6) = tokio::join!(self.query(&host, 1), self.query(&host, 28));
@@ -119,31 +118,31 @@ impl PacketRouter {
             if addresses.is_empty() {
                 return Err(std::io::Error::other("DoH returned no usable address"));
             }
-            let route = classify(&addresses, self.reverse);
+            let addresses: Arc<[IpAddr]> = addresses.into();
             self.cache.insert(
                 host.clone(),
                 CachedRoute {
-                    route: route.clone(),
+                    addresses: addresses.clone(),
                     expires: Instant::now() + Duration::from_secs(u64::from(ttl)),
                 },
             );
-            Ok(route)
+            Ok(addresses)
         };
         match tokio::time::timeout(Duration::from_secs(4), lookup).await {
-            Ok(Ok(route)) => route,
+            Ok(Ok(addresses)) => addresses,
             result => {
                 self.dns_failures.fetch_add(1, Ordering::Relaxed);
-                tracing::debug!(host, ?result, "route lookup unavailable; using proxy");
+                tracing::debug!(host, ?result, "route lookup unavailable");
                 // Short negative caching bounds retries while offline; never
                 // persist a failure or let it select direct egress.
                 self.cache.insert(
                     host,
                     CachedRoute {
-                        route: PacketRoute::Proxy,
+                        addresses: Arc::from([]),
                         expires: Instant::now() + Duration::from_secs(5),
                     },
                 );
-                PacketRoute::Proxy
+                Arc::from([])
             }
         }
     }
@@ -178,9 +177,48 @@ impl PacketRouter {
         serde_json::json!({
             "directTcp": self.direct_tcp.load(Ordering::Relaxed),
             "proxyTcp": self.proxy_tcp.load(Ordering::Relaxed),
+            "dnsFailures": self.dns_failures.load(Ordering::Relaxed),
             "directUdp": self.direct_udp.load(Ordering::Relaxed),
             "proxyUdp": self.proxy_udp.load(Ordering::Relaxed),
-            "dnsFailures": self.dns_failures.load(Ordering::Relaxed),
+            "rejectedUdp": self.rejected_udp.load(Ordering::Relaxed),
+        })
+    }
+}
+
+impl tun2proxy::UdpRouter for PacketRouter {
+    fn route<'a>(
+        &'a self,
+        destination: std::net::SocketAddr,
+        domain: Option<&'a str>,
+        proxy_enabled: bool,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = tun2proxy::UdpRoute> + Send + 'a>> {
+        Box::pin(async move {
+            // UDP uses a fixed mainland/local rule, independent of TCP Auto or
+            // reverse mode. Cache resolved addresses, not a TCP route decision.
+            let addresses = match domain {
+                Some(domain) => self.resolve_addresses(domain).await,
+                None => Arc::from([destination.ip()]),
+            };
+            let decision = match classify(&addresses, false) {
+                PacketRoute::Direct(addresses) => {
+                    let ip = addresses
+                        .iter()
+                        .find(|ip| ip.is_ipv4() == destination.is_ipv4())
+                        .unwrap_or(&addresses[0]);
+                    self.direct_udp.fetch_add(1, Ordering::Relaxed);
+                    tun2proxy::UdpRoute::Direct(std::net::SocketAddr::new(*ip, destination.port()))
+                }
+                PacketRoute::Proxy if proxy_enabled => {
+                    self.proxy_udp.fetch_add(1, Ordering::Relaxed);
+                    tun2proxy::UdpRoute::Proxy
+                }
+                PacketRoute::Proxy => {
+                    self.rejected_udp.fetch_add(1, Ordering::Relaxed);
+                    tun2proxy::UdpRoute::Reject
+                }
+            };
+            tracing::debug!(%destination, ?domain, ?decision, "UDP destination policy");
+            decision
         })
     }
 }
@@ -196,7 +234,12 @@ fn classify(addresses: &[IpAddr], reverse: bool) -> PacketRoute {
     let direct: Vec<_> = addresses
         .iter()
         .map(IpAddr::to_canonical)
-        .filter(|ip| !is_virtual(*ip))
+        .filter(|ip| {
+            !is_virtual(*ip)
+                && !ip.is_unspecified()
+                && !ip.is_multicast()
+                && !matches!(ip, IpAddr::V4(v4) if v4.is_broadcast())
+        })
         .filter(|ip| {
             proxy_core::geo::is_local_network_host(&ip.to_string())
                 || (proxy_core::geo::is_china_ip(*ip) != reverse)
@@ -329,30 +372,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tcp_udp_share_bounded_session_policy() {
+    async fn tcp_uses_cached_session_policy() {
         let router = PacketRouter::new(false).unwrap();
         router.cache.insert(
             "cached.example".into(),
             CachedRoute {
-                route: PacketRoute::Direct(Arc::from(["223.5.5.5".parse().unwrap()])),
+                addresses: Arc::from(["223.5.5.5".parse().unwrap()]),
                 expires: Instant::now() + Duration::from_secs(10),
             },
         );
         assert!(matches!(
-            router.route("CACHED.EXAMPLE.", false).await,
+            router.route("CACHED.EXAMPLE.").await,
             PacketRoute::Direct(_)
         ));
         assert!(matches!(
-            router.route("cached.example", true).await,
+            router.route("cached.example").await,
             PacketRoute::Direct(_)
         ));
-        assert!(matches!(
-            router.route("8.8.8.8", true).await,
-            PacketRoute::Proxy
-        ));
-        assert_eq!(router.counters()["directTcp"], 1);
-        assert_eq!(router.counters()["directUdp"], 1);
-        assert_eq!(router.counters()["proxyUdp"], 1);
+        assert!(matches!(router.route("8.8.8.8").await, PacketRoute::Proxy));
+        assert_eq!(router.counters()["directTcp"], 2);
+        assert_eq!(router.counters()["proxyTcp"], 1);
+        assert_eq!(router.counters()["dnsFailures"], 0);
+    }
+
+    #[tokio::test]
+    async fn udp_country_policy_ignores_tcp_reverse_and_requires_opt_in_for_foreign() {
+        use tun2proxy::{UdpRoute, UdpRouter};
+        let router = PacketRouter::new(true).unwrap();
+        router.cache.insert(
+            "cached.example".into(),
+            CachedRoute {
+                addresses: Arc::from(["223.5.5.5".parse().unwrap(), "1.1.1.1".parse().unwrap()]),
+                expires: Instant::now() + Duration::from_secs(10),
+            },
+        );
+        for enabled in [false, true] {
+            let route = UdpRouter::route(
+                &router,
+                "198.18.0.1:443".parse().unwrap(),
+                Some("cached.example"),
+                enabled,
+            )
+            .await;
+            assert!(
+                matches!(route, UdpRoute::Direct(dst) if dst == "223.5.5.5:443".parse().unwrap())
+            );
+            let route = UdpRouter::route(
+                &router,
+                "2400:3200::1"
+                    .parse::<IpAddr>()
+                    .map(|ip| std::net::SocketAddr::new(ip, 443))
+                    .unwrap(),
+                None,
+                enabled,
+            )
+            .await;
+            assert!(matches!(route, UdpRoute::Direct(_)));
+        }
+        for ip in ["1.1.1.1", "2606:4700:4700::1111"] {
+            let dst = std::net::SocketAddr::new(ip.parse().unwrap(), 443);
+            assert!(matches!(
+                UdpRouter::route(&router, dst, None, false).await,
+                UdpRoute::Reject
+            ));
+            assert!(matches!(
+                UdpRouter::route(&router, dst, None, true).await,
+                UdpRoute::Proxy
+            ));
+        }
+        for ip in ["0.0.0.0", "::", "198.18.0.1"] {
+            let dst = std::net::SocketAddr::new(ip.parse().unwrap(), 443);
+            assert!(matches!(
+                UdpRouter::route(&router, dst, None, false).await,
+                UdpRoute::Reject
+            ));
+        }
+        let PacketRoute::Direct(tcp) = router.route("cached.example").await else {
+            panic!("reverse TCP route")
+        };
+        assert_eq!(&*tcp, &["1.1.1.1".parse::<IpAddr>().unwrap()]);
         assert_eq!(router.counters()["dnsFailures"], 0);
     }
 
@@ -367,7 +465,7 @@ mod tests {
             "www.jd.com",
         ] {
             let started = Instant::now();
-            let route = router.route(host, false).await;
+            let route = router.route(host).await;
             eprintln!("{host} {:?} {route:?}", started.elapsed());
             assert!(matches!(route, PacketRoute::Direct(_)), "{host}");
         }
@@ -378,7 +476,7 @@ mod tests {
             "www.wikipedia.org",
         ] {
             let started = Instant::now();
-            let route = router.route(host, false).await;
+            let route = router.route(host).await;
             eprintln!("{host} {:?} {route:?}", started.elapsed());
             assert!(matches!(route, PacketRoute::Proxy), "{host}");
         }
