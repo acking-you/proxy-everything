@@ -150,7 +150,7 @@ pub extern "C" fn proxy_create() -> *mut ProxyHandle {
         force_proxy: Arc::new(AtomicBool::new(false)),
         remote_endpoint: Mutex::new(None),
         last_error: Arc::new(Mutex::new(None)),
-        udp_enabled: AtomicBool::new(true),
+        udp_enabled: AtomicBool::new(false),
         tun_udp_direct_fallback: AtomicBool::new(true),
         tun_fake_ip: AtomicBool::new(false),
         tun_dns_server: Mutex::new(proxy_client::client::tun::DEFAULT_TUN_DNS_SERVER),
@@ -179,7 +179,7 @@ pub unsafe extern "C" fn proxy_start(
         handle,
         config,
         StartOptions {
-            enable_udp: true,
+            enable_udp: false,
             enable_tun: false,
             tun_udp_direct_fallback: true,
             allow_lan: false,

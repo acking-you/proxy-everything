@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use etherparse::{PacketBuilder, SlicedPacket, TransportSlice};
 use proxy_client::client::packet_tunnel::{PacketTunnelConfig, PacketTunnelRuntime, PacketWrite};
@@ -14,6 +14,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
+
+static RUNTIME_CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct TempDir(PathBuf);
 impl Drop for TempDir {
@@ -45,7 +47,7 @@ fn receive(tunnel: &PacketTunnelRuntime, accept: impl Fn(&SlicedPacket<'_>) -> b
 /// The real packet adapter, IP stack, SOCKS listener and server are exercised
 /// entirely on loopback. No OS tunnel, routes, DNS or public service is touched.
 #[test]
-fn provider_forwards_encrypted_dns_tcp_and_udp_and_stops() {
+fn provider_forwards_encrypted_tcp_dns_and_local_udp_and_stops() {
     packet_round_trips(false, false);
     packet_round_trips(false, true);
 }
@@ -57,6 +59,7 @@ fn provider_forwards_real_echo_v4_v6_legacy_and_v3() {
 }
 
 fn packet_round_trips(with_echo: bool, auto_proxy: bool) {
+    let _guard = RUNTIME_CONFIG_LOCK.lock().unwrap();
     struct TestLog;
     impl log::Log for TestLog {
         fn enabled(&self, _: &log::Metadata<'_>) -> bool {
@@ -116,8 +119,9 @@ fn packet_round_trips(with_echo: bool, auto_proxy: bool) {
     });
     let nodes = Arc::new(NodeStore::new(dir.0.join("nodes.json")));
     let cancel = CancellationToken::new();
+    let metrics = Arc::new(MetricsStore::with_default_config());
     let config = ServerConfig {
-        metrics: Arc::new(MetricsStore::with_default_config()),
+        metrics: metrics.clone(),
         relay: Arc::new(RelayManager::new(nodes.clone(), &dir.0)),
         nodes: nodes.clone(),
         admin_token: None,
@@ -409,7 +413,6 @@ fn packet_round_trips(with_echo: bool, auto_proxy: bool) {
         if auto_proxy {
             let counters = tunnel.routing_counters();
             assert!(counters["directTcp"].as_u64().unwrap() > 0);
-            assert!(counters["directUdp"].as_u64().unwrap() > 0);
             assert_eq!(counters["dnsFailures"], 0);
         }
         let port = tunnel.local_port;
@@ -471,4 +474,144 @@ fn packet_round_trips(with_echo: bool, auto_proxy: bool) {
     runtime.block_on(server).unwrap();
     runtime.block_on(relay).unwrap();
     runtime.shutdown_timeout(Duration::from_secs(2));
+}
+
+/// Local UDP and DNS remain available with UDP proxying off; foreign traffic
+/// receives immediate ICMP feedback without contacting the upstream.
+#[test]
+fn udp_off_keeps_local_and_dns_but_rejects_foreign_v4_v6() {
+    let _guard = RUNTIME_CONFIG_LOCK.lock().unwrap();
+    let dir = TempDir(std::env::temp_dir().join(format!("proxy-direct-udp-{}-{}",
+        std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let runtime = Runtime::new().unwrap();
+    let unavailable = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
+    let port = unavailable.local_addr().unwrap().port();
+    // Keep the listener open without accepting. Any implicit readiness probe
+    // or datagram proxying would time out instead of returning the echo.
+    let echo = runtime.block_on(UdpSocket::bind("127.0.0.1:0")).unwrap();
+    let destination = echo.local_addr().unwrap();
+    let task = runtime.spawn(async move {
+        let mut buf = [0; 1500];
+        let (n, peer) = echo.recv_from(&mut buf).await.unwrap();
+        echo.send_to(&buf[..n], peer).await.unwrap();
+    });
+    let config: PacketTunnelConfig = serde_json::from_value(serde_json::json!({
+        "serverHost": "127.0.0.1", "serverPort": port, "localPort": 0,
+        "autoProxy": true, "reverseGeo": true
+    }))
+    .unwrap();
+    assert!(!config.udp_enabled);
+    assert!(!config.udp_direct_fallback);
+    let tunnel =
+        PacketTunnelRuntime::start(config, dir.0.clone(), Runtime::new().unwrap()).unwrap();
+    let payload = b"udp-bypasses-auto-and-proxy";
+    let mut packet = Vec::new();
+    PacketBuilder::ipv4([10, 77, 0, 2], [127, 0, 0, 1], 64)
+        .udp(43005, destination.port())
+        .write(&mut packet, payload)
+        .unwrap();
+    send(&tunnel, &packet);
+    receive(
+        &tunnel,
+        |parsed| matches!(&parsed.transport, Some(TransportSlice::Udp(udp)) if udp.destination_port() == 43005 && udp.payload() == payload),
+    );
+    for ipv6 in [false, true] {
+        packet.clear();
+        let builder = if ipv6 {
+            PacketBuilder::ipv6(
+                "fd77::2".parse::<std::net::Ipv6Addr>().unwrap().octets(),
+                "2606:4700::1111"
+                    .parse::<std::net::Ipv6Addr>()
+                    .unwrap()
+                    .octets(),
+                61,
+            )
+        } else {
+            PacketBuilder::ipv4([10, 77, 0, 2], [1, 1, 1, 1], 61)
+        };
+        builder
+            .udp(43006, 443)
+            .write(&mut packet, &[42; 1400])
+            .unwrap();
+        let started = Instant::now();
+        send(&tunnel, &packet);
+        let rejected = receive(&tunnel, |parsed| {
+            matches!(
+                parsed.transport,
+                Some(TransportSlice::Icmpv4(_) | TransportSlice::Icmpv6(_))
+            )
+        });
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let parsed = SlicedPacket::from_ip(&rejected).unwrap();
+        let quote = match parsed.transport.unwrap() {
+            TransportSlice::Icmpv4(icmp) => {
+                assert_eq!(
+                    icmp.icmp_type(),
+                    etherparse::Icmpv4Type::DestinationUnreachable(
+                        etherparse::icmpv4::DestUnreachableHeader::Port
+                    )
+                );
+                assert_eq!(
+                    icmp.icmp_type().calc_checksum(icmp.payload()),
+                    icmp.checksum()
+                );
+                assert!(rejected.len() <= 576);
+                icmp.payload()
+            }
+            TransportSlice::Icmpv6(icmp) => {
+                assert_eq!(
+                    icmp.icmp_type(),
+                    etherparse::Icmpv6Type::DestinationUnreachable(
+                        etherparse::icmpv6::DestUnreachableCode::Port
+                    )
+                );
+                let etherparse::NetSlice::Ipv6(ip) = parsed.net.unwrap() else {
+                    panic!("IPv6 response")
+                };
+                assert_eq!(
+                    icmp.icmp_type()
+                        .calc_checksum(
+                            ip.header().source(),
+                            ip.header().destination(),
+                            icmp.payload()
+                        )
+                        .unwrap(),
+                    icmp.checksum()
+                );
+                assert!(rejected.len() <= 1280);
+                icmp.payload()
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            quote,
+            &packet[..quote.len()],
+            "ICMP must quote the actual request"
+        );
+    }
+    packet.clear();
+    let query =
+        b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x04test\x00\x00\x01\x00\x01";
+    PacketBuilder::ipv4([10, 77, 0, 2], [10, 77, 0, 1], 64)
+        .udp(43007, 53)
+        .write(&mut packet, query)
+        .unwrap();
+    send(&tunnel, &packet);
+    receive(
+        &tunnel,
+        |parsed| matches!(&parsed.transport, Some(TransportSlice::Udp(udp)) if udp.destination_port() == 43007 && udp.payload()[2] & 0x80 != 0),
+    );
+    assert_eq!(tunnel.routing_counters()["rejectedUdp"], 2);
+    assert_eq!(tunnel.routing_counters()["dnsFailures"], 0);
+    assert!(
+        runtime
+            .block_on(async {
+                tokio::time::timeout(Duration::from_millis(20), unavailable.accept()).await
+            })
+            .is_err()
+    );
+    tunnel.cancel();
+    drop(tunnel);
+    runtime.block_on(task).unwrap();
 }

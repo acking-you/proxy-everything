@@ -177,7 +177,7 @@ pub async fn need_proxy(
     let sender = match sender {
         #[cfg(feature = "network-extension")]
         RouteSelector::Packet(router) => {
-            return Ok(match router.route(host.as_ref(), false).await {
+            return Ok(match router.route(host.as_ref()).await {
                 super::packet_routing::PacketRoute::Proxy => ProxyStatus::NormalProxy,
                 super::packet_routing::PacketRoute::Direct(ips) => {
                     ProxyStatus::DirectAddresses(ips)

@@ -151,12 +151,6 @@ pub struct UdpAssociation {
     upstream_reader: UpstreamReader,
     upstream_writer: UpstreamWriter,
     _upstream_guard: Option<DatagramRelayGuard>,
-    #[cfg(feature = "network-extension")]
-    packet_router: Option<std::sync::Arc<super::packet_routing::PacketRouter>>,
-    #[cfg(feature = "network-extension")]
-    packet_direct: Option<proxy_core::datagram::DatagramRelay>,
-    #[cfg(feature = "network-extension")]
-    packet_routes: std::collections::HashMap<DatagramAddress, super::packet_routing::PacketRoute>,
 }
 
 impl UdpAssociation {
@@ -164,9 +158,6 @@ impl UdpAssociation {
         control_stream: TcpStream,
         requested_client: DatagramAddress,
         upstream_proxy: Option<&ExternalProxyTarget>,
-        #[cfg(feature = "network-extension")] packet_router: Option<
-            std::sync::Arc<super::packet_routing::PacketRouter>,
-        >,
         #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
         direct_interface: Option<&super::process_bypass::DirectRoute>,
     ) -> Result<(Self, SocketAddr)> {
@@ -285,12 +276,6 @@ impl UdpAssociation {
                 upstream_reader,
                 upstream_writer,
                 _upstream_guard: upstream_guard,
-                #[cfg(feature = "network-extension")]
-                packet_router,
-                #[cfg(feature = "network-extension")]
-                packet_direct: None,
-                #[cfg(feature = "network-extension")]
-                packet_routes: Default::default(),
             },
             relay_addr,
         ))
@@ -367,22 +352,15 @@ impl UdpAssociation {
                         payload_bytes = parsed.payload.len(),
                         "forwarding SOCKS5 UDP request"
                     );
-                    #[cfg(feature = "network-extension")]
-                    let direct = self.send_packet_direct(&parsed).await?;
-                    #[cfg(not(feature = "network-extension"))]
-                    let direct = false;
-                    if !direct {
-                        self.upstream_writer.send(packet).await.context(DatagramSnafu)?;
-                    }
+                    self.upstream_writer
+                        .send(packet)
+                        .await
+                        .context(DatagramSnafu)?;
                     packets_up = packets_up.saturating_add(1);
                     bytes_up = bytes_up.saturating_add(parsed.payload.len() as u64);
                     reset_idle(&mut idle_sleep, idle_timeout);
                 }
-                response = receive_upstream(
-                    &mut self.upstream_reader,
-                    #[cfg(feature = "network-extension")]
-                    &mut self.packet_direct,
-                ) => {
+                response = self.upstream_reader.recv() => {
                     let packet = match response {
                         Ok(packet) => packet,
                         Err(error) if error.is_expected_disconnect() => break "upstream_disconnected",
@@ -436,68 +414,6 @@ impl UdpAssociation {
         Ok(())
     }
 
-    #[cfg(feature = "network-extension")]
-    async fn send_packet_direct(
-        &mut self,
-        packet: &proxy_core::datagram::Socks5UdpPacket<'_>,
-    ) -> Result<bool> {
-        use super::packet_routing::PacketRoute;
-        let Some(router) = &self.packet_router else {
-            return Ok(false);
-        };
-        // A datagram flow keeps its route until the owning TCP control closes.
-        // Do not let DNS changes move a live QUIC or STUN exchange between exits.
-        let route = match self.packet_routes.get(&packet.destination) {
-            Some(route) => route.clone(),
-            None => {
-                if self.packet_routes.len() >= 128 {
-                    tracing::debug!("UDP route capacity reached; dropping new destination");
-                    return Ok(true);
-                }
-                let host = match &packet.destination {
-                    DatagramAddress::Ip(ip) => ip.ip().to_string(),
-                    DatagramAddress::Domain(host, _) => host.clone(),
-                };
-                let route = if packet.destination.port() == 53 {
-                    PacketRoute::Proxy
-                } else {
-                    router.route(&host, true).await
-                };
-                self.packet_routes
-                    .insert(packet.destination.clone(), route.clone());
-                route
-            }
-        };
-        let PacketRoute::Direct(addresses) = route else {
-            return Ok(false);
-        };
-        if self.packet_direct.is_none() {
-            self.packet_direct = Some(
-                proxy_core::datagram::create_direct_datagram_relay_with_max_payload(usize::from(
-                    super::packet_tunnel::PACKET_MTU,
-                ))
-                .await
-                .context(DatagramSnafu)?,
-            );
-        }
-        let relay = self.packet_direct.as_mut().expect("initialized above");
-        let mut last_error = None;
-        for ip in addresses.iter() {
-            let destination = DatagramAddress::Ip(SocketAddr::new(*ip, packet.destination.port()));
-            let encoded =
-                proxy_core::datagram::encode_socks5_udp_packet(&destination, packet.payload)
-                    .context(DatagramSnafu)?;
-            match relay.writer.send(&encoded).await {
-                Ok(()) => return Ok(true),
-                Err(error) => last_error = Some(error),
-            }
-        }
-        // An unreachable direct destination drops only its datagram; unrelated
-        // traffic and the TCP-owned association remain usable. No proxy fallback.
-        tracing::debug!(error = ?last_error, "classified direct UDP send failed");
-        Ok(true)
-    }
-
     fn accept_client_endpoint(&mut self, source: SocketAddr) -> bool {
         if source.ip() != self.client_ip {
             return false;
@@ -517,20 +433,6 @@ impl UdpAssociation {
             }
         }
     }
-}
-
-async fn receive_upstream<'a>(
-    proxy: &'a mut UpstreamReader,
-    #[cfg(feature = "network-extension")] direct: &mut Option<proxy_core::datagram::DatagramRelay>,
-) -> std::result::Result<std::borrow::Cow<'a, [u8]>, ProxyError> {
-    #[cfg(feature = "network-extension")]
-    if let Some(direct) = direct {
-        return tokio::select! {
-            response = proxy.recv() => response,
-            response = direct.reader.recv() => response.map(std::borrow::Cow::Owned),
-        };
-    }
-    proxy.recv().await
 }
 
 impl Forwarder for UdpAssociation {

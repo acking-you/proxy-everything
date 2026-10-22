@@ -256,7 +256,7 @@ async fn main() -> Result<()> {
                 .ok()
                 .and_then(|v| parse_bool_env(&v))
         })
-        .unwrap_or(true);
+        .unwrap_or(false);
     let enable_tun = cli.tun || config.tun.unwrap_or(false);
     let tun_udp_direct_fallback = cli
         .tun_udp_direct_fallback

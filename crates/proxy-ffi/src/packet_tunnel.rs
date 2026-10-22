@@ -45,9 +45,6 @@ pub unsafe extern "C" fn proxy_packet_tunnel_create(
         let config = PacketTunnelConfig {
             auto_proxy: config.auto_proxy && !cfg!(feature = "mac-app-store"),
             reverse_geo: config.reverse_geo && !cfg!(feature = "mac-app-store"),
-            // Restored Keychain configurations from early iOS builds allowed
-            // QUIC/STUN to bypass the selected node when UDP was disabled.
-            udp_direct_fallback: config.udp_direct_fallback && !cfg!(target_os = "ios"),
             ..config
         };
         let cache_dir = unsafe { CStr::from_ptr(cache_dir) }

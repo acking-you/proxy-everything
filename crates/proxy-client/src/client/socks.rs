@@ -221,13 +221,6 @@ impl ForwarderProvider for SocksProxierProvider {
                     proxy_context.stream,
                     client_addr,
                     proxy_context.upstream_proxy,
-                    #[cfg(feature = "network-extension")]
-                    match proxy_context.sender {
-                        Some(super::auto_proxy::RouteSelector::Packet(router)) => {
-                            Some(router.clone())
-                        }
-                        _ => None,
-                    },
                     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
                     proxy_context.direct_interface,
                 )

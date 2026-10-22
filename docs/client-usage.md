@@ -19,7 +19,7 @@ Without `--set-system-proxy`, manually configure system proxy to `127.0.0.1:<loc
 | `--set-system-proxy` | Auto-set OS proxy (Linux/macOS/Windows) |
 | `--reverse-geo` | Reverse geo logic: proxy CN, direct others |
 | `-m, --msg-key` | Enable random message key |
-| `--udp <true\|false>` | Enable SOCKS5 UDP ASSOCIATE (default: `true`) |
+| `--udp <true\|false>` | Enable SOCKS5 UDP ASSOCIATE (default: `false`) |
 | `--tun` | Capture device traffic with a local TUN interface |
 | `--tun-fake-ip true` | Opt into virtual DNS; defaults to real answers resolved through the proxy |
 | `--tun-dns-server <IP>` | Resolver reached through the proxy for the TUN DNS portal (default: `223.5.5.5`) |
@@ -35,10 +35,11 @@ Without `--set-system-proxy`, manually configure system proxy to `127.0.0.1:<loc
 for HTTP and SOCKS5 TCP. The SOCKS5 control connection stays on TCP while the
 client is given a temporary UDP relay address.
 
-UDP is enabled by default. Configure the application to use
-`127.0.0.1:<client-port>` as a SOCKS5 proxy and enable UDP in that application.
-Use `--udp false` (or `udp = false` in TOML) only when a TCP-only listener is
-required. A minimal flow is:
+UDP proxying is opt-in. Use `--udp true` (or `udp = true` in TOML), configure
+the application to use `127.0.0.1:<client-port>` as a SOCKS5 proxy, and enable UDP
+in that application. With UDP proxying off, desktop TUN forwards non-DNS UDP directly
+by default. The SOCKS5 relay does not use Auto or reverse geographic routing: when enabled it
+uses the selected server, subject to explicit process bypass rules. A minimal flow is:
 
 ```text
 Application -- SOCKS5 UDP --> http-proxy-cli
@@ -94,6 +95,14 @@ starting TUN. Captured DNS queries (UDP or TCP on port 53) use TCP through the
 proxy, returning real addresses even when ordinary UDP forwarding is disabled.
 Keeping DNS inside the proxy prevents incorrect answers from the local network
 from directing proxied connections to unrelated servers.
+
+Apple packet-tunnel builds apply a fixed UDP destination policy: mainland China
+and local-network destinations are direct; other destinations receive ICMP port
+unreachable unless **UDP proxy** is explicitly enabled. Enabling it requires
+server UDP readiness and proxies only foreign destinations. TCP Auto and reverse
+routing do not change this policy. DNS remains available. The old direct-fallback
+option is not used by Apple packet tunnels; desktop TUN retains its separate policy.
+
 
 On desktop, DNS sockets owned by explicitly excluded processes instead bind to
 the physical interface. Their ordered resolvers are AliDNS `223.5.5.5`, Tencent

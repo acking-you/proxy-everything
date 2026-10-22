@@ -63,19 +63,20 @@ Rust 均使用 release 构建；模拟器的 Flutter 使用 Debug，真机默认
 
 - iOS 的连接按钮同时启停 VPN 和扩展内的本地代理；没有桌面管理员 helper、
   进程绕过列表、独立 TUN 开关或局域网配置分享服务。
-- iOS 的自动分流对 TCP 和 UDP 使用同一份随应用发布的中国 IPv4/IPv6 地址库：
+- iOS 的自动分流仅对 TCP 使用随应用发布的中国 IPv4/IPv6 地址库：
   中国大陆地址直连，其余地址经节点转发；反向模式交换这两种选择，局域网保持直连。
   这是目的 IP 的属地规则，并非网站品牌或域名后缀规则；国内 CDN 上的国外网站也可能直连。
   域名通过阿里公共 DNS 的 HTTPS 接口解析，TLS 校验保持开启，并固定解析器引导地址，
   避免查询被 Fake-IP DNS 捕获。直连仅使用已判定的地址；代理仍传域名给节点解析。
   DNS 结果按 TTL 缓存，最多 1024 条；查询失败短暂走代理并重试，不写永久分流缓存。
-  每个 UDP 会话固定已选路线，防止 QUIC/STUN 中途更换出口。
-  关闭自动分流时 TCP 和已启用的 UDP 均经节点转发。
-  关闭 UDP 时阻断非 DNS UDP，让支持回退的浏览器改用 TCP；
-  iOS 不允许 UDP 直连回退，以免 QUIC 或 WebRTC 使用本地出口。
-  启用 UDP 时会先检查服务器是否接受 UDP 关联；旧服务器拒绝或超时会明确报错，
-  不会显示已连接却丢弃所有 UDP。此时可关闭 UDP 使用 TCP，或升级服务器。
-  macOS 商店版仍禁用地理分流。
+  关闭自动分流时 TCP 均经节点转发。
+  UDP 使用固定规则，不受 TCP Auto 或反向属地开关影响：大陆和本地网络目标始终直连；
+  境外目标默认返回 ICMP/ICMPv6 端口不可达，避免浏览器的 HTTP/3 探测静默超时。
+  主动开启“UDP 代理”后才经节点转发境外 UDP。DNS 门户始终按 Fake-IP 或 DNS-over-TCP 配置处理。
+  开启前必须获得服务端 UDP 关联就绪确认；不支持、拒绝或超时会阻止 VPN 启动并明确报错。
+  域名先通过会话内 DoH 缓存解析，再按真实目标 IP 判断；解析失败时不开直连，
+  UDP 代理开启则交给节点解析，否则拒绝。旧配置的 `udpDirectFallback` 不再覆盖此固定规则。
+  macOS 商店版仍禁用 TCP Auto。
   iOS 新配置默认启用 Fake-IP DNS，将域名保留到节点解析，避免手机优先连接
   节点不支持的 IPv6 地址而出现 TLS 错误或长时间超时。已有配置可开启
   “TUN Fake-IP DNS”并重新连接；显式关闭该选项仍会使用配置的真实 DNS 服务器。
@@ -105,9 +106,8 @@ Packet Tunnel provider，Dart 侧共用 `ApplePacketTunnelProxyService`。
 128、TCP 接收窗口缓冲限制为 16 KiB，以适应扩展的 50 MB 内存上限。
 扩展私有容器中的 `Library/Application Support/ProxyUI/packet-tunnel-status.json`
 每 5 秒覆盖一次，记录进程 ID、运行时间、进出包数、字节数、拥塞丢包数和内存占用，
-自动分流时还记录 `routing` 中的 `directTcp`、`proxyTcp`、`directUdp`、`proxyUdp`
-和 `dnsFailures`。TCP 计数为路线决策次数，UDP 为关联内首次目的地址决策次数，
-均不代表成功请求数；需结合请求结果验收。不记录目的地址或报文内容。调试时可通过 `xcrun devicectl device copy from`
+自动分流时还记录 `routing` 中的 `directTcp`、`proxyTcp` 和 `dnsFailures`。
+这些计数为 TCP 路线决策次数，不代表成功请求数；需结合请求结果验收。不记录目的地址或报文内容。调试时可通过 `xcrun devicectl device copy from`
 的 `appDataContainer` 域和扩展 Bundle ID 读取，核实后台转发是否仍在运行。
 
 本地 SOCKS5 UDP 通道显式绑定 loopback 源地址。iOS NetworkExtension 中，
@@ -118,3 +118,7 @@ Packet Tunnel provider，Dart 侧共用 `ApplePacketTunnelProxyService`。
 固定提交和源文件摘要见 `crates/proxy-core/data/china-ip/manifest.json`。
 升级地址库时使用 `python3 scripts/geo/update-china-ip.py --revision FULL_COMMIT_SHA`，
 重新执行 GeoIP 和分流测试后随下一版应用发布；运行时不下载规则。
+
+连接期间的节点探测通过系统 provider 消息交给 VPN 扩展执行，使用扩展的系统豁免
+socket，避免包含应用的探测流量先经过当前节点再连接候选节点。最多同时执行
+4 个探测；VPN 断开后该批次报错，不切换到包含应用内重试。未连接时继续直接探测。

@@ -331,7 +331,7 @@ impl TunConfig {
             dns_server: DEFAULT_TUN_DNS_SERVER,
             ipv6_enabled: false,
             mtu: tun2proxy::DEFAULT_MTU,
-            udp_enabled: true,
+            udp_enabled: false,
             udp_direct_fallback: true,
             remote_endpoint: None,
             cache_dir: None,
