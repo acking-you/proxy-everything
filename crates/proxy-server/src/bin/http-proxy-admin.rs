@@ -3,7 +3,9 @@ use std::process::ExitCode;
 use anyhow::{Result, anyhow, bail};
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use proxy_core::config::DEFAULT_SECRET_KEY;
-use proxy_core::control::{ControlClient, ControlResponse, ControlResult, TopNEntry};
+use proxy_core::control::{
+    ControlClient, ControlOp, ControlRequest, ControlResponse, ControlResult, TopNEntry,
+};
 use proxy_core::metrics::{
     ConnectionRecord, Granularity, RealtimeSnapshot, TimeBucket, TopCategory,
 };
@@ -37,6 +39,11 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Command {
     Ping,
+    /// Manage the server's authenticated SOCKS5 listener (JSON includes credentials).
+    Socks5 {
+        #[command(subcommand)]
+        command: Socks5Command,
+    },
     Nodes {
         #[command(subcommand)]
         command: NodesCommand,
@@ -53,6 +60,21 @@ enum Command {
         #[command(subcommand)]
         command: MetricsCommand,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum Socks5Command {
+    /// Read listener state and its generated username/password.
+    Status,
+    /// Enable the listener, optionally changing its bind address.
+    Enable {
+        #[arg(long)]
+        listen: Option<std::net::SocketAddr>,
+    },
+    /// Close the listener and revoke all active SOCKS5 sessions.
+    Disable,
+    /// Generate a new password and revoke all sessions using the old one.
+    RotateKey,
 }
 
 #[derive(Subcommand, Debug)]
@@ -287,6 +309,24 @@ async fn run(cli: Cli) -> Result<ControlResponse> {
     let token = cli.token.clone();
 
     match cli.command {
+        Command::Socks5 { command } => {
+            let op = match command {
+                Socks5Command::Status => ControlOp::GetSocks5Status,
+                Socks5Command::Enable { listen } => ControlOp::SetSocks5Enabled {
+                    enabled: true,
+                    listen,
+                },
+                Socks5Command::Disable => ControlOp::SetSocks5Enabled {
+                    enabled: false,
+                    listen: None,
+                },
+                Socks5Command::RotateKey => ControlOp::RotateSocks5Key,
+            };
+            client
+                .request(ControlRequest { token, op })
+                .await
+                .map_err(Into::into)
+        }
         Command::Ping => client.ping(token).await.map_err(Into::into),
         Command::Nodes { command } => match command {
             NodesCommand::List => {

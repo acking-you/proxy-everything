@@ -89,7 +89,7 @@ For any custom `SERVICE_NAME`, it now assigns an isolated state directory under
 |----------|----------|---------|-------------|
 | `SECRET_KEY` | Yes | - | 32-character encryption key |
 | `SERVER_PORT` | No | 1081 | Listening port |
-| `PROXY_DATA_DIR` | No | `~/.proxy-everything` | Override persisted node/relay state directory |
+| `PROXY_DATA_DIR` | No | `~/.proxy-everything` | Override persisted node/relay/SOCKS5 state directory |
 | `TURELY_PROXY_SERVER` | No | - | Initial upstream target (auto-added to relay) |
 | `CONTROL_SESSION_KEY` | No | - | 32-char key for control protocol encryption |
 | `CONTROL_REQUIRE_ENCRYPTION` | No | true | Require encrypted control messages |
@@ -109,6 +109,11 @@ for the default `proxy-server` service and uses
 |------|---------|
 | `nodes.json` | Registered nodes and groups |
 | `relay.json` | Relay targets and load balancing config |
+| `socks5.json` | Managed SOCKS5 bind address, enabled state, and credentials (private) |
+
+For the optional authenticated SOCKS5 listener, see
+[managed SOCKS5](managed-socks5.md). Its lifecycle and credentials can be changed
+without restarting the native proxy or changing its encryption key.
 
 **Always mount a volume** to preserve data:
 ```bash

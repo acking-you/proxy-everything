@@ -3,7 +3,7 @@ use proxy_core::config::{SERVER_PORT, init_tracing};
 use proxy_server::server::start_server;
 
 #[derive(Parser)]
-#[command(author = "L_B__", version = "0.1.0")]
+#[command(author = "L_B__", version)]
 struct Cli {
     /// [optional] 0.0.0.0 or 127.0.0.1 (uses 0.0.0.0 by default)
     #[arg(
@@ -35,7 +35,7 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> std::io::Result<()> {
     let cli = Cli::parse();
     init_tracing();
     unsafe {
@@ -49,5 +49,5 @@ async fn main() {
         None => "direct mode".to_string(),
     };
     tracing::info!("Server listening on {}:{} ({})", cli.host, cli.port, mode);
-    start_server(cli.host, *SERVER_PORT).await;
+    start_server(cli.host, *SERVER_PORT).await
 }

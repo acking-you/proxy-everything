@@ -71,6 +71,7 @@ mod control;
 mod discovery;
 mod icmp;
 mod relay;
+mod socks5;
 mod udp;
 
 use std::fmt::Debug;
@@ -89,6 +90,7 @@ use proxy_core::metrics::MetricsStore;
 use proxy_core::nodes::NodeStore;
 pub use relay::RelayManager;
 use snafu::Snafu;
+pub use socks5::Socks5Manager;
 use sysinfo::{
     CpuRefreshKind, DiskRefreshKind, Disks, MemoryRefreshKind, Networks, Pid, ProcessRefreshKind,
     ProcessesToUpdate, RefreshKind, System,
@@ -137,6 +139,8 @@ type Result<T> = std::result::Result<T, ServerError>;
 pub const MAX_HEADER_SIZE: DataSize = 8 * 128;
 
 struct ServerContext {
+    socks5: Arc<Socks5Manager>,
+    cancel: CancellationToken,
     metrics: Arc<MetricsStore>,
     nodes: Arc<NodeStore>,
     relay: Arc<RelayManager>,
@@ -162,6 +166,7 @@ impl ServerContext {
 /// Server configuration for testing.
 #[derive(Clone)]
 pub struct ServerConfig {
+    pub socks5: Arc<Socks5Manager>,
     pub metrics: Arc<MetricsStore>,
     pub nodes: Arc<NodeStore>,
     pub relay: Arc<RelayManager>,
@@ -176,6 +181,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         let nodes = Arc::new(NodeStore::with_default_path());
         Self {
+            socks5: Arc::new(Socks5Manager::in_memory().expect("OS random generator unavailable")),
             metrics: Arc::new(MetricsStore::with_default_config()),
             relay: Arc::new(RelayManager::with_default_path(nodes.clone())),
             nodes,
@@ -352,6 +358,8 @@ pub async fn run_server_with_listener(
     });
 
     let ctx = Arc::new(ServerContext {
+        socks5: config.socks5,
+        cancel: cancel_token.clone(),
         metrics: config.metrics,
         nodes: config.nodes,
         relay: config.relay,
@@ -364,6 +372,7 @@ pub async fn run_server_with_listener(
     });
 
     // Background relay health checks.
+    Socks5Manager::restore(ctx.clone()).await;
     let relay_for_health = ctx.relay.clone();
     let relay_cancel = cancel_token.clone();
     tokio::spawn(async move {
@@ -404,10 +413,16 @@ pub async fn run_server_with_listener(
             }
         }
     }
+    ctx.socks5.shutdown().await;
 }
 
 #[tracing::instrument]
-pub async fn start_server(host: impl AsRef<str> + Debug, port: u16) {
+pub async fn start_server(host: impl AsRef<str> + Debug, port: u16) -> std::io::Result<()> {
+    let socks5 = tokio::task::spawn_blocking(|| {
+        Socks5Manager::load(proxy_core::config::default_state_dir().join("socks5.json"))
+    })
+    .await
+    .map_err(std::io::Error::other)??;
     let nodes = Arc::new(NodeStore::with_default_path());
     if let Err(err) = nodes.load() {
         tracing::warn!("load nodes failed: {}", error_report(&err));
@@ -491,6 +506,7 @@ pub async fn start_server(host: impl AsRef<str> + Debug, port: u16) {
     }
 
     let config = ServerConfig {
+        socks5: Arc::new(socks5),
         require_secure_transport: std::env::var("PROXY_REQUIRE_V3").is_ok_and(|v| v == "1"),
         metrics,
         nodes,
@@ -501,14 +517,12 @@ pub async fn start_server(host: impl AsRef<str> + Debug, port: u16) {
         self_node_id,
     };
 
-    let listener = TcpListener::bind((host.as_ref(), port))
-        .await
-        .expect("start listener never fails");
+    let listener = TcpListener::bind((host.as_ref(), port)).await?;
     tracing::info!("Server listening on {}:{}", host.as_ref(), port);
 
     let mut manager = GracefulShutdownManagerImpl::new();
     if !manager.spawn_graceful_signals() {
-        return;
+        return Ok(());
     }
     let cancel_token = manager.cancellation_token();
     let tracker = manager.tracker().clone();
@@ -517,4 +531,5 @@ pub async fn start_server(host: impl AsRef<str> + Debug, port: u16) {
 
     tracing::info!("graceful shutdown, waiting for tasks to complete...");
     manager.wait().await;
+    Ok(())
 }

@@ -20,13 +20,14 @@ pub(super) async fn handle_control_session(
         AsyncWriter<tokio::io::WriteHalf<proxy_core::secure_transport::ProxyStream>>,
     >,
     ctx: Arc<ServerContext>,
+    encrypted: bool,
 ) -> Result<()> {
     loop {
         let request = match codec.read_request().await.context(ControlSnafu)? {
             Some(req) => req,
             None => break,
         };
-        let response = handle_control_request(request, ctx.clone());
+        let response = handle_control_request(request, ctx.clone(), encrypted).await;
         codec
             .write_response(&response)
             .await
@@ -35,9 +36,10 @@ pub(super) async fn handle_control_session(
     Ok(())
 }
 
-pub(super) fn handle_control_request(
+pub(super) async fn handle_control_request(
     request: ControlRequest,
     ctx: Arc<ServerContext>,
+    encrypted: bool,
 ) -> ControlResponse {
     if let Some(expected) = ctx.admin_token.as_ref()
         && request.token.as_deref() != Some(expected.as_str())
@@ -50,6 +52,38 @@ pub(super) fn handle_control_request(
     }
 
     match request.op {
+        op @ (ControlOp::GetSocks5Status
+        | ControlOp::SetSocks5Enabled { .. }
+        | ControlOp::RotateSocks5Key) => {
+            if !encrypted {
+                return ControlResponse {
+                    ok: false,
+                    error: Some("SOCKS5 management requires an encrypted control session".into()),
+                    result: None,
+                };
+            }
+            use super::socks5::{Change, Socks5Manager};
+            let result = match op {
+                ControlOp::GetSocks5Status => Ok(ctx.socks5.status().await),
+                ControlOp::SetSocks5Enabled { enabled, listen } => {
+                    Socks5Manager::change(ctx, Change::SetEnabled { enabled, listen }).await
+                }
+                ControlOp::RotateSocks5Key => Socks5Manager::change(ctx, Change::RotateKey).await,
+                _ => unreachable!(),
+            };
+            match result {
+                Ok(status) => ControlResponse {
+                    ok: true,
+                    error: None,
+                    result: Some(ControlResult::Socks5Status { status }),
+                },
+                Err(error) => ControlResponse {
+                    ok: false,
+                    error: Some(error.to_string()),
+                    result: None,
+                },
+            }
+        }
         ControlOp::Ping => ControlResponse {
             ok: true,
             error: None,

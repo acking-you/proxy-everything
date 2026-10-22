@@ -29,6 +29,7 @@ async fn stalled_headers_expire_and_cancelled_connections_release_metrics() {
         require_control_encryption: false,
         require_secure_transport: false,
         control_session_key: None,
+        socks5: std::sync::Arc::new(proxy_server::server::Socks5Manager::in_memory().unwrap()),
         self_node_id: None,
     };
     let cancel = CancellationToken::new();

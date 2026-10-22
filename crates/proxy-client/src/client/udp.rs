@@ -1,6 +1,6 @@
 //! SOCKS5 UDP ASSOCIATE lifecycle and local relay.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use proxy_core::ProxyError;
@@ -145,9 +145,7 @@ impl UpstreamWriter {
 pub struct UdpAssociation {
     control_stream: TcpStream,
     relay_socket: UdpSocket,
-    client_ip: IpAddr,
-    client_endpoint: Option<SocketAddr>,
-    requested_port: u16,
+    client_endpoint: proxy_core::socks5::UdpClientEndpoint,
     upstream_reader: UpstreamReader,
     upstream_writer: UpstreamWriter,
     _upstream_guard: Option<DatagramRelayGuard>,
@@ -175,10 +173,14 @@ impl UdpAssociation {
                 detail: "read SOCKS5 TCP local address",
                 source,
             })?;
-        validate_requested_client(&requested_client, peer_addr.ip())?;
-        let requested_port = requested_client.port();
         let client_endpoint =
-            (requested_port != 0).then(|| SocketAddr::new(peer_addr.ip(), requested_port));
+            proxy_core::socks5::UdpClientEndpoint::new(&requested_client, peer_addr.ip()).map_err(
+                |source| super::ClientError::Io {
+                    uri: None,
+                    detail: "validate SOCKS5 UDP client endpoint",
+                    source,
+                },
+            )?;
 
         let relay_socket = UdpSocket::bind(SocketAddr::new(local_addr.ip(), 0))
             .await
@@ -270,9 +272,7 @@ impl UdpAssociation {
             Self {
                 control_stream,
                 relay_socket,
-                client_ip: peer_addr.ip(),
                 client_endpoint,
-                requested_port,
                 upstream_reader,
                 upstream_writer,
                 _upstream_guard: upstream_guard,
@@ -341,7 +341,7 @@ impl UdpAssociation {
                             continue;
                         }
                     };
-                    if !self.accept_client_endpoint(source) {
+                    if !self.client_endpoint.accept(source) {
                         tracing::debug!(%source, "discarding SOCKS5 UDP packet from an unexpected client");
                         continue;
                     }
@@ -373,7 +373,7 @@ impl UdpAssociation {
                             continue;
                         }
                     };
-                    let Some(client_endpoint) = self.client_endpoint else {
+                    let Some(client_endpoint) = self.client_endpoint.get() else {
                         tracing::debug!("discarding UDP response before the client endpoint is known");
                         continue;
                     };
@@ -404,7 +404,7 @@ impl UdpAssociation {
         };
         tracing::info!(
             close_reason,
-            client = ?self.client_endpoint,
+            client = ?self.client_endpoint.get(),
             packets_up,
             packets_down,
             bytes_up,
@@ -413,46 +413,12 @@ impl UdpAssociation {
         );
         Ok(())
     }
-
-    fn accept_client_endpoint(&mut self, source: SocketAddr) -> bool {
-        if source.ip() != self.client_ip {
-            return false;
-        }
-        if self.requested_port != 0 && source.port() != self.requested_port {
-            return false;
-        }
-        match self.client_endpoint {
-            Some(endpoint) => endpoint == source,
-            None => {
-                self.client_endpoint = Some(source);
-                tracing::info!(
-                    client = %source,
-                    "pinned SOCKS5 UDP association to its first valid client endpoint"
-                );
-                true
-            }
-        }
-    }
 }
 
 impl Forwarder for UdpAssociation {
     async fn forward(self) -> Result<()> {
         self.run().await
     }
-}
-
-fn validate_requested_client(address: &DatagramAddress, peer_ip: IpAddr) -> Result<()> {
-    if let DatagramAddress::Ip(address) = address
-        && !address.ip().is_unspecified()
-        && address.ip() != peer_ip
-    {
-        return Err(super::ClientError::Datagram {
-            source: ProxyError::Protocol {
-                detail: "SOCKS5 UDP client address does not match the TCP peer".to_string(),
-            },
-        });
-    }
-    Ok(())
 }
 
 fn reset_idle(sleep: &mut std::pin::Pin<&mut tokio::time::Sleep>, timeout: std::time::Duration) {

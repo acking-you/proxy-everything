@@ -260,6 +260,7 @@ Common pitfall:
 responses compatible with the control protocol and supports:
 
 - `ping`
+- `socks5 status/enable/disable/rotate-key` (authenticated server-side SOCKS5)
 - `nodes list/add/remove`
 - `groups list/create/delete/add-node/remove-node`
 - `relay get/status/enable/disable/add-target/remove-target/set-algo`
@@ -273,6 +274,11 @@ cargo build --release --bin http-proxy-admin
 ```
 
 [Metrics & management guide →](docs/metrics-monitoring.md)
+
+The server can also expose a separate, password-authenticated SOCKS5 endpoint.
+It starts disabled, generates persistent credentials automatically, and is
+managed through the existing encrypted control plane. See
+[managed SOCKS5 setup and CLI commands](docs/managed-socks5.md).
 
 ## Documentation
 

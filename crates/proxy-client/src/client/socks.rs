@@ -1,8 +1,6 @@
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-
 use proxy_core::datagram::DatagramAddress;
 use snafu::{ResultExt, Snafu};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
 use super::udp::UdpAssociation;
@@ -37,9 +35,6 @@ const NO_AUTH: u8 = 0x00;
 const TCP_CONN: u8 = 0x01;
 const UDP_ASSOCIATE: u8 = 0x03;
 const COMMAND_NOT_SUPPORTED: u8 = 0x07;
-const IPV4_ADDR: u8 = 0x01;
-const IPV6_ADDR: u8 = 0x04;
-const NAMING_SERVER: u8 = 0x03;
 
 pub enum SocksForwarder {
     Tcp(TcpForwardImpl),
@@ -233,34 +228,20 @@ impl ForwarderProvider for SocksProxierProvider {
 }
 
 async fn read_request(stream: &mut TcpStream) -> Result<SocksRequest> {
-    stream.write_u8(SOCK5_VER).await.context(IoSnafu {
-        detail: "write version",
-    })?;
-    stream.write_u8(NO_AUTH).await.context(IoSnafu {
-        detail: "write no_auth",
-    })?;
-    if stream.read_u8().await.context(IoSnafu {
-        detail: "read version in auth",
-    })? != SOCK5_VER
-    {
-        NotSupportedSnafu {
-            detail: "sock5 version in auth",
-        }
-        .fail()?
-    }
-    let cmd = stream.read_u8().await.context(IoSnafu {
-        detail: "read cmd in auth",
-    })?;
-    let reserved = stream.read_u8().await.context(IoSnafu {
-        detail: "read reserve in auth",
-    })?;
-    if reserved != 0 {
-        FirstRequestSnafu {
-            detail: "SOCKS5 reserved request byte must be zero",
-        }
-        .fail()?;
-    }
-    let address = read_address(stream).await?;
+    stream
+        .write_all(&[SOCK5_VER, NO_AUTH])
+        .await
+        .context(IoSnafu {
+            detail: "write SOCKS5 method selection",
+        })?;
+    let proxy_core::socks5::Request {
+        command: cmd,
+        address,
+    } = proxy_core::socks5::read_request(stream)
+        .await
+        .context(IoSnafu {
+            detail: "read SOCKS5 request",
+        })?;
     match cmd {
         TCP_CONN | tun2proxy::icmp::SOCKS5_ECHO => {
             let (host, port) = match address {
@@ -292,61 +273,6 @@ async fn read_request(stream: &mut TcpStream) -> Result<SocksRequest> {
     }
 }
 
-async fn read_address(stream: &mut TcpStream) -> Result<DatagramAddress> {
-    let atyp = stream.read_u8().await.context(IoSnafu {
-        detail: "read inet type in request",
-    })?;
-    match atyp {
-        IPV4_ADDR => {
-            let mut buf: [u8; 4] = [0; 4];
-            stream.read_exact(&mut buf).await.context(IoSnafu {
-                detail: "read ipv4 host in auth",
-            })?;
-            let port = stream.read_u16().await.context(IoSnafu {
-                detail: "read port in ipv4 addr",
-            })?;
-            Ok(DatagramAddress::Ip(SocketAddr::new(
-                Ipv4Addr::from(buf).into(),
-                port,
-            )))
-        }
-        IPV6_ADDR => {
-            let mut buf: [u8; 16] = [0; 16];
-            stream.read_exact(&mut buf).await.context(IoSnafu {
-                detail: "read ipv6 host in auth",
-            })?;
-            let port = stream.read_u16().await.context(IoSnafu {
-                detail: "read port in ipv6 addr",
-            })?;
-            Ok(DatagramAddress::Ip(SocketAddr::new(
-                Ipv6Addr::from(buf).into(),
-                port,
-            )))
-        }
-        NAMING_SERVER => {
-            let host_len = stream.read_u8().await.context(IoSnafu {
-                detail: "read host len in auth",
-            })?;
-            let mut buf = vec![0u8; host_len as usize];
-            stream.read_exact(&mut buf).await.context(IoSnafu {
-                detail: "read naming server in auth",
-            })?;
-            let port = stream.read_u16().await.context(IoSnafu {
-                detail: "read port in naming server",
-            })?;
-            let host = String::from_utf8(buf).map_err(|_| SocksError::FirstRequest {
-                detail: "SOCKS5 domain is not valid UTF-8",
-            })?;
-            Ok(DatagramAddress::Domain(host, port))
-        }
-        atyp => NotSupportedHostSnafu {
-            atyp,
-            detail: "only support IPV4 and NAME_ADDR",
-        }
-        .fail()?,
-    }
-}
-
 /// +----+-----+-------+------+----------+----------+
 /// |VER | REP |  RSV  | ATYP | BND.ADDR | BND.PORT |
 /// +----+-----+-------+------+----------+----------+
@@ -367,8 +293,7 @@ async fn response(stream: &mut TcpStream) -> Result<()> {
 /// Rejected commands still require an RFC 1928 reply so clients can
 /// distinguish a configured policy from a network timeout.
 async fn response_with_code(stream: &mut TcpStream, reply_code: u8) -> Result<()> {
-    stream
-        .write_all(&[0x05, reply_code, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+    proxy_core::socks5::write_reply(stream, reply_code, ([0, 0, 0, 0], 0).into())
         .await
         .context(IoSnafu {
             detail: "send SOCKS5 response",

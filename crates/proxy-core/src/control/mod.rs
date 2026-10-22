@@ -140,6 +140,15 @@ pub enum ControlOp {
     },
     GetRelayStatus,
 
+    // Managed, authenticated SOCKS5 listener. Existing wire variants are unchanged.
+    GetSocks5Status,
+    SetSocks5Enabled {
+        enabled: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        listen: Option<std::net::SocketAddr>,
+    },
+    RotateSocks5Key,
+
     // Metrics queries
     GetRealtimeStats,
     GetRecentConnections,
@@ -167,6 +176,7 @@ pub enum ControlResult {
     Groups { groups: Vec<NodeGroup> },
     RelayConfig { config: RelayConfig },
     RelayStatus { status: RelayStatus },
+    Socks5Status { status: crate::socks5::Socks5Status },
     RealtimeStats { stats: RealtimeSnapshot },
     Connections { connections: Vec<ConnectionRecord> },
     TimeBuckets { buckets: Vec<TimeBucket> },
