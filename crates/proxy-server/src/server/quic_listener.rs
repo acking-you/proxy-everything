@@ -1,7 +1,12 @@
-//! Bounded connection and stream admission, sharing TCP's proxy session handler.
+//! Bounded connection admission, sharing TCP's proxy session handler.
+//!
+//! Streams are bounded per connection by QUIC flow control (`MAX_STREAMS`) and,
+//! like TCP sessions, by the shared header admission in `handle_connect`.
 use std::sync::Arc;
 
-use proxy_core::quic::{AuthenticatedConnection, DRAIN_TIMEOUT, EndpointOwner, MAX_CONNECTIONS};
+use proxy_core::quic::{
+    AuthenticatedConnection, DRAIN_TIMEOUT, EndpointOwner, MAX_CONNECTIONS, MAX_HANDSHAKES,
+};
 use proxy_core::upstream::CarrierStream;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -15,8 +20,10 @@ pub(super) async fn run(
     ctx: Arc<ServerContext>,
     cancel: CancellationToken,
 ) {
+    // Unauthenticated peers only ever hold a handshake slot, so they cannot
+    // displace established clients from the connection slots.
+    let handshake_slots = Arc::new(Semaphore::new(MAX_HANDSHAKES));
     let connection_slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
-    let stream_slots = Arc::new(Semaphore::new(512));
     let mut connections = JoinSet::new();
     loop {
         tokio::select! {
@@ -29,16 +36,15 @@ pub(super) async fn run(
                     let _ = incoming.retry();
                     continue;
                 }
-                let Ok(permit) = connection_slots.clone().try_acquire_owned() else {
+                let Ok(handshake) = handshake_slots.clone().try_acquire_owned() else {
                     incoming.refuse();
                     continue;
                 };
                 let endpoint = endpoint.clone();
                 let ctx = ctx.clone();
                 let cancel = cancel.clone();
-                let stream_slots = stream_slots.clone();
+                let connection_slots = connection_slots.clone();
                 connections.spawn(async move {
-                    let _permit = permit;
                     let key = proxy_core::config::runtime::with_secret_key(|key, _| key.to_vec());
                     let connection = tokio::select! {
                         _ = cancel.cancelled() => return,
@@ -46,6 +52,12 @@ pub(super) async fn run(
                             Ok(connection) => connection,
                             Err(error) => { tracing::debug!(carrier = "quic", %error, "QUIC connection rejected"); return; }
                         }
+                    };
+                    drop(handshake);
+                    let Ok(_permit) = connection_slots.try_acquire_owned() else {
+                        tracing::warn!(carrier = "quic", "QUIC connection limit reached; closing authenticated connection");
+                        connection.close();
+                        return;
                     };
                     let mut streams = JoinSet::new();
                     loop {
@@ -55,10 +67,8 @@ pub(super) async fn run(
                             Some(_) = streams.join_next(), if !streams.is_empty() => {},
                             stream = connection.accept_stream() => {
                                 let Ok(stream) = stream else { break };
-                                let Ok(permit) = stream_slots.clone().try_acquire_owned() else { drop(stream); continue };
                                 let ctx = ctx.clone();
                                 streams.spawn(async move {
-                                    let _permit = permit;
                                     let peer = stream.peer_addr();
                                     let _ = handle_connect(CarrierStream::Quic(Box::new(stream)), peer, ctx).await;
                                 });

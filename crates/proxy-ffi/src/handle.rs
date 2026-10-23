@@ -879,15 +879,15 @@ pub unsafe extern "C" fn proxy_switch_upstream(
     let server_port = endpoint.port;
     #[cfg(not(windows))]
     if handle.tun_running.load(Ordering::Acquire) {
-        let same_host = handle
-            .remote_endpoint
-            .lock()
-            .ok()
-            .and_then(|e| e.clone())
-            .and_then(|(host, port)| {
-                proxy_core::upstream::UpstreamAddress::from_host(&host, port).ok()
-            })
-            .is_some_and(|previous| previous.host == endpoint.host);
+        // DNS names are case-insensitive; only a different name needs new routes.
+        let same_host = handle.remote_endpoint.lock().ok().is_some_and(|previous| {
+            previous
+                .as_ref()
+                .and_then(|(host, port)| {
+                    proxy_core::upstream::UpstreamAddress::from_host(host, *port).ok()
+                })
+                .is_some_and(|previous| previous.host.eq_ignore_ascii_case(&endpoint.host))
+        });
         if !same_host {
             record_error(
                 handle,

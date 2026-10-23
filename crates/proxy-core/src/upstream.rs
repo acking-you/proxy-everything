@@ -26,45 +26,48 @@ pub struct UpstreamAddress {
 impl UpstreamAddress {
     pub fn from_host(host: &str, port: u16) -> io::Result<Self> {
         let host = host.trim();
-        if host.contains("://") {
-            let url = reqwest::Url::parse(host).map_err(io::Error::other)?;
-            let carrier = match url.scheme() {
-                "tcp" => Carrier::Tcp,
-                "quic" => Carrier::Quic,
-                _ => return Err(invalid("native upstream scheme must be tcp or quic")),
-            };
-            if !url.username().is_empty()
-                || url.password().is_some()
-                || !matches!(url.path(), "" | "/")
-                || url.query().is_some()
-                || url.fragment().is_some()
-            {
-                return Err(invalid(
-                    "native upstream accepts only scheme, host and port",
-                ));
-            }
-            Ok(Self {
-                host: url
-                    .host_str()
-                    .ok_or_else(|| invalid("missing upstream host"))?
-                    .trim_start_matches('[')
-                    .trim_end_matches(']')
-                    .to_owned(),
-                port: url.port().unwrap_or(port),
-                carrier,
-            })
-        } else if host.is_empty()
-            || host.contains(['/', '?', '#', '@'])
-            || host.chars().any(|c| c.is_whitespace() || c.is_control())
-        {
-            Err(invalid("invalid upstream host"))
-        } else {
-            Ok(Self {
-                host: host.trim_start_matches('[').trim_end_matches(']').into(),
+        if !host.contains("://") {
+            return Ok(Self {
+                host: bare_host(host)?.to_owned(),
                 port,
                 carrier: Carrier::Tcp,
-            })
+            });
         }
+        let url = url::Url::parse(host).map_err(io::Error::other)?;
+        let carrier = match url.scheme() {
+            "tcp" => Carrier::Tcp,
+            "quic" => Carrier::Quic,
+            _ => return Err(invalid("native upstream scheme must be tcp or quic")),
+        };
+        if !url.username().is_empty()
+            || url.password().is_some()
+            || !matches!(url.path(), "" | "/")
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(invalid(
+                "native upstream accepts only scheme, host and port",
+            ));
+        }
+        let host = url
+            .host_str()
+            .ok_or_else(|| invalid("missing upstream host"))?;
+        // tcp:// and quic:// are not special schemes, so their host stays opaque:
+        // percent-encoded, case-preserved and not IDNA-mapped. Parse it the way an
+        // http host is parsed, so DNS and the TLS name see the same name as TCP.
+        let host = percent_encoding::percent_decode_str(host)
+            .decode_utf8()
+            .map_err(|_| invalid("invalid upstream host"))?;
+        let host = match url::Host::parse(&host).map_err(|_| invalid("invalid upstream host"))? {
+            url::Host::Domain(domain) => domain,
+            url::Host::Ipv4(address) => address.to_string(),
+            url::Host::Ipv6(address) => address.to_string(),
+        };
+        Ok(Self {
+            host,
+            port: url.port().unwrap_or(port),
+            carrier,
+        })
     }
 
     pub fn parse(addr: &str) -> io::Result<Self> {
@@ -107,6 +110,39 @@ impl UpstreamAddress {
                 .map(|stream| CarrierStream::Quic(Box::new(stream))),
         }
     }
+
+    /// Confirm the carrier reaches its peer without opening a proxy session.
+    pub async fn probe(&self) -> io::Result<()> {
+        match self.carrier {
+            Carrier::Tcp => crate::transport::connect_tcp_host(&self.host, self.port)
+                .await
+                .map(drop),
+            Carrier::Quic => crate::quic::probe(&self.host, self.port).await,
+        }
+    }
+}
+
+/// Connect to a host that may carry a `tcp://` or `quic://` scheme. A bare host,
+/// the common case, connects over TCP without allocating an [`UpstreamAddress`].
+pub async fn connect_host(host: &str, port: u16) -> io::Result<CarrierStream> {
+    let host = host.trim();
+    if host.contains("://") {
+        return UpstreamAddress::from_host(host, port)?.connect().await;
+    }
+    crate::transport::connect_tcp_host(bare_host(host)?, port)
+        .await
+        .map(Into::into)
+}
+
+/// Validate a host without a scheme and strip IPv6 brackets.
+fn bare_host(host: &str) -> io::Result<&str> {
+    if host.is_empty()
+        || host.contains(['/', '?', '#', '@'])
+        || host.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(invalid("invalid upstream host"));
+    }
+    Ok(host.trim_start_matches('[').trim_end_matches(']'))
 }
 
 fn invalid(message: &'static str) -> io::Error {
@@ -136,7 +172,7 @@ impl CarrierStream {
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         match self {
             Self::Tcp(s) => s.local_addr(),
-            Self::Quic(s) => Ok(s.local_addr()),
+            Self::Quic(s) => s.local_addr(),
         }
     }
 
@@ -212,5 +248,18 @@ mod tests {
         assert!(UpstreamAddress::parse("quic://host").is_err());
         assert!(UpstreamAddress::parse("quic://user:password@host:10811").is_err());
         assert!(UpstreamAddress::parse("https://host:10811").is_err());
+    }
+
+    #[test]
+    fn scheme_hosts_are_normalized_like_bare_hosts() {
+        let idn = UpstreamAddress::parse("quic://B\u{fc}cher.Example:10811").unwrap();
+        assert_eq!(idn.host, "xn--bcher-kva.example");
+        assert_eq!(
+            UpstreamAddress::parse("tcp://127.0.0.1:1081").unwrap(),
+            UpstreamAddress::parse("127.0.0.1:1081").unwrap()
+        );
+        assert!(UpstreamAddress::parse("quic://bad%20host:10811").is_err());
+        assert_eq!(bare_host("[2001:db8::1]").unwrap(), "2001:db8::1");
+        assert!(bare_host("host/path").is_err());
     }
 }

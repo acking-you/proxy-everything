@@ -99,6 +99,12 @@ pub async fn resolve_host_addresses(host: &str) -> std::io::Result<Arc<[IpAddr]>
     resolve_addresses(host, false).await
 }
 
+/// Re-resolve a host after every cached address failed, bypassing the cache
+/// unless it was refreshed moments ago.
+pub(crate) async fn refresh_host_addresses(host: &str) -> std::io::Result<Arc<[IpAddr]>> {
+    resolve_addresses(host, true).await
+}
+
 async fn resolve_addresses(host: &str, refresh: bool) -> std::io::Result<Arc<[IpAddr]>> {
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(Arc::from([ip]));
@@ -190,7 +196,7 @@ pub async fn connect_tcp_host(host: &str, port: u16) -> std::io::Result<TcpStrea
         Ok(stream) => Ok(stream),
         Err(error) if host.parse::<IpAddr>().is_err() => {
             crate::diagnostics::phase("resolve_refresh");
-            let refreshed = resolve_addresses(host, true).await?;
+            let refreshed = refresh_host_addresses(host).await?;
             if refreshed == addresses {
                 return Err(error);
             }
@@ -219,7 +225,8 @@ async fn connect_socket(address: SocketAddr) -> std::io::Result<TcpStream> {
 
 // At most two sockets are in flight. A blackholed preferred address must not
 // delay the other family until the operating system's SYN retries expire.
-async fn race_addresses<T, F, Fut>(
+// QUIC handshakes race through the same policy.
+pub(crate) async fn race_addresses<T, F, Fut>(
     addresses: &[IpAddr],
     port: u16,
     retry_stalled_single: bool,
@@ -625,10 +632,7 @@ pub async fn get_upstream_stream(
     port: u16,
     detail: &'static str,
 ) -> Result<crate::upstream::CarrierStream> {
-    let endpoint = crate::upstream::UpstreamAddress::from_host(host, port)
-        .context(IoSnafu { uri: None, detail })?;
-    endpoint
-        .connect()
+    crate::upstream::connect_host(host, port)
         .await
         .context(IoSnafu { uri: None, detail })
 }

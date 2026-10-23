@@ -315,8 +315,8 @@ impl RelayManager {
 async fn ping_target(target: &proxy_core::relay::TargetStatus) -> bool {
     if let Ok(endpoint) = proxy_core::upstream::UpstreamAddress::parse(&target.addr) {
         return matches!(
-            tokio::time::timeout(PING_TIMEOUT, endpoint.connect()).await,
-            Ok(Ok(_))
+            tokio::time::timeout(PING_TIMEOUT, endpoint.probe()).await,
+            Ok(Ok(()))
         );
     }
     let Ok(proxy) = ExternalProxyTarget::parse(&target.addr) else {

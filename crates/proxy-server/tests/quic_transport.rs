@@ -96,8 +96,15 @@ async fn scenario() {
     let raw_a = quic::connect("127.0.0.1", quic_port).await.unwrap();
     let raw_b = quic::connect("127.0.0.1", quic_port).await.unwrap();
     assert_eq!(raw_a.connection_id(), raw_b.connection_id());
-    drop(raw_a); // RESET affects only this stream.
+    drop(raw_a); // Closing one stream leaves its siblings open.
     drop(raw_b);
+    // A health probe authenticates a connection of its own rather than trusting
+    // the pooled one, so an unreachable carrier is reported as such.
+    let probe = |port| {
+        proxy_core::upstream::UpstreamAddress::parse(&format!("quic://127.0.0.1:{port}")).unwrap()
+    };
+    probe(quic_port).probe().await.unwrap();
+    assert!(probe(tcp_port).probe().await.is_err());
     let mut transfers = tokio::task::JoinSet::new();
     for index in 0..16 {
         transfers.spawn(async move {

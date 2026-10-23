@@ -374,11 +374,13 @@ async fn main() -> Result<()> {
     // Check if secret key is configured (not using default)
     let secret_key_configured = std::env::var("SECRET_KEY").is_ok();
 
-    // Check if config is valid (server_host is not template default)
+    // Check if config is valid (server_host is not the template default, with or
+    // without the template's quic:// example scheme)
     let config_valid = upstream_mode
-        || server_host
-            .as_deref()
-            .is_some_and(|server_host| server_host != "your-server.com" && !server_host.is_empty());
+        || server_host.as_deref().is_some_and(|server_host| {
+            proxy_core::upstream::UpstreamAddress::from_host(server_host, 0)
+                .is_ok_and(|endpoint| endpoint.host != "your-server.com")
+        });
 
     init_tracing();
 

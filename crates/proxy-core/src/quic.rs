@@ -4,15 +4,16 @@
 //! fallback is used: once a stream is returned, its request must never be replayed.
 
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::{Arc, LazyLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Weak};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwapOption;
 use moka::sync::Cache;
-use parking_lot::RwLock;
 use quinn::{Connection, Endpoint, RecvStream, SendStream, VarInt};
 use ring::{digest, hmac};
 use rustls::pki_types::pem::PemObject;
@@ -23,12 +24,27 @@ use tokio::sync::{Mutex, Semaphore};
 pub const ALPN: &[u8] = b"proxy-everything/1";
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
+/// Authenticated connections a server keeps open.
 pub const MAX_CONNECTIONS: usize = 128;
-pub const MAX_STREAMS: u32 = 64;
-const CANCELLED: VarInt = VarInt::from_u32(1);
+/// Handshakes a server runs at once. Separate from [`MAX_CONNECTIONS`], so peers
+/// that never authenticate cannot displace clients that did.
+pub const MAX_HANDSHAKES: usize = 64;
+/// Concurrent sessions per connection. Each client pools one connection per
+/// upstream, so this must cover a busy browser's socket pool, not one request.
+pub const MAX_STREAMS: u32 = 1024;
+const IDLE_TIMEOUT_MS: u32 = 30_000;
+/// A third of the idle timeout: idle sessions and NAT bindings survive two lost pings.
+const KEEP_ALIVE: Duration = Duration::from_secs(10);
+/// A pooled connection with no new or open sessions for this long is closed, so
+/// keep-alive never pings on behalf of an idle client.
+const POOL_LINGER: Duration = Duration::from_secs(30);
+const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(4);
 const AUTH_FAILED: VarInt = VarInt::from_u32(2);
 
-fn transport(incoming_streams: u32) -> io::Result<Arc<quinn::TransportConfig>> {
+fn transport(
+    incoming_streams: u32,
+    keep_alive: Option<Duration>,
+) -> io::Result<Arc<quinn::TransportConfig>> {
     // Some UDP paths accept GSO writes but silently discard their segments.
     // Keep reliable per-datagram sends by default; verified hosts may opt in.
     let gso = match std::env::var("PROXY_QUIC_GSO") {
@@ -45,7 +61,8 @@ fn transport(incoming_streams: u32) -> io::Result<Arc<quinn::TransportConfig>> {
     config
         .max_concurrent_bidi_streams(incoming_streams.into())
         .max_concurrent_uni_streams(0u32.into())
-        .max_idle_timeout(Some(VarInt::from_u32(30_000).into()))
+        .max_idle_timeout(Some(VarInt::from_u32(IDLE_TIMEOUT_MS).into()))
+        .keep_alive_interval(keep_alive)
         .stream_receive_window(VarInt::from_u32(1024 * 1024))
         .receive_window(VarInt::from_u32(8 * 1024 * 1024))
         .send_window(8 * 1024 * 1024)
@@ -84,7 +101,8 @@ pub fn client_config(extra_ca_pem: Option<&[u8]>) -> io::Result<quinn::ClientCon
     let crypto =
         quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(io::Error::other)?;
     let mut config = quinn::ClientConfig::new(Arc::new(crypto));
-    config.transport_config(transport(0)?);
+    // Only the client pings: a server cannot keep a suspended client reachable.
+    config.transport_config(transport(0, Some(KEEP_ALIVE))?);
     Ok(config)
 }
 
@@ -106,12 +124,13 @@ pub fn server_config(cert_pem: &[u8], key_pem: &[u8]) -> io::Result<quinn::Serve
     let crypto =
         quinn::crypto::rustls::QuicServerConfig::try_from(tls).map_err(io::Error::other)?;
     let mut config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
-    config.transport_config(transport(1)?);
+    config.transport_config(transport(1, None)?);
+    // Migration stays enabled: quinn validates a new path before using it, and a
+    // client that rebinds its NAT or changes network keeps its sessions instead of
+    // routing new ones onto a connection the server silently ignores.
     config
-        .max_incoming(MAX_CONNECTIONS)
+        .max_incoming(MAX_HANDSHAKES)
         .incoming_buffer_size_total(4 * 1024 * 1024);
-    // A server's source/association accounting remains pinned to the validated peer.
-    config.migration(false);
     Ok(config)
 }
 
@@ -175,11 +194,27 @@ async fn authenticate(connection: &Connection, key: &[u8], server: bool) -> io::
     Ok(())
 }
 
-/// Only authenticated connections can produce application streams.
-pub struct AuthenticatedConnection {
+/// One authenticated connection, shared by its streams. Holding it keeps the
+/// UDP driver alive; its strong count is the number of users.
+struct SharedConnection {
     connection: Connection,
     owner: Arc<EndpointOwner>,
+    /// Streams opened so far, so the pool can tell idle from short-lived use.
+    opened: AtomicU64,
 }
+
+impl SharedConnection {
+    fn new(connection: Connection, owner: Arc<EndpointOwner>) -> Arc<Self> {
+        Arc::new(Self {
+            connection,
+            owner,
+            opened: AtomicU64::new(0),
+        })
+    }
+}
+
+/// Only authenticated connections can produce application streams.
+pub struct AuthenticatedConnection(Arc<SharedConnection>);
 
 impl AuthenticatedConnection {
     pub async fn accept(
@@ -201,25 +236,25 @@ impl AuthenticatedConnection {
             return Err(error);
         }
         tracing::info!(carrier = "quic", peer = %connection.remote_address(), "authenticated QUIC connection");
-        Ok(Self { connection, owner })
+        Ok(Self(SharedConnection::new(connection, owner)))
     }
 
     pub async fn accept_stream(&self) -> io::Result<QuicStream> {
         let (send, recv) = self
+            .0
             .connection
             .accept_bi()
             .await
             .map_err(io::Error::other)?;
-        Ok(QuicStream::new(
+        Ok(QuicStream {
             send,
             recv,
-            self.connection.clone(),
-            self.owner.clone(),
-        ))
+            shared: Arc::clone(&self.0),
+        })
     }
 
     pub fn close(&self) {
-        self.connection.close(0u32.into(), b"shutdown");
+        self.0.connection.close(0u32.into(), b"shutdown");
     }
 }
 
@@ -230,45 +265,33 @@ fn timeout(_: tokio::time::error::Elapsed) -> io::Error {
     )
 }
 
-/// One QUIC stream, independently cancelled without closing sibling streams.
+/// One QUIC stream, closed independently of its siblings.
+///
+/// Dropping it behaves like closing a TCP socket: bytes already written are
+/// delivered before FIN, and unread input is stopped. Write-then-close paths,
+/// such as an error status sent just before returning, therefore work the same
+/// on both carriers.
 pub struct QuicStream {
     send: SendStream,
     recv: RecvStream,
-    connection: Connection,
-    owner: Arc<EndpointOwner>,
-    finished: bool,
+    shared: Arc<SharedConnection>,
 }
 impl QuicStream {
-    fn new(
-        send: SendStream,
-        recv: RecvStream,
-        connection: Connection,
-        owner: Arc<EndpointOwner>,
-    ) -> Self {
-        Self {
-            send,
-            recv,
-            connection,
-            owner,
-            finished: false,
-        }
-    }
-
-    pub fn local_addr(&self) -> SocketAddr {
-        self.owner.0.local_addr().expect("bound QUIC endpoint")
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.shared.owner.0.local_addr()
     }
 
     pub fn peer_addr(&self) -> SocketAddr {
-        self.connection.remote_address()
+        self.shared.connection.remote_address()
     }
 
     pub fn connection_id(&self) -> usize {
-        self.connection.stable_id()
+        self.shared.connection.stable_id()
     }
 
     pub fn record_diagnostics(&self, observation: &'static str) {
         if tracing::enabled!(tracing::Level::DEBUG) {
-            let stats = self.connection.stats();
+            let stats = self.shared.connection.stats();
             tracing::debug!(
                 observation, carrier = "quic", peer = %self.peer_addr(),
                 connection_id = self.connection_id(),
@@ -288,12 +311,8 @@ impl QuicStream {
 }
 impl Drop for QuicStream {
     fn drop(&mut self) {
+        // The fields' own drops finish the send half and stop the receive half.
         self.record_diagnostics("stream_closed");
-        // An unfinished request is cancellation, not an implicit successful FIN.
-        if !self.finished {
-            let _ = self.send.reset(CANCELLED);
-        }
-        let _ = self.recv.stop(CANCELLED);
     }
 }
 impl AsyncRead for QuicStream {
@@ -319,29 +338,22 @@ impl AsyncWrite for QuicStream {
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let result = AsyncWrite::poll_shutdown(Pin::new(&mut self.send), cx);
-        if matches!(result, Poll::Ready(Ok(()))) {
-            self.finished = true;
-        }
-        result
+        AsyncWrite::poll_shutdown(Pin::new(&mut self.send), cx)
     }
-}
-
-struct PooledConnection {
-    connection: Connection,
-    owner: Arc<EndpointOwner>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct PoolKey {
     runtime: tokio::runtime::Id,
-    host: String,
+    host: Box<str>,
     port: u16,
-    credential: Vec<u8>,
+    credential: [u8; 32],
     trust_generation: u64,
-    addresses: Vec<IpAddr>,
+    addresses: Arc<[IpAddr]>,
 }
-type PoolEntry = Arc<Mutex<Option<Arc<PooledConnection>>>>;
+/// One pooled connection; sessions and the idle reaper take turns under its lock.
+type PoolSlot = Mutex<Option<Arc<SharedConnection>>>;
+type PoolEntry = Arc<PoolSlot>;
 static POOL: LazyLock<Cache<PoolKey, PoolEntry>> = LazyLock::new(|| {
     Cache::builder()
         .max_capacity(32)
@@ -349,25 +361,71 @@ static POOL: LazyLock<Cache<PoolKey, PoolEntry>> = LazyLock::new(|| {
         .build()
 });
 static DIAL_SLOTS: Semaphore = Semaphore::const_new(16);
-static CLIENT_CONFIG: LazyLock<RwLock<(u64, Option<quinn::ClientConfig>)>> =
-    LazyLock::new(|| RwLock::new((0, None)));
+
+struct Trust {
+    generation: u64,
+    config: quinn::ClientConfig,
+}
+static TRUST: ArcSwapOption<Trust> = ArcSwapOption::const_empty();
 
 /// Replace trust for subsequent negotiations. Established sessions retain their
 /// original identity and keys; changing this never mutates an in-flight dial.
 pub fn configure_trust(ca_file: Option<&Path>) -> io::Result<()> {
     let pem = ca_file.map(std::fs::read).transpose()?;
     let config = client_config(pem.as_deref())?;
-    let mut current = CLIENT_CONFIG.write();
-    current.0 += 1;
-    current.1 = Some(config);
+    TRUST.rcu(|current| {
+        Some(Arc::new(Trust {
+            generation: current.as_ref().map_or(0, |trust| trust.generation) + 1,
+            config: config.clone(),
+        }))
+    });
     Ok(())
 }
 
+/// The current trust snapshot, lock-free after the first call. Without an
+/// explicit [`configure_trust`], it is the Mozilla roots plus `PROXY_QUIC_CA`.
+fn trust() -> io::Result<Arc<Trust>> {
+    if let Some(trust) = TRUST.load_full() {
+        return Ok(trust);
+    }
+    let pem = std::env::var_os("PROXY_QUIC_CA")
+        .map(std::fs::read)
+        .transpose()?;
+    let trust = Arc::new(Trust {
+        generation: 0,
+        config: client_config(pem.as_deref())?,
+    });
+    // An explicit configuration that raced this default wins.
+    let previous = TRUST.compare_and_swap(&None::<Arc<Trust>>, Some(Arc::clone(&trust)));
+    Ok(Option::clone(&previous).unwrap_or(trust))
+}
+
+fn credential() -> [u8; 32] {
+    crate::config::runtime::with_secret_key(|key, _| {
+        let mut credential = [0; 32];
+        credential.copy_from_slice(digest::digest(&digest::SHA256, key).as_ref());
+        credential
+    })
+}
+
 /// Dial a new session, reusing only a fully authenticated connection. A failed
-/// stream or payload is never retried. Reconnection is for subsequent sessions.
+/// stream or payload is never retried; a failed dial sends no application byte,
+/// so it is retried once against refreshed DNS, as TCP connections are.
 pub async fn connect(host: &str, port: u16) -> io::Result<QuicStream> {
     let addresses = crate::transport::resolve_host_addresses(host).await?;
-    connect_addresses(host, port, &addresses).await
+    match connect_addresses(host, port, &addresses).await {
+        Err(error)
+            if error.kind() != io::ErrorKind::PermissionDenied
+                && host.parse::<IpAddr>().is_err() =>
+        {
+            let refreshed = crate::transport::refresh_host_addresses(host).await?;
+            if refreshed == addresses {
+                return Err(error);
+            }
+            connect_addresses(host, port, &refreshed).await
+        }
+        result => result,
+    }
 }
 
 /// Dial only addresses covered by a caller's prepared route bypass. The TLS
@@ -375,103 +433,137 @@ pub async fn connect(host: &str, port: u16) -> io::Result<QuicStream> {
 pub async fn connect_addresses(
     host: &str,
     port: u16,
-    addresses: &[IpAddr],
+    addresses: &Arc<[IpAddr]>,
 ) -> io::Result<QuicStream> {
-    let secret = crate::config::runtime::with_secret_key(|key, _| key.to_vec());
-    let (generation, config) = {
-        let mut current = CLIENT_CONFIG.write();
-        if current.1.is_none() {
-            let pem = std::env::var_os("PROXY_QUIC_CA")
-                .map(std::fs::read)
-                .transpose()?;
-            current.1 = Some(client_config(pem.as_deref())?);
-        }
-        (
-            current.0,
-            current.1.as_ref().expect("initialized QUIC trust").clone(),
-        )
-    };
+    let trust = trust()?;
     let pool_key = PoolKey {
         runtime: tokio::runtime::Handle::current().id(),
         host: host.into(),
         port,
-        credential: digest::digest(&digest::SHA256, &secret).as_ref().to_vec(),
-        trust_generation: generation,
-        addresses: addresses.to_vec(),
+        credential: credential(),
+        trust_generation: trust.generation,
+        addresses: Arc::clone(addresses),
     };
-    let entry = POOL.get_with(pool_key, || Arc::new(Mutex::new(None)));
+    let entry = POOL.get_with(pool_key, PoolEntry::default);
     tokio::time::timeout(CONNECT_TIMEOUT, async {
-        let pooled = {
+        let shared = {
             let mut slot = entry.lock().await;
-            if slot
-                .as_ref()
-                .is_some_and(|p| p.connection.close_reason().is_some())
-            {
-                *slot = None;
+            match slot.as_ref() {
+                Some(shared) if shared.connection.close_reason().is_none() => Arc::clone(shared),
+                _ => {
+                    let shared = dial(host, port, addresses, &trust.config).await?;
+                    tokio::spawn(close_when_idle(
+                        shared.connection.clone(),
+                        Arc::downgrade(&entry),
+                        POOL_LINGER,
+                    ));
+                    *slot = Some(Arc::clone(&shared));
+                    shared
+                }
             }
-            if slot.is_none() {
-                *slot = Some(dial_connection(host, port, addresses, config, &secret).await?);
-            }
-            slot.as_ref().expect("authenticated connection").clone()
         };
-        let (send, recv) = pooled
+        let (send, recv) = shared
             .connection
             .open_bi()
             .await
             .map_err(io::Error::other)?;
-        Ok(QuicStream::new(
-            send,
-            recv,
-            pooled.connection.clone(),
-            pooled.owner.clone(),
-        ))
+        shared.opened.fetch_add(1, Ordering::Relaxed);
+        Ok(QuicStream { send, recv, shared })
     })
     .await
     .map_err(timeout)?
 }
 
-async fn dial_connection(
+/// Confirm that an authenticated peer answers, without opening a session.
+/// A pooled connection cannot prove this: opening a stream on it is local.
+pub async fn probe(host: &str, port: u16) -> io::Result<()> {
+    let addresses = crate::transport::resolve_host_addresses(host).await?;
+    let trust = trust()?;
+    let shared = tokio::time::timeout(CONNECT_TIMEOUT, dial(host, port, &addresses, &trust.config))
+        .await
+        .map_err(timeout)??;
+    shared.connection.close(0u32.into(), b"probe");
+    Ok(())
+}
+
+async fn dial(
     host: &str,
     port: u16,
     addresses: &[IpAddr],
-    config: quinn::ClientConfig,
-    secret: &[u8],
-) -> io::Result<Arc<PooledConnection>> {
+    config: &quinn::ClientConfig,
+) -> io::Result<Arc<SharedConnection>> {
     let _permit = DIAL_SLOTS.acquire().await.map_err(io::Error::other)?;
-    let started = std::time::Instant::now();
-    let mut last_error = io::Error::new(io::ErrorKind::NotFound, "no QUIC address");
-    // Address selection occurs before authentication or application data.
-    for address in addresses {
-        let bind = if address.is_ipv4() {
-            "0.0.0.0:0"
-        } else {
-            "[::]:0"
-        };
-        let mut endpoint = Endpoint::client(bind.parse().expect("literal socket address"))?;
-        endpoint.set_default_client_config(config.clone());
-        let owner = Arc::new(EndpointOwner(endpoint));
-        let connecting = owner
-            .0
-            .connect(SocketAddr::new(*address, port), host)
-            .map_err(io::Error::other)?;
-        match tokio::time::timeout(Duration::from_secs(4), connecting).await {
-            Ok(Ok(connection)) => {
-                if let Err(error) = authenticate(&connection, secret, false).await {
-                    connection.close(AUTH_FAILED, b"authentication failed");
-                    return Err(error);
-                }
-                tracing::info!(
-                    carrier = "quic", peer = %connection.remote_address(),
-                    handshake_us = started.elapsed().as_micros() as u64,
-                    "opened authenticated QUIC connection"
-                );
-                return Ok(Arc::new(PooledConnection { connection, owner }));
+    let started = Instant::now();
+    // TCP's staggered, family-interleaved race; no application data is sent
+    // until a handshake has won.
+    let (connection, owner) = crate::transport::race_addresses(addresses, port, false, |address| {
+        handshake(address, host, config)
+    })
+    .await?;
+    let secret = crate::config::runtime::with_secret_key(|key, _| key.to_vec());
+    if let Err(error) = authenticate(&connection, &secret, false).await {
+        connection.close(AUTH_FAILED, b"authentication failed");
+        return Err(error);
+    }
+    tracing::info!(
+        carrier = "quic", peer = %connection.remote_address(),
+        handshake_us = started.elapsed().as_micros() as u64,
+        "opened authenticated QUIC connection"
+    );
+    Ok(SharedConnection::new(connection, owner))
+}
+
+async fn handshake(
+    address: SocketAddr,
+    host: &str,
+    config: &quinn::ClientConfig,
+) -> io::Result<(Connection, Arc<EndpointOwner>)> {
+    let bind = if address.is_ipv4() {
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
+    } else {
+        SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
+    };
+    let owner = Arc::new(EndpointOwner(Endpoint::client(bind)?));
+    let connecting = owner
+        .0
+        .connect_with(config.clone(), address, host)
+        .map_err(io::Error::other)?;
+    let connection = tokio::time::timeout(ATTEMPT_TIMEOUT, connecting)
+        .await
+        .map_err(timeout)?
+        .map_err(io::Error::other)?;
+    Ok((connection, owner))
+}
+
+/// Evict a pooled connection once a full linger period passes with no session
+/// open and none opened. Dropping the evicted slot's last reference closes the
+/// endpoint, which ends this task.
+async fn close_when_idle(connection: Connection, entry: Weak<PoolSlot>, linger: Duration) {
+    let mut last_opened = None;
+    loop {
+        tokio::select! {
+            _ = connection.closed() => return,
+            _ = tokio::time::sleep(linger) => {}
+        }
+        // Once evicted from the cache, no new session can reach this connection.
+        let Some(entry) = entry.upgrade() else { return };
+        let mut slot = entry.lock().await;
+        // Sessions clone the slot under this lock, so no stream can be added
+        // between this check and the eviction.
+        let idle = match slot.as_ref() {
+            Some(shared) if shared.connection.stable_id() == connection.stable_id() => {
+                let opened = shared.opened.load(Ordering::Relaxed);
+                let idle = Arc::strong_count(shared) == 1 && last_opened == Some(opened);
+                last_opened = Some(opened);
+                idle
             }
-            Ok(Err(error)) => last_error = io::Error::other(error),
-            Err(error) => last_error = timeout(error),
+            _ => return,
+        };
+        if idle {
+            *slot = None;
+            return;
         }
     }
-    Err(last_error)
 }
 
 /// Close this runtime's pooled connections and retain UDP drivers until drained.
@@ -480,9 +572,9 @@ pub async fn shutdown_clients() {
     let mut endpoints = Vec::new();
     for (key, entry) in POOL.iter() {
         if key.runtime == runtime {
-            if let Some(pooled) = entry.lock().await.take() {
-                pooled.connection.close(0u32.into(), b"shutdown");
-                endpoints.push(pooled.owner.clone());
+            if let Some(shared) = entry.lock().await.take() {
+                shared.connection.close(0u32.into(), b"shutdown");
+                endpoints.push(Arc::clone(&shared.owner));
             }
             POOL.invalidate(key.as_ref());
         }
@@ -496,20 +588,26 @@ pub async fn shutdown_clients() {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     use super::*;
     const CERT: &[u8] = include_bytes!("../tests/fixtures/quic-cert.pem");
     const KEY: &[u8] = include_bytes!("../tests/fixtures/quic-key.pem");
     const SECRET: &[u8] = b"0123456789abcdef0123456789abcdef";
 
-    #[tokio::test]
-    async fn tls_identity_alpn_and_application_credentials_are_independent_requirements() {
-        let endpoint = Arc::new(EndpointOwner(
+    fn server_endpoint() -> Arc<EndpointOwner> {
+        Arc::new(EndpointOwner(
             Endpoint::server(
                 server_config(CERT, KEY).unwrap(),
                 "127.0.0.1:0".parse().unwrap(),
             )
             .unwrap(),
-        ));
+        ))
+    }
+
+    #[tokio::test]
+    async fn tls_identity_alpn_and_application_credentials_are_independent_requirements() {
+        let endpoint = server_endpoint();
         let addr = endpoint.0.local_addr().unwrap();
         for rejection in ["untrusted", "name", "alpn", "credential"] {
             let mut config = client_config((rejection != "untrusted").then_some(CERT)).unwrap();
@@ -570,5 +668,98 @@ mod tests {
         }
         endpoint.0.close(0u32.into(), b"done");
         let _ = tokio::time::timeout(DRAIN_TIMEOUT, endpoint.0.wait_idle()).await;
+    }
+
+    /// A client connection authenticated against a loopback server, with the
+    /// server's side returned so it stays open.
+    async fn authenticated_pair() -> (
+        Arc<EndpointOwner>,
+        AuthenticatedConnection,
+        Arc<SharedConnection>,
+    ) {
+        let endpoint = server_endpoint();
+        let addr = endpoint.0.local_addr().unwrap();
+        let server = async {
+            let incoming = endpoint.0.accept().await.unwrap();
+            AuthenticatedConnection::accept(incoming, endpoint.clone(), SECRET)
+                .await
+                .unwrap()
+        };
+        let client = async {
+            let config = client_config(Some(CERT)).unwrap();
+            let (connection, owner) = handshake(addr, "localhost", &config).await.unwrap();
+            authenticate(&connection, SECRET, false).await.unwrap();
+            SharedConnection::new(connection, owner)
+        };
+        let (server, client) = tokio::join!(server, client);
+        (endpoint, server, client)
+    }
+
+    fn open(shared: &Arc<SharedConnection>, (send, recv): (SendStream, RecvStream)) -> QuicStream {
+        shared.opened.fetch_add(1, Ordering::Relaxed);
+        QuicStream {
+            send,
+            recv,
+            shared: Arc::clone(shared),
+        }
+    }
+
+    #[tokio::test]
+    async fn dropped_stream_delivers_its_last_bytes_and_spares_siblings() {
+        let (endpoint, server, client) = authenticated_pair().await;
+        let replies = tokio::spawn(async move {
+            for status in [b"first", b"other"] {
+                let mut stream = server.accept_stream().await.unwrap();
+                stream.read_u8().await.unwrap();
+                // An error status written right before returning, as server/udp.rs does.
+                stream.write_all(status).await.unwrap();
+            }
+            server
+        });
+        let mut streams = Vec::new();
+        for _ in 0..2 {
+            let mut stream = open(&client, client.connection.open_bi().await.unwrap());
+            stream.write_u8(0).await.unwrap();
+            streams.push(stream);
+        }
+        let server = replies.await.unwrap();
+        for (mut stream, expected) in streams.into_iter().zip([b"first", b"other"]) {
+            let mut received = Vec::new();
+            stream.read_to_end(&mut received).await.unwrap();
+            assert_eq!(received, expected);
+        }
+        server.close();
+        endpoint.0.close(0u32.into(), b"done");
+    }
+
+    #[tokio::test]
+    async fn pooled_connection_is_evicted_only_after_its_streams_close() {
+        let (endpoint, server, client) = authenticated_pair().await;
+        let connection = client.connection.clone();
+        let stream = open(&client, connection.open_bi().await.unwrap());
+        let entry: PoolEntry = Arc::new(Mutex::new(Some(client)));
+        let linger = Duration::from_millis(50);
+        let reaper = tokio::spawn(close_when_idle(
+            connection.clone(),
+            Arc::downgrade(&entry),
+            linger,
+        ));
+        tokio::time::sleep(linger * 4).await;
+        assert!(
+            entry.lock().await.is_some(),
+            "an open stream keeps its connection pooled"
+        );
+        drop(stream);
+        tokio::time::timeout(Duration::from_secs(2), reaper)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(entry.lock().await.is_none());
+        // Evicting the last reference closes the client endpoint and its connection.
+        tokio::time::timeout(Duration::from_secs(2), connection.closed())
+            .await
+            .unwrap();
+        server.close();
+        endpoint.0.close(0u32.into(), b"done");
     }
 }

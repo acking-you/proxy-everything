@@ -51,6 +51,7 @@ ureq = { workspace = true }
 tokio-socks = { workspace = true }
 ipnet = { workspace = true }
 percent-encoding = { workspace = true }
+url = { workspace = true }
 uni-stream = { workspace = true }
 
 # Geo
