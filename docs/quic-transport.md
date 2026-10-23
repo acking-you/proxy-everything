@@ -64,6 +64,20 @@ connections, QUIC streams and UDP associations keep their carrier until they end
 Managed SOCKS5 links always use the node's plain or advertised host, whichever
 carrier fetched them.
 
+## Detecting QUIC nodes
+
+A catalogue entry names a node's TCP address only; its QUIC listener is a
+separate UDP port. `GetQuicEndpoint` returns the port of the QUIC listener the
+node bound, or none. Like `ListNodes`, it needs only the session key. Nodes that
+predate the operation reject it, which clients treat as unknown rather than as
+"no QUIC".
+
+The app asks the whole catalogue after each refresh with the `quic_endpoints`
+operation: one call, answered in order, 16 nodes at a time by default, each with
+its own deadline. It marks capable nodes and can test one over QUIC by probing
+`quic://<host>:<port>`, where `<host>` is the address the app reached the node at.
+The node's certificate must cover that name.
+
 ## How it works
 
 **Handshake.** TLS 1.3 with ALPN `proxy-everything/1`; 0-RTT is disabled.
