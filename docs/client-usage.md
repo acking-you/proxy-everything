@@ -108,11 +108,17 @@ On desktop, DNS sockets owned by explicitly excluded processes instead bind to
 the physical interface. Their ordered resolvers are AliDNS `223.5.5.5`, Tencent
 DNSPod `119.29.29.29`, AliDNS `223.6.6.6`, then the physical adapter's DNS and the
 configured fallback. UDP retries and TCP fallback precede moving to the next
-resolver; a valid NXDOMAIN is final. Windows' shared DNS service can hide the
-original application: queries without a matching process exclusion remain
-proxied. Excluded applications using that service may therefore receive cached
-answers selected for the proxy exit. Excluding the shared DNS service would
-send other applications' DNS outside the proxy as well.
+resolver; a valid NXDOMAIN is final. On Windows, an observational ETW session
+identifies the original caller behind the shared DNS service. Matching process
+exclusions use physical DNS; unmatched or unattributed queries remain proxied.
+A provider callback timeout keeps the trace alive for late events. Other trace
+startup failures retry every five seconds in a TUN-owned background task, so
+existing DNS relays recover without restarting TUN or delaying queries for a
+retry. Startup failures, pending callbacks, and recovery are logged. Shutdown
+cancels pending retries and releases only the trace owned by that session.
+Previously cached answers retain their DNS TTL; this recovery does not flush
+the system cache. Excluding the shared DNS service itself would send other
+applications' DNS outside the proxy as well.
 
 Fake-IP is optional: enable **Fake-IP DNS**
 in the GUI configuration or pass `--tun-fake-ip true` to the CLI to allocate
