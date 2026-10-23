@@ -168,3 +168,25 @@ pub unsafe extern "C" fn proxy_packet_tunnel_routing_stats(
         .and_then(|handle| CString::new(handle.routing_counters().to_string()).ok())
         .map_or(ptr::null_mut(), CString::into_raw)
 }
+
+/// Select the carrier/address for new packet-tunnel flows without restarting capture.
+///
+/// # Safety
+/// `handle` must remain live and `host` must be a valid NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn proxy_packet_tunnel_switch_upstream(
+    handle: *const PacketTunnelRuntime,
+    host: *const c_char,
+    port: u16,
+) -> c_int {
+    if handle.is_null() || host.is_null() {
+        return -2;
+    }
+    let Ok(host) = unsafe { CStr::from_ptr(host) }.to_str() else {
+        return -2;
+    };
+    match unsafe { &*handle }.switch_upstream(host, port) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}

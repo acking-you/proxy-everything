@@ -554,6 +554,7 @@ pub async fn start_client_with_runtime_config(
 
     tracing::info!("graceful shutdown, waiting for tasks to complete...");
     manager.wait().await;
+    proxy_core::quic::shutdown_clients().await;
     Ok(())
 }
 

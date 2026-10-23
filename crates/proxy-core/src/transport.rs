@@ -99,6 +99,12 @@ pub async fn resolve_host_addresses(host: &str) -> std::io::Result<Arc<[IpAddr]>
     resolve_addresses(host, false).await
 }
 
+/// Re-resolve a host after every cached address failed, bypassing the cache
+/// unless it was refreshed moments ago.
+pub(crate) async fn refresh_host_addresses(host: &str) -> std::io::Result<Arc<[IpAddr]>> {
+    resolve_addresses(host, true).await
+}
+
 async fn resolve_addresses(host: &str, refresh: bool) -> std::io::Result<Arc<[IpAddr]>> {
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(Arc::from([ip]));
@@ -190,7 +196,7 @@ pub async fn connect_tcp_host(host: &str, port: u16) -> std::io::Result<TcpStrea
         Ok(stream) => Ok(stream),
         Err(error) if host.parse::<IpAddr>().is_err() => {
             crate::diagnostics::phase("resolve_refresh");
-            let refreshed = resolve_addresses(host, true).await?;
+            let refreshed = refresh_host_addresses(host).await?;
             if refreshed == addresses {
                 return Err(error);
             }
@@ -219,7 +225,8 @@ async fn connect_socket(address: SocketAddr) -> std::io::Result<TcpStream> {
 
 // At most two sockets are in flight. A blackholed preferred address must not
 // delay the other family until the operating system's SYN retries expire.
-async fn race_addresses<T, F, Fut>(
+// QUIC handshakes race through the same policy.
+pub(crate) async fn race_addresses<T, F, Fut>(
     addresses: &[IpAddr],
     port: u16,
     retry_stalled_single: bool,
@@ -358,13 +365,13 @@ pub(crate) async fn get_proxy_stream(
     uri: &str,
     protocol: WireProtocol,
 ) -> Result<ProxyStream> {
-    let stream = get_tcp_stream(proxy_server, proxy_server_port, detail).await?;
+    let stream = get_upstream_stream(proxy_server, proxy_server_port, detail).await?;
     setup_proxy_stream(proxy_header, stream, uri, protocol).await
 }
 
 pub(crate) async fn setup_proxy_stream(
     proxy_header: &ProxyHeader,
-    mut proxy_server_stream: TcpStream,
+    mut proxy_server_stream: crate::upstream::CarrierStream,
     uri: &str,
     protocol: WireProtocol,
 ) -> Result<ProxyStream> {
@@ -443,7 +450,7 @@ pub(crate) async fn setup_proxy_stream(
     })
     .and_then(|result| result);
     if written.is_err() {
-        crate::diagnostics::record_socket("proxy_header_write_failed", &proxy_server_stream);
+        proxy_server_stream.record_diagnostics("proxy_header_write_failed");
     }
     written.with_context(|_| IoSnafu {
         uri: Some(uri.to_string()),
@@ -617,6 +624,17 @@ pub async fn read_http_header(
         header.extend_from_slice(&chunk[..consume]);
     }
     Ok(())
+}
+
+/// Open a native upstream using the carrier selected for this negotiation.
+pub async fn get_upstream_stream(
+    host: &str,
+    port: u16,
+    detail: &'static str,
+) -> Result<crate::upstream::CarrierStream> {
+    crate::upstream::connect_host(host, port)
+        .await
+        .context(IoSnafu { uri: None, detail })
 }
 
 #[cfg(test)]

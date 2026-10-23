@@ -2,6 +2,10 @@
 
 > **Prerequisites**: Open port `1081` (or custom port) in your firewall/security group before deployment.
 
+Optional QUIC runs alongside TCP on a separately configured UDP listener with
+verified TLS certificates and application authentication. See
+[QUIC deployment and compatibility](quic-transport.md).
+
 ## Table of Contents
 
 - [Quick Start](#quick-start)

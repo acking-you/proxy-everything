@@ -15,6 +15,12 @@ use proxy_core::relay::ExternalProxyTarget;
 #[derive(Parser)]
 #[command(author = "L_B__", version, about, long_about = None)]
 struct Cli {
+    /// Native upstream carrier. Each new session uses the selected carrier.
+    #[arg(long, value_parser = ["tcp", "quic"])]
+    transport: Option<String>,
+    /// Additional PEM CA for QUIC; default trust is the Mozilla root store.
+    #[arg(long, env = "PROXY_QUIC_CA")]
+    quic_ca: Option<PathBuf>,
     /// [optional] Path to TOML config file
     #[arg(short = 'f', long, value_name = "CONFIG_FILE")]
     config: Option<PathBuf>,
@@ -92,6 +98,8 @@ impl Cli {
     fn to_config(&self) -> Config {
         Config {
             server_host: self.server_host.clone(),
+            transport: self.transport.clone(),
+            quic_ca: self.quic_ca.clone(),
             server_port: self.server_port,
             client_port: self.client_port,
             listen_host: self.listen_host.clone(),
@@ -129,7 +137,9 @@ impl Cli {
 
     /// Check if CLI has any meaningful args
     fn has_args(&self) -> bool {
-        self.server_host.is_some()
+        self.transport.is_some()
+            || self.quic_ca.is_some()
+            || self.server_host.is_some()
             || self.server_port.is_some()
             || self.client_port.is_some()
             || self.listen_host.is_some()
@@ -237,6 +247,30 @@ async fn main() -> Result<()> {
         )?)
     };
 
+    if let Some(ca) = cli.quic_ca.as_ref().or(config.quic_ca.as_ref()) {
+        proxy_core::quic::configure_trust(Some(ca))?;
+    }
+    let (server_host, selected_server_port) = match server_host {
+        Some(host) => {
+            let mut endpoint = proxy_core::upstream::UpstreamAddress::from_host(
+                &host,
+                cli.server_port
+                    .or(config.server_port)
+                    .or_else(|| std::env::var("SERVER_PORT").ok()?.parse().ok())
+                    .unwrap_or(1081),
+            )?;
+            if let Some(carrier) = cli.transport.as_deref().or(config.transport.as_deref()) {
+                endpoint.carrier = match carrier {
+                    "tcp" => proxy_core::upstream::Carrier::Tcp,
+                    "quic" => proxy_core::upstream::Carrier::Quic,
+                    _ => return Err(anyhow!("transport must be tcp or quic")),
+                };
+            }
+            (Some(endpoint.qualified_host()), Some(endpoint.port))
+        }
+        None => (None, None),
+    };
+
     let reverse_geo = cli.reverse_geo || config.reverse_geo.unwrap_or(false);
     let do_set_system_proxy = cli.set_system_proxy || config.set_system_proxy.unwrap_or(false);
     let enable_auto_proxy = cli
@@ -323,7 +357,10 @@ async fn main() -> Result<()> {
         if let Some(port) = cli.client_port.or(config.client_port) {
             std::env::set_var("CLIENT_PORT", port.to_string());
         }
-        if let Some(port) = cli.server_port.or(config.server_port) {
+        if let Some(port) = selected_server_port
+            .or(cli.server_port)
+            .or(config.server_port)
+        {
             std::env::set_var("SERVER_PORT", port.to_string());
         }
         if reverse_geo {
@@ -337,11 +374,13 @@ async fn main() -> Result<()> {
     // Check if secret key is configured (not using default)
     let secret_key_configured = std::env::var("SECRET_KEY").is_ok();
 
-    // Check if config is valid (server_host is not template default)
+    // Check if config is valid (server_host is not the template default, with or
+    // without the template's quic:// example scheme)
     let config_valid = upstream_mode
-        || server_host
-            .as_deref()
-            .is_some_and(|server_host| server_host != "your-server.com" && !server_host.is_empty());
+        || server_host.as_deref().is_some_and(|server_host| {
+            proxy_core::upstream::UpstreamAddress::from_host(server_host, 0)
+                .is_ok_and(|endpoint| endpoint.host != "your-server.com")
+        });
 
     init_tracing();
 

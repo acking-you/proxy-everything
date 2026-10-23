@@ -6,6 +6,12 @@ server_host = "your-server.com"
 # Proxy server port (default: 1081)
 server_port = 1081
 
+# Native carrier is selected for each new negotiation. Bare hosts default to TCP.
+# Use server_host = "quic://your-server.com" or the explicit override below.
+# transport = "quic"
+# Additional PEM trust anchor for private QUIC certificates (hostname is verified).
+# quic_ca = "/path/to/ca.pem"
+
 # Local client port (default: 7890)
 client_port = 7890
 

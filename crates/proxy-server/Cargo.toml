@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+quinn = { workspace = true }
 proxy-core = { path = "../proxy-core" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

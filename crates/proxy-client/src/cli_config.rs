@@ -19,6 +19,8 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../config.template.toml"
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct Config {
     pub server_host: Option<String>,
+    pub transport: Option<String>,
+    pub quic_ca: Option<PathBuf>,
     pub server_port: Option<u16>,
     pub client_port: Option<u16>,
     /// Address bound by the local client listener. Missing values default to 0.0.0.0.

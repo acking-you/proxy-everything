@@ -313,21 +313,20 @@ impl RelayManager {
 }
 
 async fn ping_target(target: &proxy_core::relay::TargetStatus) -> bool {
-    let result = if target.addr.starts_with("http://")
-        || target.addr.starts_with("socks5://")
-        || target.addr.starts_with("socks5h://")
-    {
-        let Ok(proxy) = ExternalProxyTarget::parse(&target.addr) else {
-            return false;
-        };
-        tokio::time::timeout(
-            PING_TIMEOUT,
-            TcpStream::connect((proxy.host.as_str(), proxy.port)),
-        )
-        .await
-    } else {
-        tokio::time::timeout(PING_TIMEOUT, TcpStream::connect(&target.addr)).await
+    if let Ok(endpoint) = proxy_core::upstream::UpstreamAddress::parse(&target.addr) {
+        return matches!(
+            tokio::time::timeout(PING_TIMEOUT, endpoint.probe()).await,
+            Ok(Ok(()))
+        );
+    }
+    let Ok(proxy) = ExternalProxyTarget::parse(&target.addr) else {
+        return false;
     };
+    let result = tokio::time::timeout(
+        PING_TIMEOUT,
+        TcpStream::connect((proxy.host.as_str(), proxy.port)),
+    )
+    .await;
     match result {
         Ok(Ok(stream)) => {
             drop(stream);
@@ -342,6 +341,19 @@ mod tests {
     use std::env::temp_dir;
 
     use super::*;
+
+    #[tokio::test]
+    async fn health_probe_accepts_a_scheme_qualified_tcp_target() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = proxy_core::relay::TargetStatus {
+            addr: format!("TCP://{}", listener.local_addr().unwrap()),
+            healthy: false,
+            weight: 1,
+            connections: 0,
+        };
+        assert!(ping_target(&target).await);
+        drop(listener);
+    }
 
     #[test]
     fn test_relay_manager() {

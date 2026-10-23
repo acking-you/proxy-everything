@@ -1,224 +1,40 @@
 # Repository Guidelines
 
-## Scope and Priorities
+An encrypted HTTP/HTTPS/SOCKS5 proxy in Rust with a Flutter client. Keep
+changes narrowly scoped, keep wire behaviour compatible, and use the
+abstractions the owning crate already has. When goals conflict, rank them:
+wire protocol, security, data integrity, graceful shutdown, observability,
+then implementation simplicity.
 
-This repository contains an encrypted HTTP/HTTPS/SOCKS5 proxy implemented in
-Rust, plus a Flutter desktop/mobile client. Keep changes narrowly scoped,
-preserve existing wire behavior, and prefer the abstractions already present in
-the owning crate.
+## Layout
 
-When instructions conflict, prioritize correctness and compatibility in this
-order: wire protocol, security, data integrity, graceful shutdown, observability,
-then local implementation simplicity.
-
-## Repository Layout
-
-- `crates/proxy-crypto`: configuration-free crypto and generic v3 records.
-- `crates/proxy-core`: protocol, codecs, crypto, config, relay, metrics, nodes.
-- `crates/proxy-client`: local HTTP/HTTPS/SOCKS5 proxy and client CLI.
-- `crates/proxy-server`: remote server, admin CLI, control plane, relay routing.
-- `crates/proxy-tui`: terminal control-plane interface.
-- `crates/proxy-ffi`: C ABI consumed by Flutter; builds as `http_proxy`.
-- `deps/tun2proxy`: TUN capture, route setup, and runtime process bypass.
-- `ui/flutter`: Flutter UI Git submodule.
-- `scripts/windows`: supported Windows build and run entry points.
-- `scripts/build`, `scripts/release`, `docker`, `services`: release and operations.
-- `docs`: user-facing behavior, deployment, and troubleshooting.
-
-The primary binaries are `http-proxy-server`, `http-proxy-cli`,
-`http-proxy-admin`, and `proxy-tui`.
+| Path | Contents |
+| --- | --- |
+| `crates/proxy-crypto` | Configuration-free crypto and generic v3 records |
+| `crates/proxy-core` | Wire format, sessions, TCP/QUIC carriers, codecs, config, relay, metrics, nodes, allocator |
+| `crates/proxy-client` | Local HTTP/HTTPS/SOCKS5 proxy, TUN integration, `http-proxy-cli` |
+| `crates/proxy-server` | Server, control plane, relay routing, managed SOCKS5, `http-proxy-admin` |
+| `crates/proxy-tui` | Terminal control-plane UI, `proxy-tui` |
+| `crates/proxy-ffi` | C ABI for Flutter, built as `http_proxy` |
+| `crates/proxy-ui-services`, `proxy-updater`, `galaxy-geometry` | App services such as app proxies, the updater, galaxy projection |
+| `deps/*` | Submodules, including `tun2proxy` (TUN, routes, process bypass) and `quinn` (QUIC) |
+| `ui/flutter` | Flutter app (submodule) |
+| `scripts/` | Per-platform build/run entry points, `build` and `release` packaging, `bench` |
+| `docs/` | User-facing behaviour, deployment and troubleshooting |
 
 ## Toolchains
 
-### Rust
+- **Rust**: the toolchain pinned by `rust-toolchain.toml`; never override it in
+  project files. Windows uses the MSVC target with Visual Studio 2022 Build
+  Tools (Desktop development with C++) and CMake. Keep `Cargo.lock` committed,
+  and change it only when dependency resolution changes.
+- **Flutter**: FVM only. `ui/flutter/.fvmrc` pins the SDK (Flutter 3.47.7).
+  Never run bare `flutter` or `dart`; use `fvm flutter …` and `fvm dart …` from
+  `ui/flutter`, and run `fvm install` after cloning or an SDK change. Never
+  commit `.fvm/`, `.dart_tool/`, `build/` or `ui/flutter/native/`, which holds
+  staged build products.
 
-- Use the toolchain pinned by `rust-toolchain.toml`; do not override it locally
-  in project files.
-- Windows builds use the MSVC target and require Visual Studio 2022 Build Tools
-  with the Desktop development with C++ workload plus CMake.
-- Keep `Cargo.lock` committed and update it only when dependency resolution
-  actually changes.
-
-### Flutter and FVM
-
-- Flutter is managed exclusively with FVM.
-- `ui/flutter/.fvmrc` is the source of truth and currently pins Flutter 3.47.7.
-- Never use bare `flutter` or `dart` commands for this project. Use
-  `fvm flutter ...` and `fvm dart ...` from `ui/flutter`.
-- Run `fvm install` after cloning or after the pinned SDK changes.
-- Do not commit `.fvm/`, `.dart_tool/`, `build/`, or `ui/flutter/native/`.
-  The native directory contains staged build products, not source.
-
-## Windows Workflows
-
-Run these from the repository root in PowerShell:
-
-```powershell
-# Build all Rust binaries, the FFI DLL, and the Flutter Windows app.
-.\scripts\windows\build.ps1 -Configuration Debug
-.\scripts\windows\build.ps1 -Configuration Release
-# Reuse previously cached Cargo/Pub/Flutter dependencies without resolving online.
-.\scripts\windows\build.ps1 -Configuration Release -Offline
-
-# Run a Rust command-line component.
-.\scripts\windows\run-cli.ps1 server -- -H 127.0.0.1 -p 1081
-.\scripts\windows\run-cli.ps1 client -- -s 127.0.0.1 -p 1081 -c 1080
-.\scripts\windows\run-cli.ps1 admin -- --help
-.\scripts\windows\run-cli.ps1 tui -- --help
-
-# Build/stage http_proxy.dll and start Flutter with hot reload.
-.\scripts\windows\run-ui.ps1 -Mode Debug
-```
-
-`stage-ui-native.ps1` is the single source of truth for placing
-`target/<profile>/http_proxy.dll` and `wintun.dll` under
-`ui/flutter/native/windows/<architecture>/`. Do not duplicate this copy logic
-in ad hoc commands or commit the resulting DLL.
-
-## Upgrade and Release Packaging Rules
-
-Treat every package given to a user as an upgradeable release, even when it is
-only for local testing. A request to "publish" means producing verified,
-versioned local artifacts unless the user explicitly requests a tag, push, or
-remote upload.
-
-### Versioning and Android Upgrade Compatibility
-
-- Before every new Android package, increment the build number in
-  `ui/flutter/pubspec.yaml` (`version: <version-name>+<build-number>`). Increment
-  it even when the human-readable version name does not change. Never reuse or
-  decrease a build number from an APK that may already be installed.
-- Keep the Android application ID `com.proxyui.proxy_ui` unchanged. An APK can
-  update an installed copy only when its application ID and signing certificate
-  match and its effective `versionCode` is greater than the installed one.
-- Android release builds currently use the existing local debug signing key.
-  Do not delete, regenerate, or silently replace `%USERPROFILE%\.android\debug.keystore`.
-  A production signing migration must be planned explicitly because changing
-  the key prevents in-place upgrades and discards the current installation path.
-- Flutter adds ABI-specific offsets to split APK version codes. Do not infer the
-  final code only from `pubspec.yaml`; inspect every APK with `aapt dump badging`
-  and confirm its package name, `versionName`, effective `versionCode`, SDKs, and
-  ABI before delivery.
-- Verify every APK certificate with `apksigner verify --print-certs`. Compare
-  its certificate digest with the previous release when one is available.
-
-### Mobile Packages Are Built Locally, Never by CI
-
-Every mobile package published to GitHub — Android APK and iOS IPA alike —
-must be built on the maintainer's machine and uploaded to the release by hand.
-CI may compile them as a check; its output must never be distributed.
-
-The reason is the signing key. `android/app/build.gradle.kts` signs release
-builds with the debug config, and a CI runner generates a fresh debug keystore
-on every run, so each build carries a different certificate. Measured on the
-three published releases:
-
-| Release | Certificate (SHA-256, truncated) |
-|---------|----------------------------------|
-| v1.2.7  | `08fb5536…3354` |
-| v1.2.8  | `6852dc3d…51b5` |
-| v1.2.9  | `d99b01d4…f987` |
-| local `~/.android/debug.keystore` | `5ac9aa7c…305c` |
-
-Android refuses to update an installed app whose certificate does not match, so
-those releases could never upgrade one another — a phone had to uninstall first
-and lose its data. A local build carries the stable key in the table's last row
-and upgrades cleanly.
-
-Consequently:
-
-- The release workflow collects desktop artifacts only. Do not add `*.apk` or
-  `*.ipa` back to its file list.
-- Build mobile packages locally, verify them as described above, and attach them
-  to the release that CI created.
-- Uploading the local keystore to CI as a secret would also work, but it puts a
-  signing key on GitHub. That is the maintainer's decision to make, not an
-  agent's, and it must not be done on an agent's initiative.
-
-### Android Release Build
-
-- Android releases are split per ABI by default; do not distribute a universal
-  APK unless the user explicitly requests one. Build at least `arm64-v8a` for a
-  physical modern device, and build `armeabi-v7a` or `x86_64` when the target
-  device or emulator requires it.
-- After changes to `proxy-core`, `proxy-client`, `proxy-ffi`, or `tun2proxy`,
-  always rebuild the native library before Flutter. Never package stale staged
-  `.so` files. From the repository root, use the needed architectures:
-
-```powershell
-.\scripts\android\build-native.ps1 -Configuration Release -Architectures aarch64
-# For all currently supported Android ABIs:
-.\scripts\android\build-native.ps1 -Configuration Release -Architectures x86_64,aarch64,armv7
-```
-
-- Run Flutter only through FVM from `ui/flutter`. Use matching target platforms
-  and split the output by ABI, for example:
-
-```powershell
-fvm flutter pub get
-fvm flutter analyze --no-fatal-infos
-fvm flutter test
-fvm flutter build apk --release --target-platform android-arm64 --split-per-abi
-```
-
-- Rename or copy deliverables to an unambiguous ignored build location using
-  `cipherrelay-v<version-name>-<build-number>-android-<abi>.apk`. Report the absolute
-  path, ABI, `versionName`, effective `versionCode`, file size, SHA-256, and
-  certificate verification result.
-- Never commit APKs, `ui/flutter/build/`, or `ui/flutter/native/`.
-
-### Windows Release Build
-
-- Use the supported root workflow so Rust, the FFI DLL, native staging, and
-  Flutter are rebuilt together:
-
-```powershell
-.\scripts\windows\build.ps1 -Configuration Release
-# When vswhere discovery fails but VS 2022 Build Tools is already installed:
-.\scripts\windows\build.ps1 -Configuration Release -Offline `
-  -VisualStudioPath "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools"
-```
-
-The explicit-path fallback uses MSVC and Ninja Multi-Config in a child process;
-it does not repair the registry, alter the installed SDK or terminate desktop
-processes. Its complete bundle is under
-`ui/flutter/build/windows/x64-explicit-msvc/runner/Release`.
-
-- Never stop or kill a currently running `proxy_ui` merely to build or package
-  an upgrade. If an executable or DLL is locked, use a separate staging/output
-  directory when possible; otherwise report the lock instead of terminating the
-  user's process.
-- Verify that `ui/flutter/build/windows/<architecture>/runner/Release` contains
-  `CipherRelay.exe`, `http_proxy.dll`, `wintun.dll`, `flutter_windows.dll`, and the
-  required `data` and plugin files. A Windows release is the complete directory,
-  not the executable alone.
-- Package that directory as
-  `ui/flutter/build/packages/cipherrelay-v<version-name>-<build-number>-windows-<architecture>.zip`.
-  Keep one containing application directory in the archive. Inspect the archive
-  contents, then report the absolute path, version, architecture, size, and
-  SHA-256. Do not commit the ZIP or other generated artifacts.
-
-### Release Verification and Commits
-
-- Scale checks to the changes. For `tun2proxy`, run its tests, strict Clippy,
-  and formatting checks directly:
-
-```powershell
-cargo test --manifest-path deps/tun2proxy/Cargo.toml
-cargo clippy --manifest-path deps/tun2proxy/Cargo.toml --all-targets --all-features -- -D warnings
-cargo fmt --manifest-path deps/tun2proxy/Cargo.toml -- --check
-```
-
-- Run the relevant root Rust checks plus FVM analyze and tests before packaging.
-  A successful compile alone is not sufficient release verification.
-- When the user asks to commit a release, commit source changes inside affected
-  submodules first, then commit their updated gitlinks and any root changes.
-  Use Conventional Commits, report each commit hash separately, and confirm the
-  root and affected submodule worktrees are clean.
-- Do not tag, push, create a remote release, or upload artifacts unless the user
-  explicitly asks for that action.
-
-## Direct Development Commands
+## Commands
 
 ```bash
 cargo build --workspace
@@ -228,123 +44,221 @@ cargo run -p proxy-server --bin http-proxy-server -- -H 127.0.0.1 -p 1081
 cargo run -p proxy-client --bin http-proxy-cli -- -s 127.0.0.1 -p 1081 -c 1080
 ```
 
-From `ui/flutter`:
+Windows, from the repository root in PowerShell:
+
+```powershell
+.\scripts\windows\build.ps1 -Configuration Debug     # or Release; add -Offline to reuse caches
+.\scripts\windows\run-cli.ps1 server -- -H 127.0.0.1 -p 1081   # also client, admin, tui
+.\scripts\windows\run-ui.ps1 -Mode Debug             # stage http_proxy.dll, hot reload
+```
+
+`stage-ui-native.ps1` is the only code that copies
+`target/<profile>/http_proxy.dll` and `wintun.dll` into
+`ui/flutter/native/windows/<architecture>/`. Don't duplicate it in ad hoc
+commands, and never commit the DLLs.
+
+Flutter, from `ui/flutter`:
 
 ```bash
 fvm flutter pub get
 fvm flutter analyze --no-fatal-infos
 fvm flutter test
 fvm dart format lib test
-fvm flutter run -d windows
 ```
 
-On POSIX systems, the pre-commit sequence remains `make clippy` followed by
-`make fmt`. On Windows, use the equivalent Cargo commands. For repository code,
-strict Clippy should pass without linting vendored dependencies:
+A worktree nested inside the main checkout, such as `.claude/worktrees/…`,
+cannot build `tun2proxy` or `ipstack`: their build scripts run `cargo
+metadata`, which resolves the outer checkout's workspace. Build those crates
+from a worktree outside the checkout.
+
+## Checks before committing
+
+Run `make clippy` and then `make fmt` (on Windows, the equivalent Cargo
+commands). Strict Clippy must pass for repository crates without linting
+vendored dependencies:
 
 ```bash
 cargo clippy -p proxy-crypto -p proxy-core -p proxy-client -p proxy-server -p proxy-tui -p proxy-ffi --all-targets --all-features --no-deps -- -D warnings
 cargo fmt -p proxy-crypto -p proxy-core -p proxy-client -p proxy-server -p proxy-tui -p proxy-ffi -- --check
 ```
 
-## Rust Engineering Conventions
+For `tun2proxy` changes, also run its own checks:
 
-- Rust edition is 2024. Use `rustfmt.toml` and standard Rust naming.
-- Keep ownership boundaries between crates. Shared wire, relay, and codec logic
-  belongs in `proxy-core`; frontend protocol handling belongs in `proxy-client`;
-  destination forwarding belongs in `proxy-server`.
-- Prefer typed parsers and enums over stringly typed branching.
-- Avoid new abstractions unless they remove meaningful duplication or match an
+```powershell
+cargo test --manifest-path deps/tun2proxy/Cargo.toml
+cargo clippy --manifest-path deps/tun2proxy/Cargo.toml --all-targets --all-features -- -D warnings
+cargo fmt --manifest-path deps/tun2proxy/Cargo.toml -- --check
+```
+
+## Engineering rules
+
+### Rust
+
+- Edition 2024, `rustfmt.toml`, standard naming.
+- Keep crate boundaries: shared wire, relay, codec and carrier logic belongs in
+  `proxy-core`, frontend protocol handling in `proxy-client`, and destination
+  forwarding in `proxy-server`.
+- Prefer typed parsers and enums, such as `UpstreamAddress`, over stringly
+  typed branching.
+- Add an abstraction only when it removes real duplication or matches an
   established pattern.
-- Comments should explain protocol requirements, invariants, unsafe code, or
-  non-obvious platform behavior. Do not narrate straightforward assignments.
-- Keep public API documentation accurate when behavior or wire format changes.
+- Comments explain protocol requirements, invariants, unsafe code and
+  non-obvious platform behaviour, not straightforward assignments.
+- Keep public API documentation accurate when behaviour or wire format changes.
+- `proxy-core::allocator` alone selects mimalloc and its RSS tuning. Never
+  declare another `#[global_allocator]` or tune the allocator in leaf crates;
+  embedded components such as `tun2proxy` inherit it.
 
-## Protocol Compatibility
+### Protocol compatibility
 
-- Existing TCP clients and servers must remain interoperable across upgrades.
-- `ProxyHeader.transport` is backward compatible by design: readers default a
-  missing value to TCP, and writers omit the TCP default from JSON.
-- New transport fields must have a legacy-safe default or be explicitly
-  versioned. Do not add `deny_unknown_fields` to wire structs.
-- SOCKS5 UDP packets preserve datagram boundaries. `FRAG != 0` is unsupported
-  and must be dropped without terminating an otherwise valid association.
-- UDP associations are owned by their TCP control connection and must remain
-  pinned to the validated client endpoint.
-- Protocol changes require unit tests for parsing/framing plus end-to-end tests
-  for both encrypted and unencrypted paths. Compatibility changes require a
-  legacy-reader or legacy-writer test in each affected direction.
+- Existing TCP clients and servers must stay interoperable across upgrades.
+- `ProxyHeader.transport` defaults a missing value to TCP, and writers omit
+  that default. New wire fields need a legacy-safe default or explicit
+  versioning. Never add `deny_unknown_fields` to wire structs.
+- The carrier (TCP or QUIC) is chosen per session from the node address. It
+  never changes the wire protocol, and there is no silent fallback between
+  carriers. `CarrierStream` behaves the same on both: `shutdown` half-closes,
+  and dropping delivers the bytes already written before closing.
+- SOCKS5 UDP preserves datagram boundaries. Drop `FRAG != 0` packets without
+  ending an otherwise valid association. A UDP association belongs to its
+  control connection and stays pinned to the validated client endpoint.
+- Protocol changes need parsing and framing unit tests plus end-to-end tests
+  over both legacy and v3. Compatibility changes need a legacy-reader or
+  legacy-writer test for each affected direction.
 
-## Flutter and FFI Conventions
+### Flutter and FFI
 
-- Keep Dart FFI declarations synchronized with exported functions and layouts
-  in `proxy-ffi`; integer widths, ownership, and free functions are part of the
-  ABI contract.
-- Never free Rust-owned memory from Dart except through the matching exported
-  Rust free function.
-- Build and stage a fresh DLL after changing `proxy-ffi`, `proxy-client`, or
-  `proxy-core` before testing the UI.
-- Keep UI state and blocking native calls off the render path. Preserve the
-  existing provider/service boundaries.
+- Keep Dart FFI declarations in sync with `proxy-ffi` exports and layouts.
+  Integer widths, ownership and free functions are part of the ABI.
+- Free Rust-owned memory from Dart only through the matching Rust free function.
+- After changing `proxy-ffi`, `proxy-client` or `proxy-core`, build and stage a
+  fresh native library before testing the UI.
+- Keep UI state and blocking native calls off the render path, and preserve
+  the provider and service boundaries.
 - TUN integrations must enforce the current executable in native process
-  bypass state; UI configuration is not a security or loop-prevention boundary.
-- Update `pubspec.lock` when dependency resolution changes. Generated Flutter
-  plugin files should change only when dependencies or platform configuration
-  change.
+  bypass. UI configuration is not a security or loop-prevention boundary.
+- Update `pubspec.lock` only when resolution changes. Generated plugin files
+  change only with dependencies or platform configuration.
 
-## Testing Expectations
+### Tests
 
-- Scale coverage with risk. Parser fixes need focused unit tests; shared codecs,
-  transports, FFI, and user workflows need integration coverage.
-- Name tests by behavior, for example `legacy_proxy_header_defaults_to_tcp`.
-- Network tests must bind loopback and ephemeral ports; do not depend on public
-  services unless the test is explicitly marked as such.
-- Tests must clean up listeners, cancellation tokens, temporary state, and OS
-  proxy settings even on expected error paths.
+- Scale coverage with risk. Parser fixes need focused unit tests; shared
+  codecs, carriers, FFI and user workflows need integration coverage.
+- Name tests by behaviour, for example `legacy_proxy_header_defaults_to_tcp`.
+- Network tests bind loopback and ephemeral ports and never depend on public
+  services unless explicitly marked.
+- Clean up listeners, cancellation tokens, temporary state and OS proxy
+  settings, including on expected error paths.
 - For Flutter changes, run analyze and tests with FVM. For Windows integration
-  changes, also build the Windows desktop bundle and verify `http_proxy.dll` is
-  next to `CipherRelay.exe`.
+  changes, also build the desktop bundle and confirm `http_proxy.dll` sits next
+  to `CipherRelay.exe`.
 
-## Logging and Security
+### Logging and security
 
-- Use structured `tracing` fields. Log association and connection lifecycle at
-  `info`, recoverable rejection reasons at `debug` or `warn`, and per-packet
-  details only at `debug` or `trace`.
-- Include transport, direction, peer/destination, byte counts, and close reason
-  where useful. Never log secret/session keys, proxy passwords, auth headers,
-  decrypted headers, or user payloads.
-- Treat `SECRET_KEY`, control session keys, admin tokens, and external proxy
-  credentials as sensitive. Documentation and tests must use placeholders.
-- Preserve RAII cleanup for system proxy changes and cancellation-aware shutdown.
+- Use structured `tracing` fields. Log connection and association lifecycle at
+  `info`, recoverable rejections at `debug` or `warn`, and per-packet detail
+  only at `debug` or `trace`.
+- Include carrier, transport, direction, peer or destination, byte counts and
+  close reason where useful. Never log secret or session keys, proxy passwords,
+  auth headers, decrypted headers or payloads.
+- Treat `SECRET_KEY`, control session keys, admin tokens and external proxy
+  credentials as sensitive; docs and tests use placeholders.
+- Preserve RAII cleanup of system proxy changes and cancellation-aware shutdown.
 
-## Allocator Ownership
+## Releases and packaging
 
-- `proxy-core::allocator` owns the process-wide mimalloc selection and RSS
-  tuning for every proxy binary and FFI artifact.
-- Do not declare another `#[global_allocator]` or duplicate allocator tuning in
-  leaf crates. Embedded components such as `tun2proxy` inherit the allocator
-  selected by the final proxy artifact.
+Every package handed to a user is an upgradeable release, even for local
+testing. "Publish" means verified, versioned local artifacts unless the user
+explicitly asks for a tag, push or upload. The CI release flow is described in
+[docs/releasing.md](docs/releasing.md).
 
-## Git and Submodules
+**Mobile packages are built locally, never by CI.** CI-built APKs and IPAs
+carry a new debug certificate on every run and cannot upgrade an installed app
+(the evidence is in [docs/releasing.md](docs/releasing.md#3-mobile-packages-built-locally)).
+The release workflow collects desktop artifacts only; never add `*.apk` or
+`*.ipa` to it. Never move the signing key into CI on your own initiative.
+
+### Android
+
+- Before every package, increment the build number in `ui/flutter/pubspec.yaml`
+  (`version: <name>+<build>`), even when the name stays the same. Never reuse or
+  decrease a build number that may already be installed.
+- Keep the application ID `com.proxyui.proxy_ui`. An APK updates an installed
+  copy only when the ID and signing certificate match and its effective
+  `versionCode` is greater.
+- Release builds use the local debug key. Never delete, regenerate or replace
+  `%USERPROFILE%\.android\debug.keystore`; a signing migration must be planned
+  explicitly, because a new key breaks in-place upgrades.
+- Split APKs per ABI; build a universal APK only on request. Build `arm64-v8a`
+  for modern devices, plus `armeabi-v7a` or `x86_64` when the target needs it.
+- After changing `proxy-core`, `proxy-client`, `proxy-ffi` or `tun2proxy`,
+  rebuild the native library first. Never package stale staged `.so` files.
+
+```powershell
+.\scripts\android\build-native.ps1 -Configuration Release -Architectures aarch64
+# all supported ABIs: -Architectures x86_64,aarch64,armv7
+# then, from ui/flutter:
+fvm flutter build apk --release --target-platform android-arm64 --split-per-abi
+```
+
+- Flutter adds ABI offsets to split version codes. Check every APK with
+  `aapt dump badging` (package, `versionName`, effective `versionCode`, SDKs,
+  ABI) and `apksigner verify --print-certs`, and compare the certificate digest
+  with the previous release.
+- Name deliverables `cipherrelay-v<name>-<build>-android-<abi>.apk` in an
+  ignored build location. Report the absolute path, ABI, `versionName`,
+  effective `versionCode`, size, SHA-256 and certificate result.
+
+### Windows
+
+```powershell
+.\scripts\windows\build.ps1 -Configuration Release
+# When vswhere fails but VS 2022 Build Tools is installed:
+.\scripts\windows\build.ps1 -Configuration Release -Offline `
+  -VisualStudioPath "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools"
+```
+
+- The explicit-path fallback builds with MSVC and Ninja Multi-Config in a child
+  process into `ui/flutter/build/windows/x64-explicit-msvc/runner/Release`. It
+  doesn't repair the registry, change the SDK or stop desktop processes.
+- Never stop a running `proxy_ui` to build or package. If a file is locked, use
+  a separate output directory or report the lock.
+- A release is the whole `ui/flutter/build/windows/<architecture>/runner/Release`
+  directory. Confirm it contains `CipherRelay.exe`, `http_proxy.dll`,
+  `wintun.dll`, `flutter_windows.dll`, `data` and the plugin files.
+- Package it as `ui/flutter/build/packages/cipherrelay-v<name>-<build>-windows-<architecture>.zip`
+  with a single top-level application directory, inspect the archive, and
+  report its path, version, architecture, size and SHA-256.
+
+### Verification and commits
+
+- Run the relevant Rust checks plus FVM analyze and tests before packaging. A
+  successful compile alone is not release verification.
+- Commit inside affected submodules first, then their gitlinks and root
+  changes. Use Conventional Commits, report each hash, and confirm the root and
+  submodule worktrees are clean.
+- Never commit APKs, ZIPs, `ui/flutter/build/` or `ui/flutter/native/`.
+- Never tag, push, create a remote release or upload artifacts unless the user
+  explicitly asks for that action.
+
+## Git and submodules
 
 - The worktree may already contain user changes. Never reset or overwrite them.
 - `ui/flutter` and `deps/*` are submodules. Report changes inside a submodule
-  separately from the parent gitlink state.
-- Do not update submodule commits unless the task requires it. Do not commit
-  generated build artifacts from a submodule.
+  separately from the parent gitlink.
+- Update submodule commits only when the task requires it. Before merging a
+  root PR, re-pin each submodule to the commit merged on its default branch.
 - Use Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`,
-  `build:`, `ci:`). A PR should state what changed, why, exact verification
-  commands, protocol/ABI impact, and documentation changes.
+  `build:`, `ci:`). A PR states what changed and why, the exact verification
+  commands, protocol and ABI impact, and documentation changes.
 
-## Completion Checklist
+## Completion checklist
 
-Before handing off a change:
-
-1. Inspect both root and affected submodule status.
+1. Inspect root and affected submodule status.
 2. Run focused tests while iterating.
-3. Run strict Clippy and Rust formatting checks for Rust changes.
+3. Run strict Clippy and the formatting check for Rust changes.
 4. Run `cargo test --workspace` for shared or protocol changes.
-5. Run FVM analyze/test/build for Flutter or FFI changes.
-6. Confirm Windows UI bundles contain both `http_proxy.dll` and `wintun.dll`.
-7. Confirm no secrets, generated binaries, caches, or unrelated files are staged.
-8. Update README/docs whenever commands, configuration, or behavior changed.
+5. Run FVM analyze, test and build for Flutter or FFI changes.
+6. Confirm Windows bundles contain both `http_proxy.dll` and `wintun.dll`.
+7. Confirm no secrets, binaries, caches or unrelated files are staged.
+8. Update the README and docs when commands, configuration or behaviour change.

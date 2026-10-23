@@ -1,6 +1,5 @@
 //! Node discovery and synchronization helpers.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use proxy_core::control::{ControlOp, ControlRequest};
@@ -9,18 +8,8 @@ use proxy_core::util::error_report;
 use super::ServerContext;
 
 pub(super) fn split_host_port(addr: &str) -> Option<(String, u16)> {
-    if let Ok(socket) = addr.parse::<SocketAddr>() {
-        return Some((socket.ip().to_string(), socket.port()));
-    }
-    if let Some(bracket_end) = addr.find("]:") {
-        let host = addr.get(1..bracket_end)?;
-        let port = addr.get(bracket_end + 2..)?.trim().parse::<u16>().ok()?;
-        return Some((host.to_string(), port));
-    }
-    let idx = addr.rfind(':')?;
-    let host = addr[..idx].trim();
-    let port = addr[idx + 1..].trim().parse::<u16>().ok()?;
-    Some((host.to_string(), port))
+    let endpoint = proxy_core::upstream::UpstreamAddress::parse(addr).ok()?;
+    Some((endpoint.qualified_host(), endpoint.port))
 }
 
 pub(super) async fn broadcast_nodes(ctx: Arc<ServerContext>) {

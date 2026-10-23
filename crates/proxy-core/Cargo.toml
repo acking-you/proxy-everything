@@ -45,10 +45,13 @@ futures = { workspace = true }
 # Network
 reqwest = { workspace = true }
 rustls = { workspace = true }
+quinn = { workspace = true }
+webpki-roots = "1"
 ureq = { workspace = true }
 tokio-socks = { workspace = true }
 ipnet = { workspace = true }
 percent-encoding = { workspace = true }
+url = { workspace = true }
 uni-stream = { workspace = true }
 
 # Geo
@@ -73,15 +76,11 @@ async-broadcast = { workspace = true, optional = true }
 # `test-util` provides the paused clock the geo rate-limiter tests need, so they
 # assert timing without sleeping in real time.
 [dev-dependencies]
-webpki-roots = "1"
 tokio = { workspace = true, features = [
     "rt-multi-thread",
     "macros",
     "test-util",
 ] }
-
-[target.'cfg(target_os = "android")'.dependencies]
-webpki-roots = "1"
 
 # Descriptor-limit policy (see src/rlimit.rs)
 [target.'cfg(unix)'.dependencies]

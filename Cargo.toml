@@ -12,6 +12,7 @@ members = [
     "crates/galaxy-geometry",
 ]
 exclude = [
+    "deps/quinn",
     "deps/kanal",
     "deps/uni-stream",
     "deps/sysproxy-rs",
@@ -77,7 +78,9 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 tokio-socks = "0.5.3"
 ipnet = { version = "2.12", features = ["serde"] }
 percent-encoding = "2"
+url = "2"
 uni-stream = { path = "deps/uni-stream" }
+quinn = { path = "deps/quinn/quinn", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 
 # Geo
 maxminddb = "0.32"

@@ -48,3 +48,27 @@ jobs:
         run: scripts/integration-test.sh
       - name: cargo build
         run: cargo build --workspace --release --locked
+      - name: Build and verify Flutter against this PR's native library
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          .\scripts\windows\stage-ui-native.ps1 -Configuration Release -SkipBuild
+          $fvmDir = Join-Path $env:RUNNER_TEMP 'fvm'
+          $archive = Join-Path $env:RUNNER_TEMP 'fvm.zip'
+          Invoke-WebRequest 'https://github.com/btwld/fvm/releases/download/4.1.0/fvm-4.1.0-windows-x64.zip' -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne '70527bbfdc1beb3fc028043ffeadbceae575f801be423edc819a81dfa6abd8da') { throw 'FVM checksum mismatch' }
+          Expand-Archive $archive -DestinationPath $fvmDir
+          $fvmExe = @(Get-ChildItem $fvmDir -Filter fvm.exe -Recurse)
+          if ($fvmExe.Count -ne 1) { throw 'FVM executable missing or ambiguous' }
+          $env:PATH += ";" + $fvmExe[0].DirectoryName
+          Set-Location ui/flutter
+          fvm install
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Flutter installation failed' }
+          fvm flutter pub get
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter dependency installation failed' }
+          fvm flutter build windows --debug
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter Windows build failed' }
+          $bundle = 'build/windows/x64/runner/Debug'
+          foreach ($file in @('CipherRelay.exe', 'http_proxy.dll', 'wintun.dll', 'flutter_windows.dll', 'cipherrelay-updater.exe', 'cipherrelay-app-launcher.exe', 'data')) {
+            if (-not (Test-Path (Join-Path $bundle $file))) { throw "Missing bundle file: $file" }
+          }

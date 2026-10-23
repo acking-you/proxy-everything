@@ -22,6 +22,7 @@ async fn stalled_headers_expire_and_cancelled_connections_release_metrics() {
     let nodes = Arc::new(NodeStore::new(directory.join("nodes.json")));
     let metrics = Arc::new(MetricsStore::with_default_config());
     let config = ServerConfig {
+        quic_endpoint: None,
         metrics: Arc::clone(&metrics),
         relay: Arc::new(RelayManager::new(nodes.clone(), &directory)),
         nodes,

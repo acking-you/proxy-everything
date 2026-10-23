@@ -1,10 +1,19 @@
 use clap::Parser;
 use proxy_core::config::{SERVER_PORT, init_tracing};
-use proxy_server::server::start_server;
+use proxy_server::server::{QuicListenConfig, start_server_with_quic};
 
 #[derive(Parser)]
 #[command(author = "L_B__", version)]
 struct Cli {
+    /// Additional UDP QUIC listener; TCP remains available on --host/--port.
+    #[arg(long, env = "PROXY_QUIC_LISTEN", requires_all = ["quic_cert", "quic_key"])]
+    quic_listen: Option<std::net::SocketAddr>,
+    /// PEM certificate chain, with a DNS/IP SAN matching the client's node host.
+    #[arg(long, env = "PROXY_QUIC_CERT", requires = "quic_listen")]
+    quic_cert: Option<std::path::PathBuf>,
+    /// PEM private key for the QUIC certificate.
+    #[arg(long, env = "PROXY_QUIC_KEY", requires = "quic_listen")]
+    quic_key: Option<std::path::PathBuf>,
     /// [optional] 0.0.0.0 or 127.0.0.1 (uses 0.0.0.0 by default)
     #[arg(
         short = 'H',
@@ -49,5 +58,10 @@ async fn main() -> std::io::Result<()> {
         None => "direct mode".to_string(),
     };
     tracing::info!("Server listening on {}:{} ({})", cli.host, cli.port, mode);
-    start_server(cli.host, *SERVER_PORT).await
+    let quic = cli.quic_listen.map(|listen| QuicListenConfig {
+        listen,
+        certificate: cli.quic_cert.expect("required by clap"),
+        private_key: cli.quic_key.expect("required by clap"),
+    });
+    start_server_with_quic(cli.host, *SERVER_PORT, quic).await
 }

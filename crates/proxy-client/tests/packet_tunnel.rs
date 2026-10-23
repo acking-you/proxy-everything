@@ -121,6 +121,7 @@ fn packet_round_trips(with_echo: bool, auto_proxy: bool) {
     let cancel = CancellationToken::new();
     let metrics = Arc::new(MetricsStore::with_default_config());
     let config = ServerConfig {
+        quic_endpoint: None,
         metrics: metrics.clone(),
         relay: Arc::new(RelayManager::new(nodes.clone(), &dir.0)),
         nodes: nodes.clone(),
@@ -146,6 +147,7 @@ fn packet_round_trips(with_echo: bool, auto_proxy: bool) {
     let relay = runtime.spawn(run_server_with_listener(
         relay_listener,
         ServerConfig {
+            quic_endpoint: None,
             relay: relay_manager,
             ..config.clone()
         },

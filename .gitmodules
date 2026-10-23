@@ -22,3 +22,7 @@
 [submodule "deps/ipstack"]
 	path = deps/ipstack
 	url = git@github.com:acking-you/ipstack.git
+[submodule "deps/quinn"]
+	path = deps/quinn
+	url = https://github.com/acking-you/quinn.git
+	branch = codex/proxy-quic-transport

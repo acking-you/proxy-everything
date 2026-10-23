@@ -15,6 +15,8 @@ Without `--set-system-proxy`, manually configure system proxy to `127.0.0.1:<loc
 | `-s, --server-host` | Server IP/domain (required) |
 | `-c, --client-port` | Local port (default: 1080) |
 | `-p, --server-port` | Server port (default: 1081) |
+| `--transport <tcp\|quic>` | Native upstream carrier; a bare server host defaults to TCP |
+| `--quic-ca <PEM>` | Additional QUIC trust anchor; hostname verification remains required |
 | `-k, --key` | 32-byte encryption key |
 | `--set-system-proxy` | Auto-set OS proxy (Linux/macOS/Windows) |
 | `--reverse-geo` | Reverse geo logic: proxy CN, direct others |
@@ -30,6 +32,9 @@ Without `--set-system-proxy`, manually configure system proxy to `127.0.0.1:<loc
 ---
 
 ## SOCKS5 UDP ASSOCIATE
+
+The upstream carrier can be TCP or QUIC independently of this UDP association.
+See [QUIC configuration and live switching](quic-transport.md).
 
 `http-proxy-cli` accepts RFC 1928 UDP associations on the same local port used
 for HTTP and SOCKS5 TCP. The SOCKS5 control connection stays on TCP while the

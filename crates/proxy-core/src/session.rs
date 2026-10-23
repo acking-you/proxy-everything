@@ -13,7 +13,7 @@ use crate::datagram::{DatagramTunnelReader, DatagramTunnelWriter, UDP_ASSOCIATIO
 use crate::protocol::{ProxyHeader, ProxyTransport};
 use crate::secure_transport::{ProxyStream, WireProtocol};
 use crate::socks5::{NativeDatagramReader, NativeDatagramWriter};
-use crate::transport::{Result, TransportError, get_tcp_stream, setup_proxy_stream};
+use crate::transport::{Result, TransportError, get_upstream_stream, setup_proxy_stream};
 
 const UDP_READY_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -48,8 +48,8 @@ impl NativeSession {
         transport: ProxyTransport,
         protocol: WireProtocol,
     ) -> Result<Self> {
-        let stream = get_tcp_stream(node, node_port, "connect native proxy session").await?;
-        Self::from_tcp_stream_with_protocol(host, port, transport, stream, protocol).await
+        let stream = get_upstream_stream(node, node_port, "connect native proxy session").await?;
+        Self::from_stream_with_protocol(host, port, transport, stream, protocol).await
     }
 
     /// Negotiate on a connection whose route and peer the caller has already
@@ -65,14 +65,14 @@ impl NativeSession {
             detail: "select native session protocol",
             source,
         })?;
-        Self::from_tcp_stream_with_protocol(host, port, transport, stream, protocol).await
+        Self::from_stream_with_protocol(host, port, transport, stream.into(), protocol).await
     }
 
-    async fn from_tcp_stream_with_protocol(
+    pub async fn from_stream_with_protocol(
         host: &str,
         port: u16,
         transport: ProxyTransport,
-        stream: TcpStream,
+        stream: crate::upstream::CarrierStream,
         protocol: WireProtocol,
     ) -> Result<Self> {
         let legacy_key = match protocol {

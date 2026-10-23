@@ -362,6 +362,20 @@ impl PacketTunnelRuntime {
         })
     }
 
+    /// Atomically select the native carrier/address for subsequent flows. The
+    /// system owns Apple routes; existing TCP/UDP sessions keep their streams.
+    pub fn switch_upstream(&self, host: &str, port: u16) -> io::Result<()> {
+        if self.cancel.is_cancelled() {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        let endpoint = proxy_core::upstream::UpstreamAddress::from_host(host, port)?;
+        if endpoint.port == 0 {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        proxy_core::config::runtime::set_server_endpoint(endpoint.qualified_host(), endpoint.port);
+        Ok(())
+    }
+
     pub fn cancel(&self) {
         self.cancel.cancel();
     }
@@ -391,6 +405,7 @@ impl Drop for PacketTunnelRuntime {
             if stopped.is_err() {
                 tracing::warn!("packet tunnel tasks exceeded shutdown deadline");
             }
+            runtime.block_on(proxy_core::quic::shutdown_clients());
             // Dropping the runtime aborts any remaining tracked network work.
             runtime.shutdown_timeout(Duration::from_secs(1));
         }
