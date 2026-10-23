@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use proxy_core::codec::{AsyncReader, AsyncWriter};
 use proxy_core::control::{
-    ControlCodec, ControlOp, ControlRequest, ControlResponse, ControlResult, TopNEntry,
+    ControlCodec, ControlOp, ControlRequest, ControlResponse, ControlResult, QuicEndpoint,
+    TopNEntry,
 };
 use proxy_core::metrics::current_time_ms;
 use proxy_core::nodes::NodeInfo;
@@ -61,6 +62,9 @@ pub(super) async fn handle_control_request(
                 endpoint: ctx.socks5.endpoint().await,
             })
         }
+        ControlOp::GetQuicEndpoint => success(ControlResult::QuicEndpoint {
+            endpoint: ctx.quic_port.map(|port| QuicEndpoint { port }),
+        }),
         op @ (ControlOp::GetSocks5Status
         | ControlOp::SetSocks5Enabled { .. }
         | ControlOp::RotateSocks5Key

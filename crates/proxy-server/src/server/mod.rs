@@ -152,6 +152,8 @@ struct ServerContext {
     require_secure_transport: bool,
     control_session_key: Option<String>,
     self_node_id: Option<String>,
+    /// The bound QUIC listener's port, reported to clients deciding a carrier.
+    quic_port: Option<u16>,
     /// Monotonic trace id seed used to tag logs for each connection.
     trace_id_seed: AtomicU64,
 }
@@ -384,6 +386,10 @@ pub async fn run_server_with_listener(
         require_secure_transport: config.require_secure_transport,
         control_session_key: config.control_session_key,
         self_node_id: config.self_node_id,
+        quic_port: quic_endpoint
+            .as_ref()
+            .and_then(|endpoint| endpoint.0.local_addr().ok())
+            .map(|address| address.port()),
         trace_id_seed: AtomicU64::new(1),
     });
 

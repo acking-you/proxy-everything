@@ -350,8 +350,9 @@ All commands are sent via the control protocol (ControlClient):
 | `GetSocks5Endpoint` | SOCKS5 link details while serving (session key only) |
 | `GetSocks5Status` / `SetSocks5Enabled` / `RotateSocks5Key` / `UpdateSocks5Config` | Manage the SOCKS5 listener |
 | `ListSocks5Sessions` / `CloseSocks5Sessions` | Inspect and close SOCKS5 sessions |
+| `GetQuicEndpoint` | Port of the node's QUIC listener, or none (session key only) |
 
-`Ping`, `ListNodes`, `ListGroups` and `GetSocks5Endpoint` are client-readable
+`Ping`, `ListNodes`, `ListGroups`, `GetSocks5Endpoint` and `GetQuicEndpoint` are client-readable
 (`ControlOp::is_client_readable`): they need only the session key. Everything
 else needs `CONTROL_ADMIN_TOKEN` when one is set, and SOCKS5 management is
 refused unless one is set and differs from `SECRET_KEY` and the control key.

@@ -52,6 +52,13 @@ enum Request {
         session_key: Option<String>,
         timeout_ms: u32,
     },
+    QuicEndpoints {
+        nodes: Vec<NodeAddress>,
+        session_key: Option<String>,
+        timeout_ms: u32,
+        #[serde(default)]
+        concurrency: u32,
+    },
     HttpLatency {
         proxy_port: u16,
         test_url: String,
@@ -74,6 +81,12 @@ enum Request {
         not(feature = "mac-app-store")
     ))]
     AppProxies(crate::app_proxies::Request),
+}
+
+#[derive(Deserialize)]
+struct NodeAddress {
+    host: String,
+    port: u16,
 }
 
 #[derive(Deserialize)]
@@ -110,6 +123,7 @@ impl Request {
             Self::Nodes { .. }
                 | Self::Groups { .. }
                 | Self::Socks5Endpoint { .. }
+                | Self::QuicEndpoints { .. }
                 | Self::HttpLatency { .. }
                 | Self::ConfigureLogs { .. }
                 | Self::FlushLogs
@@ -353,6 +367,16 @@ fn execute(handle: *mut ProxyHandle, request: Request) -> Result<Value, String> 
                         timeout_ms,
                     ));
             }
+            Request::QuicEndpoints {
+                nodes,
+                session_key,
+                timeout_ms,
+                concurrency,
+            } => {
+                return crate::runtime::control()
+                    .ok_or("Native runtime unavailable")?
+                    .block_on(quic_endpoints(nodes, session_key, timeout_ms, concurrency));
+            }
             Request::HttpLatency {
                 proxy_port,
                 test_url,
@@ -457,15 +481,8 @@ async fn socks5_endpoint(
     session_key: Option<String>,
     timeout_ms: u32,
 ) -> Result<Value, String> {
-    let key = session_key
-        .filter(|key| !key.is_empty())
-        .unwrap_or_else(|| proxy_core::config::DEFAULT_SECRET_KEY.to_string());
-    let timeout = std::time::Duration::from_millis(u64::from(if timeout_ms == 0 {
-        crate::latency::DEFAULT_TIMEOUT_MS
-    } else {
-        timeout_ms
-    }));
-    let endpoint = tokio::time::timeout(timeout, async {
+    let key = catalogue_key(session_key);
+    let endpoint = tokio::time::timeout(operation_timeout(timeout_ms), async {
         let mut client =
             proxy_core::control::ControlClient::connect(&host, port, Some(key)).await?;
         client.get_socks5_endpoint().await
@@ -484,6 +501,99 @@ async fn socks5_endpoint(
         }),
         None => json!({"available": false}),
     })
+}
+
+/// Most nodes asked in one `quic_endpoints` batch, as for probe batches.
+const MAX_QUIC_ENDPOINT_NODES: usize = 4096;
+
+/// Each node's QUIC endpoint, in input order, asked `concurrency` at a time (0
+/// means 16, at most 64). A node's deadline starts when it is admitted. Every
+/// entry is `{"available":true,"port","address"}` for a QUIC listener,
+/// `{"available":false}` when the node has none, or `{"available":false,"error"}`
+/// when it could not be asked: unreachable, or older than the operation.
+async fn quic_endpoints(
+    nodes: Vec<NodeAddress>,
+    session_key: Option<String>,
+    timeout_ms: u32,
+    concurrency: u32,
+) -> Result<Value, String> {
+    if nodes.len() > MAX_QUIC_ENDPOINT_NODES {
+        return Err(format!(
+            "At most {MAX_QUIC_ENDPOINT_NODES} nodes can be asked at once"
+        ));
+    }
+    let key: std::sync::Arc<str> = catalogue_key(session_key).into();
+    let timeout = operation_timeout(timeout_ms);
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(match concurrency {
+        0 => 16,
+        limit => limit.min(64) as usize,
+    }));
+    let asks = nodes
+        .into_iter()
+        .map(|node| {
+            let (key, slots) = (key.clone(), slots.clone());
+            tokio::spawn(async move {
+                let _slot = slots.acquire_owned().await;
+                quic_endpoint(&node, &key, timeout).await
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut endpoints = Vec::with_capacity(asks.len());
+    for ask in asks {
+        endpoints.push(
+            ask.await
+                .unwrap_or_else(|error| json!({"available": false, "error": error.to_string()})),
+        );
+    }
+    Ok(json!({"endpoints": endpoints}))
+}
+
+async fn quic_endpoint(node: &NodeAddress, key: &str, timeout: std::time::Duration) -> Value {
+    let asked = tokio::time::timeout(timeout, async {
+        let mut client =
+            proxy_core::control::ControlClient::connect(&node.host, node.port, Some(key.into()))
+                .await?;
+        client.get_quic_endpoint().await
+    })
+    .await
+    .map_err(|_| "Connection timeout".to_string())
+    .and_then(|asked| asked.map_err(|error| proxy_core::util::error_report(&error)));
+    describe_quic_endpoint(&node.host, asked)
+}
+
+fn describe_quic_endpoint(
+    host: &str,
+    asked: Result<Option<proxy_core::control::QuicEndpoint>, String>,
+) -> Value {
+    match asked.and_then(|endpoint| {
+        endpoint
+            .map(|endpoint| endpoint.upstream(host).map_err(|error| error.to_string()))
+            .transpose()
+    }) {
+        Ok(Some(address)) => json!({
+            "available": true,
+            "port": address.port,
+            "address": format!("{}:{}", address.qualified_host(), address.port),
+        }),
+        Ok(None) => json!({"available": false}),
+        Err(error) => json!({"available": false, "error": error}),
+    }
+}
+
+/// The key a node's catalogue is read with: the configured session key, or the
+/// default key when none is set.
+fn catalogue_key(session_key: Option<String>) -> String {
+    session_key
+        .filter(|key| !key.is_empty())
+        .unwrap_or_else(|| proxy_core::config::DEFAULT_SECRET_KEY.to_string())
+}
+
+fn operation_timeout(timeout_ms: u32) -> std::time::Duration {
+    std::time::Duration::from_millis(u64::from(if timeout_ms == 0 {
+        crate::latency::DEFAULT_TIMEOUT_MS
+    } else {
+        timeout_ms
+    }))
 }
 
 fn subscriptions()
@@ -530,5 +640,85 @@ mod tests {
             }))
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod quic_endpoint_tests {
+    use super::*;
+
+    #[test]
+    fn the_ui_request_parses_and_does_not_borrow_the_handle() {
+        let request: Request = serde_json::from_value(json!({
+            "operation": "quic_endpoints",
+            "nodes": [{"host": "proxy.example", "port": 1081}],
+            "session_key": null,
+            "timeout_ms": 5000,
+        }))
+        .unwrap();
+        assert!(!request.borrows_handle());
+        assert!(matches!(
+            request,
+            Request::QuicEndpoints { concurrency: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn answers_name_the_quic_address_of_the_host_that_was_asked() {
+        let endpoint = proxy_core::control::QuicEndpoint { port: 10811 };
+        assert_eq!(
+            describe_quic_endpoint("proxy.example", Ok(Some(endpoint))),
+            json!({"available": true, "port": 10811, "address": "quic://proxy.example:10811"})
+        );
+        assert_eq!(
+            describe_quic_endpoint("2001:db8::1", Ok(Some(endpoint)))["address"],
+            "quic://[2001:db8::1]:10811"
+        );
+        assert_eq!(
+            describe_quic_endpoint("proxy.example", Ok(None)),
+            json!({"available": false})
+        );
+        assert_eq!(
+            describe_quic_endpoint("proxy.example", Err("unknown variant".into())),
+            json!({"available": false, "error": "unknown variant"})
+        );
+    }
+
+    #[tokio::test]
+    async fn every_node_answers_once_in_order() {
+        // A port nobody listens on refuses at once.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let nodes = (0..3)
+            .map(|_| NodeAddress {
+                host: "127.0.0.1".into(),
+                port: closed,
+            })
+            .collect();
+        let result = quic_endpoints(nodes, None, 2000, 2).await.unwrap();
+        let endpoints = result["endpoints"].as_array().unwrap();
+        assert_eq!(endpoints.len(), 3);
+        for endpoint in endpoints {
+            assert_eq!(endpoint["available"], false);
+            assert!(
+                endpoint["error"]
+                    .as_str()
+                    .is_some_and(|error| !error.is_empty())
+            );
+        }
+        assert_eq!(
+            quic_endpoints(Vec::new(), None, 0, 0).await.unwrap(),
+            json!({"endpoints": []})
+        );
+        let too_many = (0..=MAX_QUIC_ENDPOINT_NODES)
+            .map(|_| NodeAddress {
+                host: "127.0.0.1".into(),
+                port: closed,
+            })
+            .collect();
+        assert!(quic_endpoints(too_many, None, 0, 0).await.is_err());
     }
 }

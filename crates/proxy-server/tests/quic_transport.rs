@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use proxy_core::config::runtime;
-use proxy_core::control::{ControlClient, ControlOp, ControlRequest, ControlResult};
+use proxy_core::control::{ControlClient, ControlOp, ControlRequest, ControlResult, QuicEndpoint};
 use proxy_core::datagram::{DatagramAddress, encode_socks5_udp_packet, parse_socks5_udp_packet};
 use proxy_core::metrics::MetricsStore;
 use proxy_core::nodes::NodeStore;
@@ -179,6 +179,14 @@ async fn scenario() {
             .ok
     );
     drop(control);
+    // Clients learn the QUIC port over either carrier, before choosing one.
+    for (host, port) in [("127.0.0.1", tcp_port), ("quic://127.0.0.1", quic_port)] {
+        let mut client = ControlClient::connect(host, port, None).await.unwrap();
+        assert_eq!(
+            client.get_quic_endpoint().await.unwrap(),
+            Some(QuicEndpoint { port: quic_port })
+        );
+    }
     let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let destination = DatagramAddress::Ip(udp.local_addr().unwrap());
     let udp_task = tokio::spawn(async move {
@@ -285,6 +293,11 @@ async fn scenario() {
     let mut admin = ControlClient::connect("quic://127.0.0.1", relay_quic, None)
         .await
         .unwrap();
+    // Reading it needs no admin token, which this server requires for management.
+    assert_eq!(
+        admin.get_quic_endpoint().await.unwrap(),
+        Some(QuicEndpoint { port: relay_quic })
+    );
     let mut status = None;
     for op in [
         ControlOp::UpdateSocks5Config {
