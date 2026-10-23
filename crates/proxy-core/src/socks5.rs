@@ -368,10 +368,20 @@ const USERINFO: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'~');
 
 impl Socks5Endpoint {
+    /// Public SOCKS host, independent of the carrier used to query the node.
+    pub fn resolved_host<'a>(&'a self, fallback_host: &'a str) -> Cow<'a, str> {
+        if let Some(host) = &self.host {
+            return Cow::Borrowed(host);
+        }
+        crate::upstream::UpstreamAddress::from_host(fallback_host, self.port)
+            .map(|endpoint| Cow::Owned(endpoint.host))
+            .unwrap_or(Cow::Borrowed(fallback_host))
+    }
+
     /// `socks5://user:password@host:port`, using `fallback_host` (the address
     /// the caller reached the node at) unless a host is advertised.
     pub fn url(&self, fallback_host: &str) -> String {
-        let host = self.host.as_deref().unwrap_or(fallback_host);
+        let host = self.resolved_host(fallback_host);
         let host = host.trim_start_matches('[').trim_end_matches(']');
         let host = if host.contains(':') {
             format!("[{host}]")
@@ -881,6 +891,10 @@ mod tests {
         );
         assert_eq!(
             config.endpoint().url("2001:db8::1"),
+            "socks5://relay%20user:p%40ss%3Aword@[2001:db8::1]:1080"
+        );
+        assert_eq!(
+            config.endpoint().url("quic://[2001:db8::1]:10811"),
             "socks5://relay%20user:p%40ss%3Aword@[2001:db8::1]:1080"
         );
         config.advertise = Some("proxy.example:443".into());

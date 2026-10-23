@@ -44,11 +44,16 @@ future connections. Existing authenticated streams retain their original trust.
 There is no insecure certificate mode.
 
 In Flutter, select TCP or QUIC in proxy configuration, or select a node whose
-address includes `quic://`. Saving an endpoint-only change while connected
-updates subsequent negotiations without restarting the local listener.
+address includes `quic://`. Saving an endpoint-only change or selecting a node
+while connected updates subsequent negotiations without restarting the local
+listener, subject to the TUN route constraints below.
 Existing TCP connections, QUIC streams and UDP associations keep their original
 upstream until they end. Switching to an unavailable endpoint therefore affects
 new sessions, not established ones.
+QUIC availability and authentication are checked by the native session dial;
+the UI does not require a TCP listener on the QUIC endpoint's UDP port.
+Managed SOCKS5 sharing links use the node's plain host (or advertised host),
+regardless of which carrier was used to retrieve the link.
 
 The existing `proxy_switch_upstream(handle, host, port)` ABI accepts
 `quic://host`; passing a bare host switches back to TCP. Windows TUN prepares

@@ -478,7 +478,7 @@ async fn socks5_endpoint(
             "available": true,
             "url": endpoint.url(&host),
             "username": endpoint.username,
-            "host": endpoint.host.as_deref().unwrap_or(&host),
+            "host": endpoint.resolved_host(&host),
             "port": endpoint.port,
             "udp": endpoint.udp,
         }),
