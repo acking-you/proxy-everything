@@ -284,7 +284,7 @@ an explicit wire-version choice requiring compatible nodes. See
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `CONTROL_ADMIN_TOKEN` | Admin token for privileged control operations | - |
+| `CONTROL_ADMIN_TOKEN` | Admin token for every control request except ping, node/group lists and the SOCKS5 link; required, and distinct from the keys, for SOCKS5 management | - |
 | `CONTROL_REQUIRE_ENCRYPTION` | Require encryption for control protocol | true |
 | `CONTROL_SESSION_KEY` | Session key for control protocol encryption | - |
 | `NODE_ID` | Stable node identifier | NODE_ADVERTISE_ADDR |
@@ -347,6 +347,15 @@ All commands are sent via the control protocol (ControlClient):
 | `ListGroups` | List all groups |
 | `AddNodeToGroup { group_id, node_id }` | Add node to group |
 | `RemoveNodeFromGroup { group_id, node_id }` | Remove node from group |
+| `GetSocks5Endpoint` | SOCKS5 link details while serving (session key only) |
+| `GetSocks5Status` / `SetSocks5Enabled` / `RotateSocks5Key` / `UpdateSocks5Config` | Manage the SOCKS5 listener |
+| `ListSocks5Sessions` / `CloseSocks5Sessions` | Inspect and close SOCKS5 sessions |
+
+`Ping`, `ListNodes`, `ListGroups` and `GetSocks5Endpoint` are client-readable
+(`ControlOp::is_client_readable`): they need only the session key. Everything
+else needs `CONTROL_ADMIN_TOKEN` when one is set, and SOCKS5 management is
+refused unless one is set and differs from `SECRET_KEY` and the control key.
+See `docs/managed-socks5.md`.
 
 ### Usage Example (via ControlClient)
 
@@ -403,7 +412,8 @@ Relay configuration is automatically persisted to:
 ```
 ~/.proxy-everything/
 ├── nodes.json      # Nodes and groups
-└── relay.json      # Relay configuration
+├── relay.json      # Relay configuration
+└── socks5.json     # Managed SOCKS5 settings and credentials (0600)
 ```
 
 ### Backward Compatibility
@@ -422,6 +432,8 @@ For programmatic server setup, use `ServerConfig`:
 use std::sync::Arc;
 use proxy_core::metrics::MetricsStore;
 use proxy_core::nodes::NodeStore;
+use proxy_core::config::default_state_dir;
+use proxy_server::server::Socks5Manager;
 use proxy_server::{RelayManager, ServerConfig, run_server_with_listener};
 
 // Create stores
@@ -431,11 +443,13 @@ let relay = Arc::new(RelayManager::with_default_path(nodes.clone()));
 
 // Configure server
 let config = ServerConfig {
+    socks5: Arc::new(Socks5Manager::load(default_state_dir().join("socks5.json"))),
     metrics,
     nodes,
     relay,
     admin_token: Some("secret-admin-token".to_string()),
     require_control_encryption: true,
+    require_secure_transport: false,
     control_session_key: Some("a-32-byte-long-session-key-here".to_string()),
     self_node_id: Some("node-1".to_string()),
 };
@@ -450,11 +464,13 @@ run_server_with_listener(listener, config, cancel, None).await;
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `socks5` | `Arc<Socks5Manager>` | Managed SOCKS5 listener; `Socks5Manager::in_memory()` for tests |
 | `metrics` | `Arc<MetricsStore>` | Connection metrics storage |
 | `nodes` | `Arc<NodeStore>` | Node and group management |
 | `relay` | `Arc<RelayManager>` | Dynamic relay configuration |
 | `admin_token` | `Option<String>` | Token for privileged operations |
 | `require_control_encryption` | `bool` | Require encrypted control protocol |
+| `require_secure_transport` | `bool` | Refuse legacy transport (v3 only) |
 | `control_session_key` | `Option<String>` | Key for control protocol encryption |
 | `self_node_id` | `Option<String>` | This server's node identifier |
 

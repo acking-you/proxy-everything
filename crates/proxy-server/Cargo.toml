@@ -20,6 +20,10 @@ sysinfo = { workspace = true }
 ureq = { workspace = true }
 parking_lot = { workspace = true }
 smallvec = { workspace = true }
+ring = { workspace = true }
+base64 = { workspace = true }
+ipnet = { workspace = true }
+tempfile = "3"
 socket2 = { version = "0.6.5", features = ["all"] }
 internet-checksum = "0.2.1"
 

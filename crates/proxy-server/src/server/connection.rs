@@ -30,7 +30,13 @@ use super::{
 static HEADER_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(512);
 const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 
-struct ActiveConnection<'a>(&'a MetricsStore);
+pub(super) struct ActiveConnection<'a>(&'a MetricsStore);
+impl<'a> ActiveConnection<'a> {
+    pub(super) fn new(metrics: &'a MetricsStore) -> Self {
+        metrics.inc_active();
+        Self(metrics)
+    }
+}
 impl Drop for ActiveConnection<'_> {
     fn drop(&mut self) {
         self.0.dec_active();
@@ -71,7 +77,7 @@ async fn proxy_with_metrics<
     })
 }
 
-async fn proxy_with_metrics_normal<
+pub(super) async fn proxy_with_metrics_normal<
     R: MyAsyncReadExt + Send + Unpin,
     W: MyAsyncWriteExt + Send + Unpin,
 >(
@@ -108,6 +114,27 @@ async fn proxy_with_metrics_cryptor<
     .await
 }
 
+/// Carry a local client's plaintext through a legacy native session to an
+/// upstream node: the reverse of `proxy_with_metrics_cryptor`.
+pub(super) async fn proxy_with_metrics_upstream_session<
+    R: MyAsyncReadExt + Send + Unpin,
+    W: MyAsyncWriteExt + Send + Unpin,
+>(
+    key: &str,
+    client_reader: R,
+    server_reader: R,
+    client_writer: W,
+    server_writer: W,
+) -> Result<TransferStats> {
+    proxy_with_metrics(
+        proxy_core::get_encryptor_codec(key, client_reader).context(ProxySnafu)?,
+        proxy_core::get_decryptor_codec(&key, server_reader).context(ProxySnafu)?,
+        client_writer,
+        server_writer,
+    )
+    .await
+}
+
 /// Handle a new TCP connection with a per-connection tracing span.
 ///
 /// This attaches a `trace_id` to all logs emitted during the connection's
@@ -127,8 +154,7 @@ pub(super) async fn handle_connect(
     );
     async move {
         tracing::info!("connection accepted");
-        ctx.metrics.inc_active();
-        let _active = ActiveConnection(&ctx.metrics);
+        let _active = ActiveConnection::new(&ctx.metrics);
         let result = handle_connect_inner(conn, peer_addr, ctx.clone(), trace_id).await;
         if let Err(err) = &result {
             tracing::error!("connection error: {}", error_report(err));
@@ -358,7 +384,7 @@ async fn handle_connect_inner(
                 if secure { None } else { session_key },
             )
             .context(ControlSnafu)?;
-            return handle_control_session(codec, ctx).await;
+            return handle_control_session(codec, ctx, secure || session_key.is_some()).await;
         }
     }
 
@@ -592,7 +618,7 @@ async fn handle_connect_inner(
     result.map(|_| ())
 }
 
-fn record_connection(
+pub(super) fn record_connection(
     ctx: &ServerContext,
     peer_ip: &str,
     dest_host: &str,

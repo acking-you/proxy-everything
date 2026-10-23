@@ -245,27 +245,28 @@ pub enum ProxyError {
 /// Unified Result type alias.
 pub type Result<T, E = ProxyError> = std::result::Result<T, E>;
 
+/// Whether an I/O error only means the peer went away.
+pub fn is_disconnect(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+
+    matches!(
+        error.kind(),
+        ErrorKind::UnexpectedEof
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::BrokenPipe
+            | ErrorKind::NotConnected
+            | ErrorKind::TimedOut
+    )
+}
+
 impl ProxyError {
     pub fn is_expected_disconnect(&self) -> bool {
-        use std::io::ErrorKind;
-
-        let is_expected = |kind: ErrorKind| {
-            matches!(
-                kind,
-                ErrorKind::UnexpectedEof
-                    | ErrorKind::ConnectionReset
-                    | ErrorKind::ConnectionAborted
-                    | ErrorKind::BrokenPipe
-                    | ErrorKind::NotConnected
-                    | ErrorKind::TimedOut
-            )
-        };
-
         match self {
             ProxyError::Relay { source, .. } => source.is_expected_disconnect(),
             ProxyError::Io { source, .. }
             | ProxyError::ProtocolIo { source, .. }
-            | ProxyError::CodecRead { source } => is_expected(source.kind()),
+            | ProxyError::CodecRead { source } => is_disconnect(source),
             _ => false,
         }
     }

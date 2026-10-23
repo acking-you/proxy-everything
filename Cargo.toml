@@ -20,7 +20,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.6.8"
+version = "0.6.9"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/acking-you/proxy-everything"
@@ -75,6 +75,8 @@ reqwest = { version = "0.13", default-features = false, features = [
 rustls = { version = "0.23.45", default-features = false, features = ["std", "ring", "tls12"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 tokio-socks = "0.5.3"
+ipnet = { version = "2.12", features = ["serde"] }
+percent-encoding = "2"
 uni-stream = { path = "deps/uni-stream" }
 
 # Geo

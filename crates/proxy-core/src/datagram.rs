@@ -15,16 +15,16 @@ use tokio::net::{TcpStream, UdpSocket};
 
 use crate::protocol::{FrameReader, FrameWriter};
 use crate::relay::{ExternalProxyKind, ExternalProxyTarget};
+use crate::socks5::{
+    METHOD_NO_AUTH as SOCKS5_NO_AUTH, METHOD_NONE_ACCEPTABLE as SOCKS5_NO_ACCEPTABLE_METHOD,
+    METHOD_USERNAME_PASSWORD as SOCKS5_USERNAME_PASSWORD, UDP_ASSOCIATE as SOCKS5_UDP_ASSOCIATE,
+    VERSION as SOCKS5_VERSION,
+};
 use crate::{MyAsyncReadExt, MyAsyncWriteExt, ProxyError};
 
-const SOCKS5_VERSION: u8 = 0x05;
-const SOCKS5_NO_AUTH: u8 = 0x00;
-const SOCKS5_USERNAME_PASSWORD: u8 = 0x02;
-const SOCKS5_NO_ACCEPTABLE_METHOD: u8 = 0xff;
-const SOCKS5_UDP_ASSOCIATE: u8 = 0x03;
-const SOCKS5_ATYP_IPV4: u8 = 0x01;
-const SOCKS5_ATYP_DOMAIN: u8 = 0x03;
-const SOCKS5_ATYP_IPV6: u8 = 0x04;
+pub(crate) const SOCKS5_ATYP_IPV4: u8 = 0x01;
+pub(crate) const SOCKS5_ATYP_DOMAIN: u8 = 0x03;
+pub(crate) const SOCKS5_ATYP_IPV6: u8 = 0x04;
 const AES_GCM_TAG_LEN: usize = 16;
 #[cfg(test)]
 const DATAGRAM_FRAME_PREFIX_SIZE: usize = 8;
@@ -64,7 +64,7 @@ impl DatagramAddress {
         }
     }
 
-    async fn resolve(&self) -> crate::Result<Vec<SocketAddr>> {
+    pub async fn resolve(&self) -> crate::Result<Vec<SocketAddr>> {
         match self {
             Self::Ip(addr) => Ok(vec![*addr]),
             Self::Domain(host, port) => {
@@ -483,7 +483,9 @@ async fn create_socks5_datagram_relay_inner(
             reply_prefix[1]
         ));
     }
-    let relay_address = read_socks5_address(&mut control).await?;
+    let relay_address = crate::socks5::read_address(&mut control)
+        .await
+        .map_err(|source| upstream_io("read SOCKS5 relay address", source))?;
     let relay_addr =
         resolve_relay_address(&relay_address, control.peer_addr().ok(), local_udp_addr).await?;
 
@@ -811,68 +813,6 @@ async fn authenticate_socks5_password(
         return protocol_error("upstream SOCKS5 username/password authentication failed");
     }
     Ok(())
-}
-
-async fn read_socks5_address(control: &mut TcpStream) -> crate::Result<DatagramAddress> {
-    let atyp = control
-        .read_u8()
-        .await
-        .map_err(|source| upstream_io("read SOCKS5 address type", source))?;
-    match atyp {
-        SOCKS5_ATYP_IPV4 => {
-            let mut octets = [0u8; 4];
-            control
-                .read_exact(&mut octets)
-                .await
-                .map_err(|source| upstream_io("read SOCKS5 IPv4 address", source))?;
-            let port = control
-                .read_u16()
-                .await
-                .map_err(|source| upstream_io("read SOCKS5 IPv4 port", source))?;
-            Ok(DatagramAddress::Ip(SocketAddr::new(
-                Ipv4Addr::from(octets).into(),
-                port,
-            )))
-        }
-        SOCKS5_ATYP_IPV6 => {
-            let mut octets = [0u8; 16];
-            control
-                .read_exact(&mut octets)
-                .await
-                .map_err(|source| upstream_io("read SOCKS5 IPv6 address", source))?;
-            let port = control
-                .read_u16()
-                .await
-                .map_err(|source| upstream_io("read SOCKS5 IPv6 port", source))?;
-            Ok(DatagramAddress::Ip(SocketAddr::new(
-                Ipv6Addr::from(octets).into(),
-                port,
-            )))
-        }
-        SOCKS5_ATYP_DOMAIN => {
-            let len = control
-                .read_u8()
-                .await
-                .map_err(|source| upstream_io("read SOCKS5 domain length", source))?
-                as usize;
-            let mut domain = vec![0u8; len];
-            control
-                .read_exact(&mut domain)
-                .await
-                .map_err(|source| upstream_io("read SOCKS5 domain", source))?;
-            let port = control
-                .read_u16()
-                .await
-                .map_err(|source| upstream_io("read SOCKS5 domain port", source))?;
-            let domain = String::from_utf8(domain).map_err(|_| ProxyError::Protocol {
-                detail: "upstream SOCKS5 returned a non-UTF-8 domain".to_string(),
-            })?;
-            Ok(DatagramAddress::Domain(domain, port))
-        }
-        _ => protocol_error(format!(
-            "upstream SOCKS5 returned unsupported address type {atyp:#x}"
-        )),
-    }
 }
 
 async fn resolve_relay_address(

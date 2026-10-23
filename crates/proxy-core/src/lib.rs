@@ -29,6 +29,7 @@ pub mod relay;
 pub mod rlimit;
 pub mod secure_transport;
 pub mod session;
+pub mod socks5;
 pub mod transport;
 pub mod util;
 

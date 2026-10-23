@@ -46,6 +46,12 @@ enum Request {
         session_key: Option<String>,
         timeout_ms: u32,
     },
+    Socks5Endpoint {
+        server_host: String,
+        server_port: u16,
+        session_key: Option<String>,
+        timeout_ms: u32,
+    },
     HttpLatency {
         proxy_port: u16,
         test_url: String,
@@ -103,6 +109,7 @@ impl Request {
             self,
             Self::Nodes { .. }
                 | Self::Groups { .. }
+                | Self::Socks5Endpoint { .. }
                 | Self::HttpLatency { .. }
                 | Self::ConfigureLogs { .. }
                 | Self::FlushLogs
@@ -331,6 +338,21 @@ fn execute(handle: *mut ProxyHandle, request: Request) -> Result<Value, String> 
                 crate::proxy_free_groups_result(&mut result);
                 return Ok(response);
             }
+            Request::Socks5Endpoint {
+                server_host,
+                server_port,
+                session_key,
+                timeout_ms,
+            } => {
+                return crate::runtime::control()
+                    .ok_or("Native runtime unavailable")?
+                    .block_on(socks5_endpoint(
+                        server_host,
+                        server_port,
+                        session_key,
+                        timeout_ms,
+                    ));
+            }
             Request::HttpLatency {
                 proxy_port,
                 test_url,
@@ -425,6 +447,43 @@ fn execute(handle: *mut ProxyHandle, request: Request) -> Result<Value, String> 
         }
     };
     Ok(json!({"code": code as i32}))
+}
+
+/// A node's SOCKS5 link, read with the same key as its node catalogue.
+/// `available` is false while the node is not serving SOCKS5.
+async fn socks5_endpoint(
+    host: String,
+    port: u16,
+    session_key: Option<String>,
+    timeout_ms: u32,
+) -> Result<Value, String> {
+    let key = session_key
+        .filter(|key| !key.is_empty())
+        .unwrap_or_else(|| proxy_core::config::DEFAULT_SECRET_KEY.to_string());
+    let timeout = std::time::Duration::from_millis(u64::from(if timeout_ms == 0 {
+        crate::latency::DEFAULT_TIMEOUT_MS
+    } else {
+        timeout_ms
+    }));
+    let endpoint = tokio::time::timeout(timeout, async {
+        let mut client =
+            proxy_core::control::ControlClient::connect(&host, port, Some(key)).await?;
+        client.get_socks5_endpoint().await
+    })
+    .await
+    .map_err(|_| "Connection timeout".to_string())?
+    .map_err(|error| proxy_core::util::error_report(&error))?;
+    Ok(match endpoint {
+        Some(endpoint) => json!({
+            "available": true,
+            "url": endpoint.url(&host),
+            "username": endpoint.username,
+            "host": endpoint.host.as_deref().unwrap_or(&host),
+            "port": endpoint.port,
+            "udp": endpoint.udp,
+        }),
+        None => json!({"available": false}),
+    })
 }
 
 fn subscriptions()

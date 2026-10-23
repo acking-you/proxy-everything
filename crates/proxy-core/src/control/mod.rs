@@ -50,6 +50,7 @@ use crate::metrics::{
 use crate::nodes::{NodeGroup, NodeInfo};
 use crate::protocol::{FrameReader, FrameWriter, MAX_DATA_SIZE};
 use crate::relay::{LoadBalanceAlgo, RelayConfig, RelayStatus, UpstreamTarget};
+use crate::socks5::{Socks5Endpoint, Socks5Session, Socks5Status, Socks5Update};
 use crate::transport::{TransportError, get_tcp_proxy_stream};
 use crate::{MyAsyncReadExt, MyAsyncWriteExt, ProxyError};
 
@@ -140,6 +141,28 @@ pub enum ControlOp {
     },
     GetRelayStatus,
 
+    // Managed, authenticated SOCKS5 listener. Existing wire variants are unchanged.
+    GetSocks5Status,
+    SetSocks5Enabled {
+        enabled: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        listen: Option<std::net::SocketAddr>,
+    },
+    RotateSocks5Key,
+    UpdateSocks5Config {
+        update: Socks5Update,
+    },
+    ListSocks5Sessions,
+    /// Close one session, every session from one client address, or all.
+    CloseSocks5Sessions {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer: Option<std::net::IpAddr>,
+    },
+    /// How a proxy user connects; absent while the listener is not running.
+    GetSocks5Endpoint,
+
     // Metrics queries
     GetRealtimeStats,
     GetRecentConnections,
@@ -149,6 +172,17 @@ pub enum ControlOp {
     GetTopN {
         category: TopCategory,
     },
+}
+
+impl ControlOp {
+    /// Reads a proxy user needs, allowed with the session key alone. Every
+    /// other operation requires the admin token when one is configured.
+    pub fn is_client_readable(&self) -> bool {
+        matches!(
+            self,
+            Self::Ping | Self::ListNodes | Self::ListGroups | Self::GetSocks5Endpoint
+        )
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -167,6 +201,10 @@ pub enum ControlResult {
     Groups { groups: Vec<NodeGroup> },
     RelayConfig { config: RelayConfig },
     RelayStatus { status: RelayStatus },
+    Socks5Status { status: Socks5Status },
+    Socks5Sessions { sessions: Vec<Socks5Session> },
+    Socks5SessionsClosed { closed: usize },
+    Socks5Endpoint { endpoint: Option<Socks5Endpoint> },
     RealtimeStats { stats: RealtimeSnapshot },
     Connections { connections: Vec<ConnectionRecord> },
     TimeBuckets { buckets: Vec<TimeBucket> },
@@ -318,6 +356,26 @@ impl ControlClient {
             _ => Err(ControlError::Protocol {
                 source: ProxyError::Protocol {
                     detail: "unexpected response type for list_nodes".to_string(),
+                },
+            }),
+        }
+    }
+
+    /// The node's SOCKS5 endpoint, or `None` when it is not serving one.
+    pub async fn get_socks5_endpoint(&mut self) -> Result<Option<Socks5Endpoint>> {
+        let resp = self
+            .request(ControlRequest {
+                token: None,
+                op: ControlOp::GetSocks5Endpoint,
+            })
+            .await?;
+        match resp.result {
+            Some(ControlResult::Socks5Endpoint { endpoint }) if resp.ok => Ok(endpoint),
+            _ => Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: resp
+                        .error
+                        .unwrap_or_else(|| "unexpected response type for socks5 endpoint".into()),
                 },
             }),
         }

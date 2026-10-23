@@ -60,6 +60,7 @@ async fn protocol_round_trips(protocol: WireProtocol) {
         require_control_encryption: true,
         require_secure_transport: protocol == WireProtocol::V3,
         control_session_key: Some(DEFAULT_SECRET_KEY.to_string()),
+        socks5: std::sync::Arc::new(proxy_server::server::Socks5Manager::in_memory().unwrap()),
         self_node_id: None,
     };
     let server_cancel = CancellationToken::new();
