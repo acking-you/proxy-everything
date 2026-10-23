@@ -52,6 +52,7 @@ use crate::protocol::{FrameReader, FrameWriter, MAX_DATA_SIZE};
 use crate::relay::{LoadBalanceAlgo, RelayConfig, RelayStatus, UpstreamTarget};
 use crate::socks5::{Socks5Endpoint, Socks5Session, Socks5Status, Socks5Update};
 use crate::transport::{TransportError, get_tcp_proxy_stream};
+use crate::upstream::{Carrier, UpstreamAddress};
 use crate::{MyAsyncReadExt, MyAsyncWriteExt, ProxyError};
 
 pub const CONTROL_HOST: &str = "__control__";
@@ -162,6 +163,8 @@ pub enum ControlOp {
     },
     /// How a proxy user connects; absent while the listener is not running.
     GetSocks5Endpoint,
+    /// The UDP port this node serves QUIC on; absent without a QUIC listener.
+    GetQuicEndpoint,
 
     // Metrics queries
     GetRealtimeStats,
@@ -180,8 +183,30 @@ impl ControlOp {
     pub fn is_client_readable(&self) -> bool {
         matches!(
             self,
-            Self::Ping | Self::ListNodes | Self::ListGroups | Self::GetSocks5Endpoint
+            Self::Ping
+                | Self::ListNodes
+                | Self::ListGroups
+                | Self::GetSocks5Endpoint
+                | Self::GetQuicEndpoint
         )
+    }
+}
+
+/// Where a node accepts the QUIC carrier. Clients dial the host they reached
+/// the node at, so its certificate must cover that name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuicEndpoint {
+    pub port: u16,
+}
+
+impl QuicEndpoint {
+    /// The QUIC address of the node reached at `host`, which may itself carry
+    /// a `tcp://` or `quic://` scheme.
+    pub fn upstream(&self, host: &str) -> std::io::Result<UpstreamAddress> {
+        let mut address = UpstreamAddress::from_host(host, self.port)?;
+        address.port = self.port;
+        address.carrier = Carrier::Quic;
+        Ok(address)
     }
 }
 
@@ -205,6 +230,7 @@ pub enum ControlResult {
     Socks5Sessions { sessions: Vec<Socks5Session> },
     Socks5SessionsClosed { closed: usize },
     Socks5Endpoint { endpoint: Option<Socks5Endpoint> },
+    QuicEndpoint { endpoint: Option<QuicEndpoint> },
     RealtimeStats { stats: RealtimeSnapshot },
     Connections { connections: Vec<ConnectionRecord> },
     TimeBuckets { buckets: Vec<TimeBucket> },
@@ -376,6 +402,27 @@ impl ControlClient {
                     detail: resp
                         .error
                         .unwrap_or_else(|| "unexpected response type for socks5 endpoint".into()),
+                },
+            }),
+        }
+    }
+
+    /// The node's QUIC endpoint, or `None` when it has no QUIC listener. A node
+    /// that predates the operation answers with an error.
+    pub async fn get_quic_endpoint(&mut self) -> Result<Option<QuicEndpoint>> {
+        let resp = self
+            .request(ControlRequest {
+                token: None,
+                op: ControlOp::GetQuicEndpoint,
+            })
+            .await?;
+        match resp.result {
+            Some(ControlResult::QuicEndpoint { endpoint }) if resp.ok => Ok(endpoint),
+            _ => Err(ControlError::Protocol {
+                source: ProxyError::Protocol {
+                    detail: resp
+                        .error
+                        .unwrap_or_else(|| "unexpected response type for quic endpoint".into()),
                 },
             }),
         }
@@ -836,4 +883,50 @@ impl ControlClient {
 
 pub fn is_control_target(host: &str, port: u16) -> bool {
     host == CONTROL_HOST && port == CONTROL_PORT
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quic_endpoint_is_client_readable_with_a_stable_wire_shape() {
+        assert!(ControlOp::GetQuicEndpoint.is_client_readable());
+        let request: ControlRequest =
+            serde_json::from_str(r#"{"token":null,"type":"get_quic_endpoint"}"#).unwrap();
+        assert!(matches!(request.op, ControlOp::GetQuicEndpoint));
+        for (endpoint, wire) in [
+            (
+                Some(QuicEndpoint { port: 10811 }),
+                serde_json::json!({"type":"quic_endpoint","endpoint":{"port":10811}}),
+            ),
+            (
+                None,
+                serde_json::json!({"type":"quic_endpoint","endpoint":null}),
+            ),
+        ] {
+            let result = ControlResult::QuicEndpoint { endpoint };
+            assert_eq!(serde_json::to_value(&result).unwrap(), wire);
+        }
+    }
+
+    #[test]
+    fn quic_endpoint_keeps_the_reached_host_and_switches_the_carrier() {
+        let endpoint = QuicEndpoint { port: 10811 };
+        for host in [
+            "proxy.example",
+            "tcp://proxy.example:1081",
+            "quic://proxy.example:9",
+        ] {
+            let address = endpoint.upstream(host).unwrap();
+            assert_eq!(
+                (address.host.as_str(), address.port, address.carrier),
+                ("proxy.example", 10811, Carrier::Quic)
+            );
+        }
+        assert_eq!(
+            endpoint.upstream("2001:db8::1").unwrap().qualified_host(),
+            "quic://[2001:db8::1]"
+        );
+    }
 }

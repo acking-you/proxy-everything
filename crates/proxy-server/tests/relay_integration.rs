@@ -448,3 +448,15 @@ async fn test_remove_invalid_relay_target_fails() {
     cancel.cancel();
     let _ = std::fs::remove_dir_all(&test_dir);
 }
+
+#[tokio::test]
+async fn a_server_without_a_quic_listener_reports_no_quic_endpoint() {
+    let (addr, cancel, test_dir) = setup_test_server().await;
+    let (host, port) = addr.split_once(':').unwrap();
+    let mut client = ControlClient::connect(host, port.parse().unwrap(), None)
+        .await
+        .unwrap();
+    assert_eq!(client.get_quic_endpoint().await.unwrap(), None);
+    cancel.cancel();
+    let _ = std::fs::remove_dir_all(&test_dir);
+}
