@@ -1252,7 +1252,7 @@ dependencies = [
 
 [[package]]
 name = "galaxy-geometry"
-version = "0.6.9"
+version = "0.6.10"
 
 [[package]]
 name = "generic-array"
@@ -2919,7 +2919,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-client"
-version = "0.6.9"
+version = "0.6.10"
 dependencies = [
  "anyhow",
  "async-broadcast",
@@ -2958,7 +2958,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-core"
-version = "0.6.9"
+version = "0.6.10"
 dependencies = [
  "arc-swap",
  "async-broadcast",
@@ -3003,7 +3003,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-crypto"
-version = "0.6.9"
+version = "0.6.10"
 dependencies = [
  "futures",
  "ring",
@@ -3012,7 +3012,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-ffi"
-version = "0.6.9"
+version = "0.6.10"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -3034,7 +3034,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-server"
-version = "0.6.9"
+version = "0.6.10"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -3061,7 +3061,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-tui"
-version = "0.6.9"
+version = "0.6.10"
 dependencies = [
  "chrono",
  "clap",
@@ -3075,7 +3075,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-ui-services"
-version = "0.6.9"
+version = "0.6.10"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -3100,7 +3100,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-updater"
-version = "0.6.9"
+version = "0.6.10"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
