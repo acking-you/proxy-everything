@@ -410,17 +410,8 @@ impl Drop for Egress<'_> {
 }
 
 fn split_node(addr: &str) -> io::Result<(String, u16)> {
-    addr.rsplit_once(':')
-        .and_then(|(host, port)| {
-            let host = host.trim_start_matches('[').trim_end_matches(']');
-            Some((host.to_string(), port.parse().ok()?))
-        })
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("invalid relay node {addr}"),
-            )
-        })
+    let endpoint = proxy_core::upstream::UpstreamAddress::parse(addr)?;
+    Ok((endpoint.qualified_host(), endpoint.port))
 }
 
 fn transport_error(error: impl std::error::Error) -> io::Error {

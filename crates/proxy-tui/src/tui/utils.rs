@@ -22,14 +22,8 @@ impl Drop for TerminalGuard {
 
 /// Parse address string into host and port.
 pub fn parse_addr(addr: &str) -> Result<(String, u16), String> {
-    let parts: Vec<&str> = addr.rsplitn(2, ':').collect();
-    if parts.len() != 2 {
-        return Err(format!("Invalid address: {}", addr));
-    }
-    let port = parts[0]
-        .parse::<u16>()
-        .map_err(|_| format!("Invalid port: {}", parts[0]))?;
-    Ok((parts[1].to_string(), port))
+    let endpoint = proxy_core::upstream::UpstreamAddress::parse(addr).map_err(|e| e.to_string())?;
+    Ok((endpoint.qualified_host(), endpoint.port))
 }
 
 /// Format bytes into human-readable string with proper units.

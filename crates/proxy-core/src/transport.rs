@@ -358,13 +358,13 @@ pub(crate) async fn get_proxy_stream(
     uri: &str,
     protocol: WireProtocol,
 ) -> Result<ProxyStream> {
-    let stream = get_tcp_stream(proxy_server, proxy_server_port, detail).await?;
+    let stream = get_upstream_stream(proxy_server, proxy_server_port, detail).await?;
     setup_proxy_stream(proxy_header, stream, uri, protocol).await
 }
 
 pub(crate) async fn setup_proxy_stream(
     proxy_header: &ProxyHeader,
-    mut proxy_server_stream: TcpStream,
+    mut proxy_server_stream: crate::upstream::CarrierStream,
     uri: &str,
     protocol: WireProtocol,
 ) -> Result<ProxyStream> {
@@ -443,7 +443,7 @@ pub(crate) async fn setup_proxy_stream(
     })
     .and_then(|result| result);
     if written.is_err() {
-        crate::diagnostics::record_socket("proxy_header_write_failed", &proxy_server_stream);
+        proxy_server_stream.record_diagnostics("proxy_header_write_failed");
     }
     written.with_context(|_| IoSnafu {
         uri: Some(uri.to_string()),
@@ -617,6 +617,20 @@ pub async fn read_http_header(
         header.extend_from_slice(&chunk[..consume]);
     }
     Ok(())
+}
+
+/// Open a native upstream using the carrier selected for this negotiation.
+pub async fn get_upstream_stream(
+    host: &str,
+    port: u16,
+    detail: &'static str,
+) -> Result<crate::upstream::CarrierStream> {
+    let endpoint = crate::upstream::UpstreamAddress::from_host(host, port)
+        .context(IoSnafu { uri: None, detail })?;
+    endpoint
+        .connect()
+        .await
+        .context(IoSnafu { uri: None, detail })
 }
 
 #[cfg(test)]

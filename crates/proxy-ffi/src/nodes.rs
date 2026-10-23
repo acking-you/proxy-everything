@@ -151,7 +151,11 @@ pub unsafe extern "C" fn proxy_get_server_nodes(
         // Extract IPs from node addresses for geo query
         let ips: Vec<String> = nodes
             .iter()
-            .filter_map(|n| n.addr.split(':').next().map(|s| s.to_string()))
+            .filter_map(|n| {
+                proxy_core::upstream::UpstreamAddress::parse(&n.addr)
+                    .ok()
+                    .map(|a| a.host)
+            })
             .collect();
 
         // Query geo info
@@ -160,8 +164,10 @@ pub unsafe extern "C" fn proxy_get_server_nodes(
         // Convert to C-compatible format
         let mut c_nodes: Vec<NodeInfoWithGeo> = Vec::with_capacity(nodes.len());
         for node in &nodes {
-            let ip = node.addr.split(':').next().unwrap_or("");
-            let country = geo_map.get(ip).cloned().unwrap_or_default();
+            let ip = proxy_core::upstream::UpstreamAddress::parse(&node.addr)
+                .map(|a| a.host)
+                .unwrap_or_default();
+            let country = geo_map.get(&ip).cloned().unwrap_or_default();
 
             c_nodes.push(NodeInfoWithGeo {
                 node_id: CString::new(node.node_id.clone()).unwrap().into_raw(),

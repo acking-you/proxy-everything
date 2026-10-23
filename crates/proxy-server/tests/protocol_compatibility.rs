@@ -53,6 +53,7 @@ async fn current_server_accepts_legacy_tcp_header_without_transport() {
     std::fs::create_dir_all(&state_dir).unwrap();
     let nodes = Arc::new(NodeStore::new(state_dir.join("nodes.json")));
     let server_config = ServerConfig {
+        quic_endpoint: None,
         metrics: Arc::new(MetricsStore::with_default_config()),
         relay: Arc::new(RelayManager::new(nodes.clone(), &state_dir)),
         nodes,

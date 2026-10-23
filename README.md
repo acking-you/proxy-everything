@@ -68,6 +68,11 @@ Upgrade every relay/server before enabling **Low-latency encrypted transport
 The unused challenge transport has been removed. See the
 [wire format, replay boundary and migration guide](docs/secure-transport-v3.md).
 
+Native upstreams also support verified TLS 1.3 QUIC alongside TCP. Choose
+`quic://host:port` per node or negotiation; live endpoint changes affect new
+sessions while existing streams continue on their original carrier. Bare
+addresses remain TCP. See [QUIC setup, live switching and limits](docs/quic-transport.md).
+
 ## TUN ping
 
 TUN now forwards IPv4/IPv6 ICMP Echo through the configured native proxy exit,

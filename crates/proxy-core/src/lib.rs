@@ -25,12 +25,14 @@ pub mod geo;
 pub mod metrics;
 pub mod nodes;
 pub mod protocol;
+pub mod quic;
 pub mod relay;
 pub mod rlimit;
 pub mod secure_transport;
 pub mod session;
 pub mod socks5;
 pub mod transport;
+pub mod upstream;
 pub mod util;
 
 // ============================================================================

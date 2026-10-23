@@ -51,6 +51,7 @@ impl Server {
             relay.set_enabled(true);
         }
         let config = ServerConfig {
+            quic_endpoint: None,
             socks5: manager.clone(),
             metrics: Arc::new(MetricsStore::with_default_config()),
             relay,

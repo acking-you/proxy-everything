@@ -313,6 +313,15 @@ impl RelayManager {
 }
 
 async fn ping_target(target: &proxy_core::relay::TargetStatus) -> bool {
+    if target.addr.starts_with("quic://") {
+        let Ok(endpoint) = proxy_core::upstream::UpstreamAddress::parse(&target.addr) else {
+            return false;
+        };
+        return matches!(
+            tokio::time::timeout(PING_TIMEOUT, endpoint.connect()).await,
+            Ok(Ok(_))
+        );
+    }
     let result = if target.addr.starts_with("http://")
         || target.addr.starts_with("socks5://")
         || target.addr.starts_with("socks5h://")

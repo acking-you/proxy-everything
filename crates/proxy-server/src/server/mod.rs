@@ -70,6 +70,7 @@ mod connection;
 mod control;
 mod discovery;
 mod icmp;
+mod quic_listener;
 mod relay;
 mod socks5;
 mod udp;
@@ -168,6 +169,7 @@ impl ServerContext {
 /// Server configuration for testing.
 #[derive(Clone)]
 pub struct ServerConfig {
+    pub quic_endpoint: Option<Arc<proxy_core::quic::EndpointOwner>>,
     pub socks5: Arc<Socks5Manager>,
     pub metrics: Arc<MetricsStore>,
     pub nodes: Arc<NodeStore>,
@@ -183,6 +185,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         let nodes = Arc::new(NodeStore::with_default_path());
         Self {
+            quic_endpoint: None,
             socks5: Arc::new(Socks5Manager::in_memory().expect("OS random generator unavailable")),
             metrics: Arc::new(MetricsStore::with_default_config()),
             relay: Arc::new(RelayManager::with_default_path(nodes.clone())),
@@ -256,6 +259,7 @@ pub async fn run_server_with_listener(
     cancel_token: CancellationToken,
     tracker: Option<TaskTracker>,
 ) {
+    let quic_endpoint = config.quic_endpoint.clone();
     config.metrics.init_realtime();
 
     // Spawn system stats collector (every 5s) with cancellation support
@@ -391,6 +395,14 @@ pub async fn run_server_with_listener(
         relay_for_health.run_health_checks(relay_cancel).await;
     });
 
+    let quic_task = quic_endpoint.as_ref().map(|endpoint| {
+        tokio::spawn(quic_listener::run(
+            endpoint.clone(),
+            ctx.clone(),
+            cancel_token.clone(),
+        ))
+    });
+
     // Node sync is change-driven; no periodic background sync.
 
     loop {
@@ -401,7 +413,7 @@ pub async fn run_server_with_listener(
                         let ctx = ctx.clone();
                         let token = cancel_token.clone();
                         let task = async move {
-                            let _ = handle_connect(socket, peer_addr, ctx).await;
+                            let _ = handle_connect(socket.into(), peer_addr, ctx).await;
                         };
                         let wrapped_task = async move {
                             tokio::select! {
@@ -425,11 +437,48 @@ pub async fn run_server_with_listener(
             }
         }
     }
+    if let Some(task) = quic_task {
+        let _ = task.await;
+    }
     ctx.socks5.shutdown().await;
 }
 
 #[tracing::instrument]
 pub async fn start_server(host: impl AsRef<str> + Debug, port: u16) -> std::io::Result<()> {
+    start_server_with_quic(host, port, None).await
+}
+
+#[derive(Debug)]
+pub struct QuicListenConfig {
+    pub listen: std::net::SocketAddr,
+    pub certificate: std::path::PathBuf,
+    pub private_key: std::path::PathBuf,
+}
+
+pub async fn start_server_with_quic(
+    host: impl AsRef<str> + Debug,
+    port: u16,
+    quic: Option<QuicListenConfig>,
+) -> std::io::Result<()> {
+    let quic_endpoint = if let Some(quic) = quic {
+        let configured = proxy_core::config::runtime::with_secret_key(|key, _| {
+            key.len() == 32 && key != proxy_core::config::DEFAULT_SECRET_KEY.as_bytes()
+        });
+        if !configured {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "QUIC requires an explicit 32-byte SECRET_KEY",
+            ));
+        }
+        let certificate = tokio::fs::read(quic.certificate).await?;
+        let private_key = tokio::fs::read(quic.private_key).await?;
+        let config = proxy_core::quic::server_config(&certificate, &private_key)?;
+        let endpoint = quinn::Endpoint::server(config, quic.listen)?;
+        tracing::info!(carrier = "quic", listen = %endpoint.local_addr()?, "QUIC listener ready");
+        Some(Arc::new(proxy_core::quic::EndpointOwner(endpoint)))
+    } else {
+        None
+    };
     let socks5 = tokio::task::spawn_blocking(|| {
         Socks5Manager::load(proxy_core::config::default_state_dir().join("socks5.json"))
     })
@@ -518,6 +567,7 @@ pub async fn start_server(host: impl AsRef<str> + Debug, port: u16) -> std::io::
     }
 
     let config = ServerConfig {
+        quic_endpoint,
         socks5: Arc::new(socks5),
         require_secure_transport: std::env::var("PROXY_REQUIRE_V3").is_ok_and(|v| v == "1"),
         metrics,
@@ -543,5 +593,6 @@ pub async fn start_server(host: impl AsRef<str> + Debug, port: u16) -> std::io::
 
     tracing::info!("graceful shutdown, waiting for tasks to complete...");
     manager.wait().await;
+    proxy_core::quic::shutdown_clients().await;
     Ok(())
 }

@@ -48,3 +48,30 @@ jobs:
         run: scripts/integration-test.sh
       - name: cargo build
         run: cargo build --workspace --release --locked
+      - name: Install Flutter for the current native Windows bundle
+        if: matrix.os == 'windows-latest'
+        uses: subosito/flutter-action@v2.23.0
+        with:
+          flutter-version: '3.47.7'
+          channel: stable
+          cache: true
+      - name: Build and verify Flutter against this PR's native library
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          .\scripts\windows\stage-ui-native.ps1 -Configuration Release -SkipBuild
+          # Bootstrap FVM; all project SDK commands below use the pinned FVM SDK.
+          dart pub global activate fvm 4.1.0
+          if ($LASTEXITCODE -ne 0) { throw 'FVM installation failed' }
+          $env:PATH += ";" + (Join-Path $env:LOCALAPPDATA 'Pub\Cache\bin')
+          Set-Location ui/flutter
+          fvm install
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Flutter installation failed' }
+          fvm flutter pub get
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter dependency installation failed' }
+          fvm flutter build windows --debug
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter Windows build failed' }
+          $bundle = 'build/windows/x64/runner/Debug'
+          foreach ($file in @('CipherRelay.exe', 'http_proxy.dll', 'wintun.dll', 'flutter_windows.dll', 'cipherrelay-updater.exe', 'cipherrelay-app-launcher.exe', 'data')) {
+            if (-not (Test-Path (Join-Path $bundle $file))) { throw "Missing bundle file: $file" }
+          }

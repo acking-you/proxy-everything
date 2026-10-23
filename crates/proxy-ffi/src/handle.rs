@@ -837,9 +837,11 @@ fn local_listen_host(allow_lan: bool) -> &'static str {
 /// HTTP/SOCKS5 listener.
 ///
 /// On Windows, a live TUN first confirms the new endpoint's physical bypass
-/// and TCP reachability. Only then is the endpoint published; failure leaves
-/// the previous endpoint and capture running. Other platforms require TUN to
-/// be stopped first so its route bypass can be refreshed.
+/// and carrier reachability. Only then is the endpoint published; failure leaves
+/// the previous endpoint and capture running. Other desktop TUN platforms can
+/// switch carrier/port on the same host; a changed host requires a route refresh.
+/// Existing sessions retain their carrier. A bare host selects TCP; a
+/// `quic://host` selects QUIC for subsequent negotiations.
 ///
 /// This call can wait for DNS, routes and a reachability probe. Run it off the
 /// UI thread and serialize it with other lifecycle calls on this handle.
@@ -865,19 +867,37 @@ pub unsafe extern "C" fn proxy_switch_upstream(
         );
         return ProxyResult::NotRunning;
     }
+    let endpoint = match unsafe { CStr::from_ptr(server_host) }
+        .to_str()
+        .ok()
+        .and_then(|host| proxy_core::upstream::UpstreamAddress::from_host(host, server_port).ok())
+    {
+        Some(endpoint) => endpoint,
+        None => return ProxyResult::InvalidParam,
+    };
+    let server_host = endpoint.qualified_host();
+    let server_port = endpoint.port;
     #[cfg(not(windows))]
     if handle.tun_running.load(Ordering::Acquire) {
-        record_error(
-            handle,
-            "Stop TUN capture before switching upstream so its route bypass can be refreshed",
-        );
-        return ProxyResult::RuntimeError;
+        let same_host = handle
+            .remote_endpoint
+            .lock()
+            .ok()
+            .and_then(|e| e.clone())
+            .and_then(|(host, port)| {
+                proxy_core::upstream::UpstreamAddress::from_host(&host, port).ok()
+            })
+            .is_some_and(|previous| previous.host == endpoint.host);
+        if !same_host {
+            record_error(
+                handle,
+                "Stop TUN capture before changing its upstream host so route bypass can be \
+                 refreshed",
+            );
+            return ProxyResult::RuntimeError;
+        }
     }
 
-    let server_host = match unsafe { CStr::from_ptr(server_host) }.to_str() {
-        Ok(host) if !host.trim().is_empty() => host.trim().to_string(),
-        _ => return ProxyResult::InvalidParam,
-    };
     #[cfg(windows)]
     let prepared = if handle.tun_running.load(Ordering::Acquire) {
         let bypass = handle
@@ -1594,6 +1614,9 @@ pub unsafe extern "C" fn proxy_stop(handle: *mut ProxyHandle) -> ProxyResult {
         handle.listener_task = None;
     }
 
+    handle
+        .runtime
+        .block_on(proxy_core::quic::shutdown_clients());
     crate::disk_log::flush();
 
     if handle.cancel_token.take().is_some() {

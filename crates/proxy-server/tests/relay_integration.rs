@@ -31,6 +31,7 @@ async fn setup_test_server() -> (String, CancellationToken, std::path::PathBuf) 
     let relay = Arc::new(RelayManager::new(nodes.clone(), &test_dir));
 
     let config = ServerConfig {
+        quic_endpoint: None,
         metrics: Arc::new(MetricsStore::with_default_config()),
         nodes,
         relay,

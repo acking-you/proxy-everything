@@ -10,6 +10,7 @@ use proxy_core::metrics::{ConnectionRecord, MetricsStore, current_time_ms};
 use proxy_core::relay::RelayRoute;
 use proxy_core::secure_transport::{MAGIC, ProxyStream, accept_v3};
 use proxy_core::transport::get_tcp_external_proxy_stream;
+use proxy_core::upstream::{CarrierStream, UpstreamAddress};
 use proxy_core::util::{display_report, error_report};
 use proxy_core::{
     MyAsyncCodecReader, MyAsyncReadExt, MyAsyncWriteExt, ProxyHeader, ProxyTransport,
@@ -17,7 +18,6 @@ use proxy_core::{
 };
 use smallvec::{SmallVec, smallvec};
 use snafu::ResultExt;
-use tokio::net::TcpStream;
 use tracing::{Instrument, field};
 
 use super::control::handle_control_session;
@@ -140,7 +140,7 @@ pub(super) async fn proxy_with_metrics_upstream_session<
 /// This attaches a `trace_id` to all logs emitted during the connection's
 /// lifecycle to simplify troubleshooting.
 pub(super) async fn handle_connect(
-    conn: TcpStream,
+    conn: CarrierStream,
     peer_addr: SocketAddr,
     ctx: Arc<ServerContext>,
 ) -> Result<()> {
@@ -148,6 +148,7 @@ pub(super) async fn handle_connect(
     let span = tracing::info_span!(
         "proxy_connection",
         trace_id,
+        carrier = ?conn.carrier(),
         peer = %peer_addr,
         dest = field::Empty,
         mode = field::Empty
@@ -166,7 +167,7 @@ pub(super) async fn handle_connect(
 }
 
 async fn handle_connect_inner(
-    conn: TcpStream,
+    conn: CarrierStream,
     peer_addr: SocketAddr,
     ctx: Arc<ServerContext>,
     trace_id: u64,
@@ -182,9 +183,11 @@ async fn handle_connect_inner(
     })?;
     let deadline = tokio::time::Instant::now() + HEADER_TIMEOUT;
     let relay_target = ctx.relay.select();
-    conn.set_nodelay(true).context(IoSnafu {
-        detail: "set client TCP_NODELAY",
-    })?;
+    if let CarrierStream::Tcp(ref tcp) = conn {
+        tcp.set_nodelay(true).context(IoSnafu {
+            detail: "set client TCP_NODELAY",
+        })?;
+    }
     let mut conn = conn;
     let mut magic = [0u8; 8];
     tokio::time::timeout_at(
@@ -214,18 +217,18 @@ async fn handle_connect_inner(
             && let Some(target) = relay_target.as_ref()
             && let RelayRoute::ProxyServer { addr } = &target.route
         {
-            let mut upstream = tokio::time::timeout_at(deadline, TcpStream::connect(addr))
-                .await
-                .map_err(|_| ServerError::Io {
-                    detail: "v3 relay connect timeout".into(),
-                    source: std::io::ErrorKind::TimedOut.into(),
-                })?
-                .context(IoSnafu {
-                    detail: "connect v3 relay",
-                })?;
-            upstream.set_nodelay(true).context(IoSnafu {
-                detail: "set relay TCP_NODELAY",
+            let mut upstream = tokio::time::timeout_at(deadline, async {
+                UpstreamAddress::parse(addr)?.connect().await
+            })
+            .await
+            .map_err(|_| ServerError::Io {
+                detail: "v3 relay connect timeout".into(),
+                source: std::io::ErrorKind::TimedOut.into(),
+            })?
+            .context(IoSnafu {
+                detail: "connect v3 relay",
             })?;
+
             tokio::io::AsyncWriteExt::write_all(&mut upstream, &magic)
                 .await
                 .context(IoSnafu {
@@ -485,19 +488,18 @@ async fn handle_connect_inner(
 
         match &relay_target.route {
             RelayRoute::ProxyServer { addr } => {
-                let relay_stream =
-                    tokio::time::timeout(Duration::from_secs(8), TcpStream::connect(addr))
-                        .await
-                        .map_err(|_| ServerError::Io {
-                            detail: "relay connection deadline exceeded".into(),
-                            source: std::io::Error::from(std::io::ErrorKind::TimedOut),
-                        })?
-                        .context(IoSnafu {
-                            detail: format!("Connect to relay_server:{addr}"),
-                        })?;
-                relay_stream.set_nodelay(true).context(IoSnafu {
-                    detail: "set relay TCP_NODELAY",
+                let relay_stream = tokio::time::timeout(Duration::from_secs(8), async {
+                    UpstreamAddress::parse(addr)?.connect().await
+                })
+                .await
+                .map_err(|_| ServerError::Io {
+                    detail: "relay connection deadline exceeded".into(),
+                    source: std::io::Error::from(std::io::ErrorKind::TimedOut),
+                })?
+                .context(IoSnafu {
+                    detail: format!("Connect to relay_server:{addr}"),
                 })?;
+
                 ctx.relay.on_connect(&relay_target.id);
                 let (r, w) = ProxyStream::from(relay_stream).into_split();
                 let (server_reader, mut server_writer) = (AsyncReader::new(r), AsyncWriter::new(w));

@@ -8,6 +8,8 @@ pub use proxy_crypto::v3::{MAGIC, SecureStream, accept_v3, connect_v3};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 
+use crate::upstream::CarrierStream;
+
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
@@ -58,18 +60,23 @@ impl WireProtocol {
     }
 }
 
-/// TCP or an authenticated transport over TCP. Splitting retains partial record
+/// TCP/QUIC or an authenticated v3 transport over either carrier. Splitting retains partial record
 /// progress in the stream, independently of the lifetime of a read future.
 pub enum ProxyStream {
     Plain {
-        stream: TcpStream,
+        stream: CarrierStream,
         prefix: Vec<u8>,
         position: usize,
     },
-    Secure(Box<SecureStream<TcpStream>>),
+    Secure(Box<SecureStream<CarrierStream>>),
 }
 impl From<TcpStream> for ProxyStream {
     fn from(stream: TcpStream) -> Self {
+        Self::from(CarrierStream::from(stream))
+    }
+}
+impl From<CarrierStream> for ProxyStream {
+    fn from(stream: CarrierStream) -> Self {
         Self::Plain {
             stream,
             prefix: Vec::new(),
@@ -100,7 +107,7 @@ impl ProxyStream {
             Self::Plain { stream, .. } => stream,
             Self::Secure(stream) => stream.get_ref(),
         };
-        crate::diagnostics::record_socket(observation, socket);
+        socket.record_diagnostics(observation);
     }
 
     pub fn is_secure(&self) -> bool {
@@ -111,9 +118,9 @@ impl ProxyStream {
         tokio::io::split(self)
     }
 
-    pub fn legacy_with_prefix(stream: TcpStream, prefix: Vec<u8>) -> Self {
+    pub fn legacy_with_prefix(stream: impl Into<CarrierStream>, prefix: Vec<u8>) -> Self {
         Self::Plain {
-            stream,
+            stream: stream.into(),
             prefix,
             position: 0,
         }

@@ -53,6 +53,7 @@ async fn protocol_round_trips(protocol: WireProtocol) {
     std::fs::create_dir_all(&state_dir).unwrap();
     let nodes = Arc::new(NodeStore::new(state_dir.join("nodes.json")));
     let server_config = ServerConfig {
+        quic_endpoint: None,
         metrics: Arc::new(MetricsStore::with_default_config()),
         relay: Arc::new(RelayManager::new(nodes.clone(), &state_dir)),
         nodes,
@@ -197,6 +198,7 @@ async fn protocol_round_trips(protocol: WireProtocol) {
         ));
         relay.set_enabled(true);
         let relay_config = ServerConfig {
+            quic_endpoint: None,
             relay,
             nodes: relay_nodes,
             require_secure_transport: true,

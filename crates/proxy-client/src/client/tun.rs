@@ -230,7 +230,8 @@ impl TunBypassController {
             phase = "resolve",
             "preparing live TUN upstream switch"
         );
-        let addresses = proxy_core::transport::resolve_host_addresses(host).await?;
+        let endpoint = proxy_core::upstream::UpstreamAddress::from_host(host, port)?;
+        let addresses = proxy_core::transport::resolve_host_addresses(&endpoint.host).await?;
         tracing::info!(
             host,
             port,
@@ -249,8 +250,24 @@ impl TunBypassController {
                 phase = "connect",
                 "preparing live TUN upstream switch"
             );
-            let stream = proxy_core::transport::connect_tcp_addresses(&addresses, port).await?;
-            tracing::info!(host, port, local = ?stream.local_addr().ok(), peer = ?stream.peer_addr().ok(), "live TUN upstream TCP reachability confirmed");
+            let stream = match endpoint.carrier {
+                proxy_core::upstream::Carrier::Tcp => {
+                    proxy_core::transport::connect_tcp_addresses(&addresses, endpoint.port)
+                        .await?
+                        .into()
+                }
+                proxy_core::upstream::Carrier::Quic => {
+                    proxy_core::upstream::CarrierStream::Quic(Box::new(
+                        proxy_core::quic::connect_addresses(
+                            &endpoint.host,
+                            endpoint.port,
+                            &addresses,
+                        )
+                        .await?,
+                    ))
+                }
+            };
+            tracing::info!(host, port, carrier = ?stream.carrier(), local = ?stream.local_addr().ok(), peer = ?stream.peer_addr().ok(), "live TUN upstream reachability confirmed");
             if udp_enabled {
                 tracing::info!(
                     host,
@@ -258,11 +275,12 @@ impl TunBypassController {
                     phase = "udp_preflight",
                     "preparing live TUN upstream switch"
                 );
-                let session = proxy_core::session::NativeSession::from_tcp_stream(
+                let session = proxy_core::session::NativeSession::from_stream_with_protocol(
                     "",
                     0,
                     proxy_core::ProxyTransport::UdpAssociate,
                     stream,
+                    proxy_core::secure_transport::WireProtocol::configured()?,
                 )
                 .await
                 .map_err(io::Error::other)?;
@@ -1011,7 +1029,8 @@ async fn resolve_remote_addresses(endpoint: Option<&(String, u16)>) -> io::Resul
     let Some((host, port)) = endpoint else {
         return Ok(Vec::new());
     };
-    let addresses = tokio::net::lookup_host((host.as_str(), *port))
+    let endpoint = proxy_core::upstream::UpstreamAddress::from_host(host, *port)?;
+    let addresses = tokio::net::lookup_host((endpoint.host.as_str(), endpoint.port))
         .await?
         .map(|address| address.ip())
         .filter(|address| !address.is_loopback() && !address.is_unspecified())
