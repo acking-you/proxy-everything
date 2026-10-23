@@ -1,86 +1,33 @@
 # CipherRelay（密流）
 
-A self-hosted encrypted proxy with AES-256-GCM encryption and a cross-platform client.
-The source repository remains `proxy-everything`; existing protocols, CLI binaries and application identifiers remain compatible.
-
-Native 0.6.7 / CipherRelay 2.0.8 adds a Rust Windows updater, recovers orphaned
-Windows DNS attribution sessions, and moves shared update, logging,
-subscription and galaxy work into Rust. See [runtime changes and validation](docs/rust-ui-runtime.md).
+A self-hosted encrypted proxy: a Rust server, a local HTTP/HTTPS/SOCKS5 client
+and a Flutter app for Windows, macOS, Linux, Android and iOS. The repository
+and binaries keep their `proxy-everything` names; protocols and application
+identifiers stay compatible.
 
 ```
-Client (local) ──► [encrypted] ──► Server (remote) ──► Internet
+App ─► local client (HTTP · SOCKS5 · TUN) ══ encrypted, over TCP or QUIC ══► server ─► Internet
+                                                                               └─► relay ─► …
 ```
 
-## macOS editions
+## Features
 
-CipherRelay is the new product name for Proxy UI. Both distribution paths remain
-available in the source:
+- **Encrypted native sessions**: TCP, UDP and ICMP payloads are always
+  encrypted (AES-256-GCM), node probes included.
+- **Wire protocols**: legacy, the default, works with every deployed node; v3
+  needs no extra round trip.
+- **Carriers**: TCP by default, or TLS 1.3 QUIC per node. A switch affects new
+  sessions only.
+- **Local proxy**: HTTP, HTTPS CONNECT and SOCKS5, including UDP ASSOCIATE, on
+  one port. Optionally sets the system proxy.
+- **TUN capture**: whole-device capture with process bypass and loop prevention
+  on desktop; the platform VPN API on mobile.
+- **Routing**: geo-based direct or proxy decisions, a reverse mode and keyword lists.
+- **Control plane**: nodes, groups, relay chains with load balancing, metrics
+  and a managed SOCKS5 endpoint.
+- **App proxies**: send single apps through the proxy without TUN (macOS and Windows).
 
-| Edition | App bundle | Build target | Distribution |
-| --- | --- | --- | --- |
-| Direct download | `CipherRelay.app` | `Runner` | Developer ID signed and notarized DMG |
-| Mac App Store | `CipherRelay.app` | `appstore` / `RunnerStore` | Sandboxed app with Packet Tunnel extension; App Review required |
-
-The direct edition retains its system proxy, privileged TUN helper, LAN access
-and process bypass features. The store edition has its own bundle ID and data
-container. See [Mac App Store development](docs/mac-app-store.md) for the build
-and capability differences. Store preparation does not mean Apple has approved
-the app.
-
-All platforms display **CipherRelay**. Desktop executables are `CipherRelay.exe`
-on Windows and `CipherRelay` on Linux/macOS; Apple app bundles are
-`CipherRelay.app`. Existing bundle/package IDs, Dart imports, protocols, storage
-identifiers and Windows startup/single-instance keys remain unchanged.
-
-Release files use `cipherrelay-v<version>-<build>-<platform>-<architecture>`
-with their native extension. See the [client naming and packaging guide](ui/flutter/README.md#application-and-package-names).
-On macOS, replace the previous direct-download app with `CipherRelay.app`. The
-Store and direct editions retain separate IDs and settings; install them in
-separate folders if both editions are needed.
-
-## Encrypted native sessions
-
-New clients always encrypt native TCP, UDP and ICMP payloads, including HTTPS
-handshakes and node probes, using the existing legacy protocol by default.
-Existing nodes do not need an upgrade for this policy. The old encryption
-toggle and per-IP codec selection have been removed; old saved values are
-ignored. Direct destinations and external HTTP/SOCKS upstreams keep their own
-protocols. See [compatibility and architecture](docs/network-resilience.md#encrypted-native-sessions-and-compatibility).
-
-The workspace separates `proxy-crypto` (configuration-free crypto and generic
-v3 records), `proxy-core` (wire format, native sessions and shared forwarding),
-and the client/server/FFI frontends. Forwarding uses static trait dispatch and
-preserves error sources through to connection traces.
-
-`galaxy-geometry` owns the Flutter galaxy's allocation-free batch projection
-and viewport clipping. It has no network or graphics dependencies and is shared
-by every native FFI target. See [geometry and FFI contracts](docs/galaxy-geometry.md)
-for buffer ownership, compatibility and the repeatable compute benchmark.
-
-## Low-latency encrypted transport
-
-Native **0.4.34** and UI **1.2.20+46** provide v3 encryption with **no additional
-handshake round trip**: the first flight carries the encrypted request. Fresh
-client and server salts separate connections and directions. Legacy remains the
-default for new and existing profiles, so old clients and servers still work.
-Upgrade every relay/server before enabling **Low-latency encrypted transport
-(v3)** or `PROXY_WIRE_PROTOCOL=v3`. `PROXY_REQUIRE_V3=1` optionally rejects legacy.
-The unused challenge transport has been removed. See the
-[wire format, replay boundary and migration guide](docs/secure-transport-v3.md).
-
-Native upstreams also support verified TLS 1.3 QUIC alongside TCP. Choose
-`quic://host:port` per node or negotiation; live endpoint changes affect new
-sessions while existing streams continue on their original carrier. Bare
-addresses remain TCP. See [QUIC setup, live switching and limits](docs/quic-transport.md).
-
-## TUN ping
-
-TUN now forwards IPv4/IPv6 ICMP Echo through the configured native proxy exit,
-returning the target's actual reply. Upgrade the client and final server for this
-additional transport; default legacy TCP/UDP remains compatible with old nodes.
-The exit needs ICMP socket permission. See [Echo support and limits](docs/tun-icmp-echo.md).
-
-## Quick Start
+## Quick start
 
 ### Server
 
@@ -90,289 +37,99 @@ docker run -d --name proxy-server --restart=always -p 1081:1081 \
   ackingliu/http2-server:latest
 ```
 
-> Open port 1081 in your cloud firewall first!
+Open TCP 1081 in the firewall and use a private 32-byte `SECRET_KEY`. The
+one-line systemd installer, multiple instances and every variable are in
+[server deployment](docs/server-deployment.md) and [systemd](docs/systemd-deployment.md).
+QUIC needs an additional UDP listener and a certificate: [QUIC carrier](docs/quic-transport.md).
 
-[Full server deployment guide →](docs/server-deployment.md)
+### App
 
-### Server (binary, one-click systemd)
+Install CipherRelay from the [app releases](https://github.com/Proxy-UI/Proxy-UI-Flutter/releases),
+add the server as a node, and connect. Per-platform notes are in [client usage](docs/client-usage.md).
 
-Installs `http-proxy-server` as a systemd service using the COS binary.
-Defaults: `HOST=0.0.0.0`, `PORT=1081`, `SECRET_KEY=my-secret-key123my-secret-key123`.
+### CLI
 
-```bash
-curl -fsSL https://mybucket-1331094534.cos.ap-hongkong.myqcloud.com/proxy-everything/install-proxy-server.sh | bash
-```
-
-To download a different filename from the same COS bucket:
-
-```bash
-curl -fsSL https://mybucket-1331094534.cos.ap-hongkong.myqcloud.com/proxy-everything/install-proxy-server.sh | bash -s -- http-proxy-server-aarch64-unknown-linux-musl.tar.gz
-```
-
-For multiple instances on one host, use a unique `SERVICE_NAME` and `PORT`.
-Custom service names now get isolated state directories automatically; set
-`PROXY_DATA_DIR` only if you want to override that path.
-
-> Change `SECRET_KEY` for production deployments.
-
-### Client
-
-Download `http-proxy-cli` from [releases](https://github.com/acking-you/proxy-everything/releases), then:
+Download `http-proxy-cli` from the [releases](https://github.com/acking-you/proxy-everything/releases):
 
 ```bash
-./http-proxy-cli -s YOUR_SERVER_IP -c 7890 --set-system-proxy
+./http-proxy-cli -s YOUR_SERVER -c 7890 --set-system-proxy   # TCP
+./http-proxy-cli -s quic://YOUR_SERVER:10811 -c 7890         # QUIC
+./http-proxy-cli -s YOUR_SERVER -c 7890 --tun                # capture all traffic (administrator)
 ```
 
-The `--set-system-proxy` flag auto-configures your OS proxy settings. Without it, configure system proxy to `127.0.0.1:7890` manually.
+Without `--set-system-proxy`, point applications at `127.0.0.1:7890` (HTTP or
+SOCKS5). Options, TOML configuration, SOCKS5 UDP and TUN are covered in
+[client usage](docs/client-usage.md).
 
-The Flutter UI keeps its HTTP/SOCKS5 listener on `127.0.0.1` by default. Enable
-**Allow LAN** in Proxy Configuration to bind `0.0.0.0` instead. The local
-listener has no client authentication, so enable this only on trusted networks
-and restrict the port with the host firewall. When enabled, the UI shows a
-copyable `http://<Wi-Fi-IP>:<port>` link for other devices on the same network.
+## Transport choices
 
-[Full client usage guide →](docs/client-usage.md)
+| Setting | Default | Alternative | Before switching |
+| --- | --- | --- | --- |
+| Wire protocol | legacy | v3: `PROXY_WIRE_PROTOCOL=v3` or the app toggle | Upgrade every relay and server; `PROXY_REQUIRE_V3=1` then rejects legacy ([v3](docs/secure-transport-v3.md)) |
+| Carrier | TCP: a bare `host` | QUIC: `quic://host:port` | Deploy a QUIC listener with a certificate ([QUIC](docs/quic-transport.md)) |
 
-#### SOCKS5 UDP
+The two combine freely, and neither changes what a session carries.
+Compatibility and recovery behaviour: [network resilience](docs/network-resilience.md).
 
-The same local port also supports RFC 1928 `UDP ASSOCIATE`. No separate UDP
-listen port is required: a SOCKS5 client opens the TCP control connection on
-the configured client port and receives an ephemeral UDP relay address.
-UDP is enabled by default in both the CLI and Flutter client. Use
-`--udp false`, `udp = false` in the client TOML, or the Flutter configuration
-switch when a TCP-only local listener is required.
+## Management
 
-- UDP datagrams preserve message boundaries while being framed over the
-  client/server TCP tunnel.
-- `--msg-key` encrypts each UDP tunnel frame as an independent authenticated
-  message.
-- A configured SOCKS5/SOCKS5H upstream can relay UDP. HTTP CONNECT upstreams
-  cannot carry UDP and the association is rejected explicitly.
-- SOCKS5 fragmentation (`FRAG != 0`) is not supported and fragmented packets
-  are dropped, as permitted by RFC 1928.
-- Idle associations expire after 300 seconds. Override this on both client and
-  server with `UDP_ASSOCIATION_IDLE_TIMEOUT_SECS`.
-
-System HTTP proxy settings do not redirect application UDP automatically. The
-application, TUN adapter, or other ingress must explicitly use SOCKS5 UDP.
-
-#### Local TUN mode
-
-The CLI and Windows Flutter client can capture device traffic through the
-bundled `tun2proxy` dependency and forward it to the client's local SOCKS5
-listener. This captures TCP and, while SOCKS5 UDP is enabled, UDP without
-per-application proxy settings:
-
-```powershell
-http-proxy-cli.exe -s YOUR_SERVER_IP -c 7890 --tun
-```
-
-TUN always targets `socks5://127.0.0.1:<client-port>`; the same local port also
-continues accepting HTTP proxy requests. Native code prevents loops at three
-levels: it forces client-owned sessions through the configured remote proxy,
-installs physical routes for every resolved remote proxy address, and keeps the
-client executable in the process-bypass policy. Additional processes can bypass
-TUN with repeatable `--tun-bypass-process` options. Use `--tun-list-processes`
-to list currently running Windows executable names.
-
-Ordinary TUN DNS queries use TCP through the proxy, including when UDP relay is
-disabled. DNS queries owned by explicitly excluded processes use the physical
-interface and prefer AliDNS and Tencent DNSPod.
-Explicit process exclusions also apply to local HTTP/SOCKS clients using the
-system proxy; their hostname lookups and outbound sockets use the physical
-interface. See [DNS, exclusions and diagnostic logs](docs/client-usage.md#tun-mode)
-for resolver order, platform differences and upgrade behavior.
-
-Windows setup leaves every existing default route untouched and captures IPv4
-with two owned `/1` routes. Windows node switching installs the new upstream's
-physical host routes before publishing its address, preserving the TUN adapter,
-DNS, and established connections. Failed probes roll back their provisional
-routes and retain the old upstream. Shutdown cancels managed TUN sessions before
-restoring owned routes and the previous DNS state; the cleanup path never
-performs a broad deletion of `0.0.0.0/0`.
-
-TUN mode requires administrator privileges. The Windows CLI requests UAC
-elevation in the existing terminal. The Flutter application normally runs
-unelevated and requests UAC only when its top-level TUN switch is enabled after
-the local listener has started; the elevated replacement remains a GUI process
-and does not open a terminal. Windows builds bundle `wintun.dll` next to the
-CLI or UI executable. See the [client usage guide](docs/client-usage.md#tun-mode)
-for configuration and runtime process updates.
-
-### Proxy TUI
-
-`proxy-tui` is a control-plane monitor and runtime config tool. It is not a
-local forwarding client like `http-proxy-cli`, and it does not turn on system
-proxy settings for you.
-
-Build and run:
+| Tool | Purpose |
+| --- | --- |
+| `proxy-tui` | Terminal monitor and runtime configuration of nodes, groups, relay and metrics |
+| `http-proxy-admin` | Scriptable control CLI with JSON output, including managed SOCKS5 |
 
 ```bash
-cargo build --release -p proxy-tui
-./target/release/proxy-tui -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY --token YOUR_ADMIN_TOKEN
+proxy-tui -H 127.0.0.1 -p 1081 -k SESSION_KEY --token ADMIN_TOKEN
+http-proxy-admin -H 127.0.0.1 -p 1081 -k SESSION_KEY ping
 ```
 
-Key differences inside the UI:
-
-- `Nodes` tab: `a` adds a node and expects plain `host:port`
-- `Groups` tab: add or remove existing node IDs from a group
-- `Relay` tab: `a` adds a relay target and expects a typed target spec, not a bare address
-
-Relay target formats:
-
-- `node <host:port> [weight]`
-- `node_ref <node_id> [weight]`
-- `group_ref <group_id>`
-- `proxy <proxy_url> [weight]`
-- `socks5://user:pass@host:port [weight]`
-- `socks5h://user:pass@host:port [weight]`
-- `http://user:pass@host:port [weight]`
-
-Typical relay flow:
-
-1. Add an upstream server in `Nodes` with `host:port` if you want to manage it as a named node.
-2. Optionally create a group and add node IDs into that group.
-3. Switch to `Relay`, press `a`, then enter one of:
-   - `node 44.218.33.171:1081`
-   - `node_ref 44.218.33.171:1081`
-   - `group_ref asia`
-   - `proxy socks5://relay-user:secret@44.218.33.171:1080`
-   - `http://relay-user:secret@44.218.33.171:8080`
-4. Press `e` to enable relay if it is still disabled.
-
-Proxy relay notes:
-
-- `socks5://` uses local DNS resolution before dialing the proxy target.
-- `socks5h://` sends the original hostname to the SOCKS5 proxy for remote DNS resolution.
-- Username/password auth is supported for both SOCKS5 and HTTP CONNECT proxies.
-- Relay status and the TUI redact proxy passwords from displayed target addresses.
-
-Common pitfall:
-
-- In the `Relay` tab, entering only `44.218.33.171:1081` will fail with `Unknown target type`.
-  That input works in `Nodes`, but `Relay` requires the target type prefix such as `node`.
-- In the `Relay` tab, a bare proxy URL is valid because the scheme already identifies the target type.
-  For example, `socks5://user:pass@44.218.33.171:1080` works, but `44.218.33.171:1080` does not.
-- In the current implementation, a node ID is usually the same as the `host:port`
-  you added earlier, so `node_ref 44.218.33.171:1081` can be valid after the node
-  has already been registered.
-
-[Dynamic relay guide →](docs/dynamic-relay-config.md)
-
-### Admin CLI
-
-`http-proxy-admin` is the script-friendly control-plane CLI. It prints JSON
-responses compatible with the control protocol and supports:
-
-- `ping`
-- `socks5 status/enable/disable/rotate-key/link/set-credentials/set-advertise/set-policy/allow/sessions/kick` (authenticated server-side SOCKS5)
-- `nodes list/add/remove`
-- `groups list/create/delete/add-node/remove-node`
-- `relay get/status/enable/disable/add-target/remove-target/set-algo`
-- `metrics realtime/connections/buckets/top-n`
-
-Build and run:
-
-```bash
-cargo build --release --bin http-proxy-admin
-./target/release/http-proxy-admin -H 127.0.0.1 -p 1081 -k YOUR_SESSION_KEY ping
-```
-
-[Metrics & management guide →](docs/metrics-monitoring.md)
-
-The server can also expose a separate, password-authenticated SOCKS5 endpoint.
-It starts disabled, generates persistent credentials automatically, and is
-managed only with `http-proxy-admin`, which needs `CONTROL_ADMIN_TOKEN`. The app
-shows each serving node's `socks5://` link. See
-[managed SOCKS5 setup and CLI commands](docs/managed-socks5.md).
+In the TUI, the `Nodes` tab takes `host:port`, while the `Relay` tab needs a
+typed target such as `node host:port`, `group_ref asia` or a full proxy URL.
+See [TUI and admin CLI](docs/metrics-monitoring.md), [dynamic relay](docs/dynamic-relay-config.md)
+and [managed SOCKS5](docs/managed-socks5.md).
 
 ## Documentation
 
-- [Network resilience review](docs/network-resilience.md) - 0.4.31 / UI 1.2.17+43 recovery fixes, limits, validation, and remaining legacy protocol risk
-- [Server Deployment (Docker)](docs/server-deployment.md) - Docker deployment guide
-- [Server Deployment (Systemd)](docs/systemd-deployment.md) - Binary + systemd deployment
-- [Client Usage](docs/client-usage.md) - Windows, Linux, macOS, Android, iOS
-- [Mac App Store development](docs/mac-app-store.md) - Sandboxed app and Packet Tunnel build
-- [Admin Test Script](docs/admin-test.md) - How to run `http-proxy-admin` control-plane tests
-- [Metrics Monitoring](docs/metrics-monitoring.md) - TUI + admin CLI for management and realtime metrics
+- **Use and deploy**: [client usage](docs/client-usage.md) ·
+  [server (Docker)](docs/server-deployment.md) · [systemd](docs/systemd-deployment.md) ·
+  [QUIC carrier](docs/quic-transport.md) · [managed SOCKS5](docs/managed-socks5.md) ·
+  [dynamic relay](docs/dynamic-relay-config.md) · [metrics and management](docs/metrics-monitoring.md) ·
+  [Android VPN](docs/android-vpn.md) · [iOS](docs/ios-development.md) ·
+  [Mac App Store edition](docs/mac-app-store.md)
+- **Protocols and design**: [v3 wire protocol](docs/secure-transport-v3.md) ·
+  [network resilience](docs/network-resilience.md) · [TUN ICMP echo](docs/tun-icmp-echo.md) ·
+  [node probe batching](docs/node-probe-batch.md) · [Rust UI runtime](docs/rust-ui-runtime.md) ·
+  [galaxy geometry](docs/galaxy-geometry.md)
+- **Operations and records**: [releasing](docs/releasing.md) ·
+  [admin test script](docs/admin-test.md) · [QUIC validation](docs/quic-validation.md) ·
+  [node sync incident](docs/node-sync-incident.md) · [memory investigation](docs/memory-usage-investigation.md)
 
-## CipherRelay releases
+## Development
 
-For a UI release with native changes, first dispatch `build-deploy.yaml` on the
-intended source branch with a new `release_version` (for example `0.4.37`).
-Both manual runs and numeric tag pushes rebuild server, client, admin and TUI
-programs for all eight supported targets, plus twelve FFI archives including
-the macOS TUN helper. Publication requires all 44 archives to pass content and
-source-commit verification. Each archive includes `build-info.json`; the release
-includes `SHA256SUMS` and `release-manifest.json`. The UI workflow checks those
-hashes before staging native libraries. Only numeric tag pushes publish Docker
-images.
-
-Then dispatch `ui/flutter/.github/workflows/build.yaml` in
-`Proxy-UI/Proxy-UI-Flutter`, passing that native `lib_version`, a new UI
-`release_tag`, and `create_release=true`. Wait for all desktop jobs and the
-release job to succeed, and inspect the attached macOS, Windows, and Linux
-packages. Mobile application packages must be built and signed locally.
-
-## Windows Development
-
-Prerequisites:
-
-- Rust MSVC toolchain selected by `rust-toolchain.toml`
-- Visual Studio 2022 Build Tools with Desktop development with C++
-- CMake
-- FVM 4.x; the Flutter submodule pins Flutter 3.47.7 in `.fvmrc`
-
-Build the Rust command-line programs, FFI DLL, and Flutter Windows app together:
-
-```powershell
-.\scripts\windows\build.ps1 -Configuration Debug
+```bash
+cargo build --workspace
+cargo test --workspace
 ```
 
-Run a command-line component and pass its arguments after `--`:
+On Windows (MSVC toolchain, VS 2022 Build Tools with C++, CMake, FVM):
 
 ```powershell
-.\scripts\windows\run-cli.ps1 server -- -H 127.0.0.1 -p 1081
-.\scripts\windows\run-cli.ps1 client -- -s 127.0.0.1 -p 1081 -c 1080
+.\scripts\windows\build.ps1 -Configuration Debug   # Rust, FFI DLL and the Flutter app
+.\scripts\windows\run-ui.ps1                       # app with hot reload
 ```
 
-Start the Flutter desktop app with hot reload. The script builds and stages
-`http_proxy.dll` and `wintun.dll` before invoking the project-pinned Flutter SDK:
+The Flutter app lives in the `ui/flutter` submodule and runs only through FVM.
+`proxy-core` owns the single mimalloc build (`deps/better_mimalloc_rs`) used by
+every binary and the FFI library. Layout, checks, compatibility rules and
+packaging are in [AGENTS.md](AGENTS.md); release steps are in [releasing](docs/releasing.md).
 
-```powershell
-.\scripts\windows\run-ui.ps1
-```
+## Editions and naming
 
-Run Flutter commands from `ui/flutter` through FVM only, for example
-`fvm flutter test` and `fvm dart format lib test`.
-
-## Features
-
-- AES-256-GCM encryption
-- HTTP/HTTPS/SOCKS5 proxy support, including SOCKS5 UDP ASSOCIATE
-- Local TUN capture with mandatory self-process loop prevention
-- Auto-routing based on geo-location
-- Reverse geo mode (`--reverse-geo`): proxy CN sites, direct for others
-- Auto system proxy setup (`--set-system-proxy`): Linux/macOS/Windows
-- Transparent proxy chain mode
-- Multi-platform support
-
-## Allocator (advanced)
-
-This repo vendors a fork of the Rust mimalloc wrapper at `deps/better_mimalloc_rs`.
-It exists to:
-
-- Pin the C allocator to a specific fork (`https://github.com/acking-you/mimalloc`)
-- Expose RSS-related tuning knobs at build time and runtime
-
-The allocator is provided by the vendored `deps/better_mimalloc_rs` submodule.
-`proxy-core` owns the single process-wide allocator policy, so the client,
-server, TUI, administration tools, Flutter FFI library, and embedded TUN stack
-all use the same pinned mimalloc build and tuning. See
-`deps/better_mimalloc_rs/README.md` for configuration details.
-
-### RSS tuning
-
-Every proxy artifact uses the original aggressive RSS-reclaim configuration in
-code to prioritize faster memory return under load. The policy is applied once
-before the first Rust allocation rather than being duplicated by each binary.
+Every platform shows **CipherRelay** (`CipherRelay.exe`, `CipherRelay`,
+`CipherRelay.app`). Bundle and package IDs, storage, protocols and Windows
+single-instance keys are unchanged from Proxy UI, so upgrades keep their
+settings. macOS has two editions: the direct download (a Developer ID DMG with
+system proxy, TUN helper, LAN access and process bypass) and a sandboxed Mac App
+Store edition with a Packet Tunnel and separate settings
+([Mac App Store](docs/mac-app-store.md)). For release file names, see
+[client packaging](ui/flutter/README.md#application-and-package-names).

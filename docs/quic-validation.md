@@ -1,5 +1,10 @@
 # QUIC validation on lb7666
 
+> Recorded before the review fixes that added client keep-alive, re-enabled
+> migration, raised the per-connection stream limit and made a dropped stream
+> close like a TCP socket. Repeat the public-network checks before a release
+> that relies on these numbers. Current behaviour: [QUIC carrier](quic-transport.md).
+
 Validation on 2026-10-23 used an isolated authenticated server on TCP 12111 and
 UDP 10811, with a separate state directory and temporary credentials. Existing
 services were left running. Loopback-only HTTP, HTTPS and UDP echo origins on
