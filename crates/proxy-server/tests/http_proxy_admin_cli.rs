@@ -304,13 +304,23 @@ fn admin_cli_honors_admin_token_and_session_key_env() {
         ("CONTROL_SESSION_KEY", CONTROL_KEY),
     ]);
 
-    let (ok, json, _, _) = admin_json(port, &["ping"], &[("CONTROL_SESSION_KEY", CONTROL_KEY)]);
+    // Reads a proxy user needs work with the session key alone.
+    let (ok, json, _, stderr) =
+        admin_json(port, &["ping"], &[("CONTROL_SESSION_KEY", CONTROL_KEY)]);
+    assert!(ok, "{stderr}");
+    expect_ok_type(&json, "pong");
+
+    let (ok, json, _, _) = admin_json(
+        port,
+        &["relay", "get"],
+        &[("CONTROL_SESSION_KEY", CONTROL_KEY)],
+    );
     assert!(!ok);
     expect_error_contains(&json, "unauthorized");
 
     let (ok, json, _, _) = admin_json(
         port,
-        &["--token", "wrong-token", "ping"],
+        &["--token", "wrong-token", "relay", "get"],
         &[("CONTROL_SESSION_KEY", CONTROL_KEY)],
     );
     assert!(!ok);
@@ -318,11 +328,11 @@ fn admin_cli_honors_admin_token_and_session_key_env() {
 
     let (ok, json, _, stderr) = admin_json(
         port,
-        &["--token", ADMIN_TOKEN, "ping"],
+        &["--token", ADMIN_TOKEN, "relay", "get"],
         &[("CONTROL_SESSION_KEY", CONTROL_KEY)],
     );
     assert!(ok, "{stderr}");
-    expect_ok_type(&json, "pong");
+    expect_ok_type(&json, "relay_config");
 }
 
 #[test]

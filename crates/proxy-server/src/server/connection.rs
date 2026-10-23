@@ -114,6 +114,27 @@ async fn proxy_with_metrics_cryptor<
     .await
 }
 
+/// Carry a local client's plaintext through a legacy native session to an
+/// upstream node: the reverse of `proxy_with_metrics_cryptor`.
+pub(super) async fn proxy_with_metrics_upstream_session<
+    R: MyAsyncReadExt + Send + Unpin,
+    W: MyAsyncWriteExt + Send + Unpin,
+>(
+    key: &str,
+    client_reader: R,
+    server_reader: R,
+    client_writer: W,
+    server_writer: W,
+) -> Result<TransferStats> {
+    proxy_with_metrics(
+        proxy_core::get_encryptor_codec(key, client_reader).context(ProxySnafu)?,
+        proxy_core::get_decryptor_codec(&key, server_reader).context(ProxySnafu)?,
+        client_writer,
+        server_writer,
+    )
+    .await
+}
+
 /// Handle a new TCP connection with a per-connection tracing span.
 ///
 /// This attaches a `trace_id` to all logs emitted during the connection's

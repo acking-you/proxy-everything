@@ -11,6 +11,7 @@ use proxy_core::metrics::{
 };
 use proxy_core::nodes::{NodeGroup, NodeInfo};
 use proxy_core::relay::{LoadBalanceAlgo, RelayConfig, RelayStatus, UpstreamTarget};
+use proxy_core::socks5::Socks5Update;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -64,7 +65,7 @@ enum Command {
 
 #[derive(Subcommand, Debug)]
 enum Socks5Command {
-    /// Read listener state and its generated username/password.
+    /// Read listener state, settings and the generated username/password.
     Status,
     /// Enable the listener, optionally changing its bind address.
     Enable {
@@ -75,6 +76,87 @@ enum Socks5Command {
     Disable,
     /// Generate a new password and revoke all sessions using the old one.
     RotateKey,
+    /// Print the socks5:// link proxy users connect with.
+    Link {
+        /// Host to put in the link when none is advertised (defaults to --server-host).
+        #[arg(long)]
+        host: Option<String>,
+    },
+    /// Change the username and/or password; revokes all sessions.
+    #[command(group(ArgGroup::new("credentials").required(true).multiple(true).args(["username", "password_stdin"])))]
+    SetCredentials {
+        #[arg(long)]
+        username: Option<String>,
+        /// Read the new password from the first line of standard input.
+        #[arg(long)]
+        password_stdin: bool,
+    },
+    /// Set the HOST or HOST:PORT that links advertise (NAT, port mapping, domain).
+    #[command(group(ArgGroup::new("advertise").required(true).args(["address", "clear"])))]
+    SetAdvertise {
+        address: Option<String>,
+        /// Use the node's own host and the listen port again.
+        #[arg(long)]
+        clear: bool,
+    },
+    /// Change UDP, destination and resource policy; revokes all sessions.
+    #[command(group(ArgGroup::new("policy").required(true).multiple(true).args(["udp", "private_destinations", "max_sessions", "handshake_timeout"])))]
+    SetPolicy {
+        #[arg(long, value_enum)]
+        udp: Option<Toggle>,
+        /// Loopback, private and link-local destinations (denied by default).
+        #[arg(long, value_enum)]
+        private_destinations: Option<Access>,
+        #[arg(long)]
+        max_sessions: Option<u32>,
+        /// Seconds allowed for authentication and the request.
+        #[arg(long)]
+        handshake_timeout: Option<u64>,
+    },
+    /// Restrict which client networks may connect (empty allows all).
+    Allow {
+        #[command(subcommand)]
+        command: AllowCommand,
+    },
+    /// List active sessions.
+    Sessions,
+    /// Close sessions by id, by client address, or all of them.
+    #[command(group(ArgGroup::new("selection").required(true).args(["id", "peer", "all"])))]
+    Kick {
+        #[arg(long)]
+        id: Option<u64>,
+        #[arg(long)]
+        peer: Option<std::net::IpAddr>,
+        #[arg(long)]
+        all: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AllowCommand {
+    /// Allow these networks, e.g. 203.0.113.0/24 or 2001:db8::/32.
+    Add {
+        #[arg(required = true)]
+        networks: Vec<ipnet::IpNet>,
+    },
+    Remove {
+        #[arg(required = true)]
+        networks: Vec<ipnet::IpNet>,
+    },
+    /// Allow every client address again.
+    Clear,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum Toggle {
+    On,
+    Off,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum Access {
+    Allow,
+    Deny,
 }
 
 #[derive(Subcommand, Debug)]
@@ -251,11 +333,48 @@ fn error_response(error: impl ToString) -> ControlResponse {
     }
 }
 
-fn print_response(response: &ControlResponse) {
-    println!(
-        "{}",
-        serde_json::to_string(response).expect("serialize control response")
-    );
+/// What a command prints: a control response, or a link assembled locally.
+enum Output {
+    Response(ControlResponse),
+    Link { url: String, udp: bool },
+}
+
+impl Output {
+    /// Print as JSON and report success.
+    fn print(&self) -> bool {
+        let (json, ok) = match self {
+            Self::Response(response) => (
+                serde_json::to_string(response).expect("serialize control response"),
+                response.ok,
+            ),
+            Self::Link { url, udp } => (
+                serde_json::json!({
+                    "ok": true,
+                    "error": null,
+                    "result": {"type": "socks5_link", "url": url, "udp": udp},
+                })
+                .to_string(),
+                true,
+            ),
+        };
+        println!("{json}");
+        ok
+    }
+}
+
+fn update(update: Socks5Update) -> ControlOp {
+    ControlOp::UpdateSocks5Config { update }
+}
+
+/// One line from standard input, so the password stays out of `ps` and shell history.
+fn read_password() -> Result<String> {
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    let password = line.trim_end_matches(['\r', '\n']).to_string();
+    if password.is_empty() {
+        bail!("no password on standard input");
+    }
+    Ok(password)
 }
 
 fn add_relay_target(args: AddRelayTargetArgs) -> Result<UpstreamTarget> {
@@ -301,14 +420,14 @@ fn validate_server_host(host: &str) -> Result<()> {
     Ok(())
 }
 
-async fn run(cli: Cli) -> Result<ControlResponse> {
+async fn run(cli: Cli) -> Result<Output> {
     validate_server_host(&cli.server_host)?;
     let session_key = resolve_session_key(&cli);
     let mut client =
         ControlClient::connect(&cli.server_host, cli.server_port, Some(session_key)).await?;
     let token = cli.token.clone();
 
-    match cli.command {
+    let response: Result<ControlResponse> = match cli.command {
         Command::Socks5 { command } => {
             let op = match command {
                 Socks5Command::Status => ControlOp::GetSocks5Status,
@@ -321,6 +440,59 @@ async fn run(cli: Cli) -> Result<ControlResponse> {
                     listen: None,
                 },
                 Socks5Command::RotateKey => ControlOp::RotateSocks5Key,
+                Socks5Command::Link { host } => {
+                    let Some(endpoint) = client.get_socks5_endpoint().await? else {
+                        bail!("SOCKS5 is not running on this server");
+                    };
+                    let host = host.unwrap_or_else(|| cli.server_host.clone());
+                    return Ok(Output::Link {
+                        url: endpoint.url(&host),
+                        udp: endpoint.udp,
+                    });
+                }
+                Socks5Command::SetCredentials {
+                    username,
+                    password_stdin,
+                } => update(Socks5Update {
+                    username,
+                    password: password_stdin.then(read_password).transpose()?,
+                    ..Default::default()
+                }),
+                Socks5Command::SetAdvertise { address, clear: _ } => update(Socks5Update {
+                    advertise: Some(address.unwrap_or_default()),
+                    ..Default::default()
+                }),
+                Socks5Command::SetPolicy {
+                    udp,
+                    private_destinations,
+                    max_sessions,
+                    handshake_timeout,
+                } => update(Socks5Update {
+                    udp: udp.map(|udp| matches!(udp, Toggle::On)),
+                    allow_private_destinations: private_destinations
+                        .map(|access| matches!(access, Access::Allow)),
+                    max_sessions,
+                    handshake_timeout_secs: handshake_timeout,
+                    ..Default::default()
+                }),
+                Socks5Command::Allow { command } => update(match command {
+                    AllowCommand::Add { networks } => Socks5Update {
+                        add_allowed_sources: networks,
+                        ..Default::default()
+                    },
+                    AllowCommand::Remove { networks } => Socks5Update {
+                        remove_allowed_sources: networks,
+                        ..Default::default()
+                    },
+                    AllowCommand::Clear => Socks5Update {
+                        clear_allowed_sources: true,
+                        ..Default::default()
+                    },
+                }),
+                Socks5Command::Sessions => ControlOp::ListSocks5Sessions,
+                Socks5Command::Kick { id, peer, all: _ } => {
+                    ControlOp::CloseSocks5Sessions { id, peer }
+                }
             };
             client
                 .request(ControlRequest { token, op })
@@ -435,19 +607,18 @@ async fn run(cli: Cli) -> Result<ControlResponse> {
                 Ok(success_response(ControlResult::TopN { entries }))
             }
         },
-    }
+    };
+    response.map(Output::Response)
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    let response = match run(cli).await {
-        Ok(response) => response,
-        Err(error) => error_response(error),
+    let output = match run(cli).await {
+        Ok(output) => output,
+        Err(error) => Output::Response(error_response(error)),
     };
-    let success = response.ok;
-    print_response(&response);
-    if success {
+    if output.print() {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)

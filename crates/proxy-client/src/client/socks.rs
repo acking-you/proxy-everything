@@ -1,4 +1,8 @@
 use proxy_core::datagram::DatagramAddress;
+use proxy_core::socks5::reply::{COMMAND_NOT_SUPPORTED, GENERAL_FAILURE, SUCCEEDED};
+use proxy_core::socks5::{
+    CONNECT as TCP_CONN, METHOD_NO_AUTH as NO_AUTH, UDP_ASSOCIATE, VERSION as SOCK5_VER,
+};
 use snafu::{ResultExt, Snafu};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -15,8 +19,6 @@ pub enum SocksError {
     FirstRequest { detail: &'static str },
     #[snafu(display("Unsupported operate:{detail}"))]
     NotSupported { detail: &'static str },
-    #[snafu(display("Unsupported operate:{detail} with atyp(`{atyp:#x}`)"))]
-    NotSupportedHost { atyp: u8, detail: &'static str },
     #[snafu(display("Unsupported operate:{detail} with cmd(`{cmd:#x}`)"))]
     NotSupportedTransport { cmd: u8, detail: &'static str },
     #[snafu(display("Sock5 proxy io error occur: {detail}"))]
@@ -29,12 +31,6 @@ pub enum SocksError {
 }
 
 type Result<T, E = SocksError> = std::result::Result<T, E>;
-
-const SOCK5_VER: u8 = 0x05;
-const NO_AUTH: u8 = 0x00;
-const TCP_CONN: u8 = 0x01;
-const UDP_ASSOCIATE: u8 = 0x03;
-const COMMAND_NOT_SUPPORTED: u8 = 0x07;
 
 pub enum SocksForwarder {
     Tcp(TcpForwardImpl),
@@ -161,7 +157,8 @@ impl ForwarderProvider for SocksProxierProvider {
                     Err(error) => {
                         // General server failure (RFC 1928); never signal a
                         // successful tunnel when opening the upstream failed.
-                        let _ = response_with_code(&mut proxy_context.stream, 0x01).await;
+                        let _ =
+                            response_with_code(&mut proxy_context.stream, GENERAL_FAILURE).await;
                         return Err(error);
                     }
                 };
@@ -285,7 +282,7 @@ async fn read_request(stream: &mut TcpStream) -> Result<SocksRequest> {
 /// BND.ADDR 服务绑定的地址
 /// BND.PORT 服务绑定的端口DST.PORT
 async fn response(stream: &mut TcpStream) -> Result<()> {
-    response_with_code(stream, 0x00).await
+    response_with_code(stream, SUCCEEDED).await
 }
 
 /// Send a complete SOCKS5 reply with an unspecified IPv4 bind address.
@@ -293,7 +290,7 @@ async fn response(stream: &mut TcpStream) -> Result<()> {
 /// Rejected commands still require an RFC 1928 reply so clients can
 /// distinguish a configured policy from a network timeout.
 async fn response_with_code(stream: &mut TcpStream, reply_code: u8) -> Result<()> {
-    proxy_core::socks5::write_reply(stream, reply_code, ([0, 0, 0, 0], 0).into())
+    proxy_core::socks5::write_failure(stream, reply_code)
         .await
         .context(IoSnafu {
             detail: "send SOCKS5 response",

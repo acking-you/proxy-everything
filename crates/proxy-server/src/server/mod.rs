@@ -141,6 +141,8 @@ pub const MAX_HEADER_SIZE: DataSize = 8 * 128;
 struct ServerContext {
     socks5: Arc<Socks5Manager>,
     cancel: CancellationToken,
+    /// See `control::admin_token_is_private`.
+    admin_token_private: bool,
     metrics: Arc<MetricsStore>,
     nodes: Arc<NodeStore>,
     relay: Arc<RelayManager>,
@@ -357,9 +359,19 @@ pub async fn run_server_with_listener(
         }
     });
 
+    let admin_token_private = control::admin_token_is_private(
+        config.admin_token.as_deref(),
+        config.control_session_key.as_deref(),
+    );
+    if config.admin_token.is_some() && !admin_token_private {
+        tracing::warn!(
+            "CONTROL_ADMIN_TOKEN equals a key proxy users hold; SOCKS5 management is disabled"
+        );
+    }
     let ctx = Arc::new(ServerContext {
         socks5: config.socks5,
         cancel: cancel_token.clone(),
+        admin_token_private,
         metrics: config.metrics,
         nodes: config.nodes,
         relay: config.relay,
@@ -371,8 +383,8 @@ pub async fn run_server_with_listener(
         trace_id_seed: AtomicU64::new(1),
     });
 
-    // Background relay health checks.
     Socks5Manager::restore(ctx.clone()).await;
+    // Background relay health checks.
     let relay_for_health = ctx.relay.clone();
     let relay_cancel = cancel_token.clone();
     tokio::spawn(async move {
@@ -422,7 +434,7 @@ pub async fn start_server(host: impl AsRef<str> + Debug, port: u16) -> std::io::
         Socks5Manager::load(proxy_core::config::default_state_dir().join("socks5.json"))
     })
     .await
-    .map_err(std::io::Error::other)??;
+    .map_err(std::io::Error::other)?;
     let nodes = Arc::new(NodeStore::with_default_path());
     if let Err(err) = nodes.load() {
         tracing::warn!("load nodes failed: {}", error_report(&err));

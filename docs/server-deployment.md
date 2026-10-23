@@ -93,7 +93,7 @@ For any custom `SERVICE_NAME`, it now assigns an isolated state directory under
 | `TURELY_PROXY_SERVER` | No | - | Initial upstream target (auto-added to relay) |
 | `CONTROL_SESSION_KEY` | No | - | 32-char key for control protocol encryption |
 | `CONTROL_REQUIRE_ENCRYPTION` | No | true | Require encrypted control messages |
-| `CONTROL_ADMIN_TOKEN` | No | - | Admin token for privileged operations |
+| `CONTROL_ADMIN_TOKEN` | No | - | Admin token for privileged operations; required for SOCKS5 management and must differ from the keys |
 | `NODE_ID` | No | auto | Stable node identifier |
 | `NODE_ADVERTISE_ADDR` | No | auto | Address advertised to other nodes |
 

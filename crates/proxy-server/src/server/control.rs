@@ -41,7 +41,8 @@ pub(super) async fn handle_control_request(
     ctx: Arc<ServerContext>,
     encrypted: bool,
 ) -> ControlResponse {
-    if let Some(expected) = ctx.admin_token.as_ref()
+    if !request.op.is_client_readable()
+        && let Some(expected) = ctx.admin_token.as_ref()
         && request.token.as_deref() != Some(expected.as_str())
     {
         return ControlResponse {
@@ -52,38 +53,20 @@ pub(super) async fn handle_control_request(
     }
 
     match request.op {
+        ControlOp::GetSocks5Endpoint => {
+            if !encrypted {
+                return failure("SOCKS5 endpoints require an encrypted control session");
+            }
+            success(ControlResult::Socks5Endpoint {
+                endpoint: ctx.socks5.endpoint().await,
+            })
+        }
         op @ (ControlOp::GetSocks5Status
         | ControlOp::SetSocks5Enabled { .. }
-        | ControlOp::RotateSocks5Key) => {
-            if !encrypted {
-                return ControlResponse {
-                    ok: false,
-                    error: Some("SOCKS5 management requires an encrypted control session".into()),
-                    result: None,
-                };
-            }
-            use super::socks5::{Change, Socks5Manager};
-            let result = match op {
-                ControlOp::GetSocks5Status => Ok(ctx.socks5.status().await),
-                ControlOp::SetSocks5Enabled { enabled, listen } => {
-                    Socks5Manager::change(ctx, Change::SetEnabled { enabled, listen }).await
-                }
-                ControlOp::RotateSocks5Key => Socks5Manager::change(ctx, Change::RotateKey).await,
-                _ => unreachable!(),
-            };
-            match result {
-                Ok(status) => ControlResponse {
-                    ok: true,
-                    error: None,
-                    result: Some(ControlResult::Socks5Status { status }),
-                },
-                Err(error) => ControlResponse {
-                    ok: false,
-                    error: Some(error.to_string()),
-                    result: None,
-                },
-            }
-        }
+        | ControlOp::RotateSocks5Key
+        | ControlOp::UpdateSocks5Config { .. }
+        | ControlOp::ListSocks5Sessions
+        | ControlOp::CloseSocks5Sessions { .. }) => manage_socks5(op, ctx, encrypted).await,
         ControlOp::Ping => ControlResponse {
             ok: true,
             error: None,
@@ -330,5 +313,76 @@ pub(super) async fn handle_control_request(
                 result: Some(ControlResult::RelayStatus { status }),
             }
         }
+    }
+}
+
+fn success(result: ControlResult) -> ControlResponse {
+    ControlResponse {
+        ok: true,
+        error: None,
+        result: Some(result),
+    }
+}
+
+fn failure(error: impl Into<String>) -> ControlResponse {
+    ControlResponse {
+        ok: false,
+        error: Some(error.into()),
+        result: None,
+    }
+}
+
+/// Whether the admin token is a credential proxy users do not already hold.
+/// They have the native key and, by default, use it as the control key too.
+pub(super) fn admin_token_is_private(
+    token: Option<&str>,
+    control_session_key: Option<&str>,
+) -> bool {
+    let Some(token) = token.filter(|token| !token.is_empty()) else {
+        return false;
+    };
+    Some(token) != control_session_key
+        && token != proxy_core::config::DEFAULT_SECRET_KEY
+        && !proxy_core::config::runtime::with_secret_key(|key, _| key == token.as_bytes())
+}
+
+/// SOCKS5 changes open a public port and hand out credentials, so they need an
+/// admin token that differs from every key a proxy user holds.
+async fn manage_socks5(op: ControlOp, ctx: Arc<ServerContext>, encrypted: bool) -> ControlResponse {
+    use super::socks5::{Change, Socks5Manager};
+
+    if !encrypted {
+        return failure("SOCKS5 management requires an encrypted control session");
+    }
+    if !ctx.admin_token_private {
+        return failure(
+            "SOCKS5 management requires CONTROL_ADMIN_TOKEN on the server, set to a value \
+             different from SECRET_KEY and CONTROL_SESSION_KEY",
+        );
+    }
+    let status =
+        |result: std::io::Result<_>| result.map(|status| ControlResult::Socks5Status { status });
+    let result = match op {
+        ControlOp::GetSocks5Status => Ok(ControlResult::Socks5Status {
+            status: ctx.socks5.status().await,
+        }),
+        ControlOp::SetSocks5Enabled { enabled, listen } => {
+            status(Socks5Manager::change(ctx, Change::SetEnabled { enabled, listen }).await)
+        }
+        ControlOp::RotateSocks5Key => status(Socks5Manager::change(ctx, Change::RotateKey).await),
+        ControlOp::UpdateSocks5Config { update } => {
+            status(Socks5Manager::change(ctx, Change::Update(update)).await)
+        }
+        ControlOp::ListSocks5Sessions => Ok(ControlResult::Socks5Sessions {
+            sessions: ctx.socks5.sessions().await,
+        }),
+        ControlOp::CloseSocks5Sessions { id, peer } => Ok(ControlResult::Socks5SessionsClosed {
+            closed: ctx.socks5.close_sessions(id, peer).await,
+        }),
+        _ => unreachable!("only SOCKS5 management operations are routed here"),
+    };
+    match result {
+        Ok(result) => success(result),
+        Err(error) => failure(error.to_string()),
     }
 }
