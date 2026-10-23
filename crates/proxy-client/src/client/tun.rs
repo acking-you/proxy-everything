@@ -1037,7 +1037,7 @@ async fn resolve_remote_addresses(endpoint: Option<&(String, u16)>) -> io::Resul
         .collect::<IpSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    if addresses.is_empty() && host.parse::<IpAddr>().is_err() {
+    if addresses.is_empty() && endpoint.host.parse::<IpAddr>().is_err() {
         return Err(io::Error::new(
             io::ErrorKind::AddrNotAvailable,
             format!("remote proxy endpoint {host}:{port} resolved to no routable address"),
@@ -1158,6 +1158,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(addresses, vec!["203.0.113.10".parse::<IpAddr>().unwrap()]);
+        assert!(
+            resolve_remote_addresses(Some(&("quic://127.0.0.1".into(), 10811)))
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

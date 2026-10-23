@@ -103,6 +103,39 @@ reachability and certificate identity, or explicitly choose a TCP node for new
 negotiations. A QUIC-capable listener must be deployed before selecting it;
 existing TCP clients and servers require no configuration changes.
 
+## Performance diagnostics
+
+CUBIC remains the congestion controller. Generic Segmentation Offload (GSO)
+is disabled by default: the lb7666 tests observed severe packet loss with
+offloaded sends despite successful socket writes. Hosts with a verified GSO
+path can set `PROXY_QUIC_GSO=true` before starting to reduce transmit syscall
+overhead. `false` is the default; other values are rejected. This changes
+packet batching, not authentication, stream semantics or the TCP/QUIC choice.
+
+Set `RUST_LOG=info,proxy_core::quic=debug` to record cumulative connection
+statistics when streams close: RTT, congestion window, MTU, lost/sent packets,
+UDP bytes and I/O counts, and peer flow-control blocking. These are connection
+totals shared by all streams, not per-request counters. Connection creation
+also records authenticated handshake duration.
+
+`scripts/bench/quic_transport.py` compares two already-running local proxies
+against a controlled HTTP(S) origin. It alternates TCP/QUIC ordering, verifies
+download bytes and upload SHA-256, and saves each sample so timeouts remain
+visible. It does not modify system proxy settings. See `--help` for the
+origin contract and arguments; use fresh proxy processes for cold-connection
+measurements. Keep payload, v3/legacy mode, certificate verification and origin
+identical between carriers. A matching loopback-only origin is included:
+
+```sh
+# On the exit server, using a certificate valid for 127.0.0.1:
+python3 scripts/bench/quic_origin.py --cert origin.pem --key origin-key.pem
+# On the client, substitute the port printed by the origin and the two local proxies:
+python3 scripts/bench/quic_transport.py \
+  --tcp-proxy http://127.0.0.1:18080 --quic-proxy http://127.0.0.1:18081 \
+  --origin https://127.0.0.1:ORIGIN_PORT --ca origin.pem \
+  --mib 8 --rounds 3 --output target/quic-benchmark.json
+```
+
 ## Verification
 
 Focused automated coverage:

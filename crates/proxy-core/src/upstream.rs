@@ -204,6 +204,7 @@ mod tests {
         assert_eq!(tcp.host, "::1");
         let quic = UpstreamAddress::parse("quic://[::1]:10811").unwrap();
         assert_eq!(quic.carrier, Carrier::Quic);
+        assert_eq!(UpstreamAddress::parse("QUIC://[::1]:10811").unwrap(), quic);
         assert_eq!(
             UpstreamAddress::from_host(&quic.qualified_host(), quic.port).unwrap(),
             quic

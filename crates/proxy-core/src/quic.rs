@@ -28,7 +28,19 @@ pub const MAX_STREAMS: u32 = 64;
 const CANCELLED: VarInt = VarInt::from_u32(1);
 const AUTH_FAILED: VarInt = VarInt::from_u32(2);
 
-fn transport(incoming_streams: u32) -> Arc<quinn::TransportConfig> {
+fn transport(incoming_streams: u32) -> io::Result<Arc<quinn::TransportConfig>> {
+    // Some UDP paths accept GSO writes but silently discard their segments.
+    // Keep reliable per-datagram sends by default; verified hosts may opt in.
+    let gso = match std::env::var("PROXY_QUIC_GSO") {
+        Ok(value) => value.parse::<bool>().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "PROXY_QUIC_GSO must be true or false",
+            )
+        })?,
+        Err(std::env::VarError::NotPresent) => false,
+        Err(error) => return Err(io::Error::new(io::ErrorKind::InvalidInput, error)),
+    };
     let mut config = quinn::TransportConfig::default();
     config
         .max_concurrent_bidi_streams(incoming_streams.into())
@@ -38,8 +50,9 @@ fn transport(incoming_streams: u32) -> Arc<quinn::TransportConfig> {
         .receive_window(VarInt::from_u32(8 * 1024 * 1024))
         .send_window(8 * 1024 * 1024)
         .send_fairness(true)
+        .enable_segmentation_offload(gso)
         .datagram_receive_buffer_size(None);
-    Arc::new(config)
+    Ok(Arc::new(config))
 }
 
 pub fn client_config(extra_ca_pem: Option<&[u8]>) -> io::Result<quinn::ClientConfig> {
@@ -71,7 +84,7 @@ pub fn client_config(extra_ca_pem: Option<&[u8]>) -> io::Result<quinn::ClientCon
     let crypto =
         quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(io::Error::other)?;
     let mut config = quinn::ClientConfig::new(Arc::new(crypto));
-    config.transport_config(transport(0));
+    config.transport_config(transport(0)?);
     Ok(config)
 }
 
@@ -93,7 +106,7 @@ pub fn server_config(cert_pem: &[u8], key_pem: &[u8]) -> io::Result<quinn::Serve
     let crypto =
         quinn::crypto::rustls::QuicServerConfig::try_from(tls).map_err(io::Error::other)?;
     let mut config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
-    config.transport_config(transport(1));
+    config.transport_config(transport(1)?);
     config
         .max_incoming(MAX_CONNECTIONS)
         .incoming_buffer_size_total(4 * 1024 * 1024);
@@ -390,38 +403,75 @@ pub async fn connect_addresses(
     tokio::time::timeout(CONNECT_TIMEOUT, async {
         let pooled = {
             let mut slot = entry.lock().await;
-            if slot.as_ref().is_some_and(|p| p.connection.close_reason().is_some()) { *slot = None; }
+            if slot
+                .as_ref()
+                .is_some_and(|p| p.connection.close_reason().is_some())
+            {
+                *slot = None;
+            }
             if slot.is_none() {
-                let _permit = DIAL_SLOTS.acquire().await.map_err(io::Error::other)?;
-                let mut last_error = io::Error::new(io::ErrorKind::NotFound, "no QUIC address");
-                // Address selection occurs before authentication or application data.
-                for address in addresses.iter() {
-                    let bind = if address.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
-                    let mut endpoint = Endpoint::client(bind.parse().expect("literal socket address"))?;
-                    endpoint.set_default_client_config(config.clone());
-                    let owner = Arc::new(EndpointOwner(endpoint));
-                    let connecting = owner.0.connect(SocketAddr::new(*address, port), host).map_err(io::Error::other)?;
-                    match tokio::time::timeout(Duration::from_secs(4), connecting).await {
-                        Ok(Ok(connection)) => {
-                            if let Err(error) = authenticate(&connection, &secret, false).await {
-                                connection.close(AUTH_FAILED, b"authentication failed");
-                                return Err(error);
-                            }
-                            tracing::info!(carrier = "quic", peer = %connection.remote_address(), "opened authenticated QUIC connection");
-                            *slot = Some(Arc::new(PooledConnection { connection, owner }));
-                            break;
-                        }
-                        Ok(Err(error)) => last_error = io::Error::other(error),
-                        Err(error) => last_error = timeout(error),
-                    }
-                }
-                if slot.is_none() { return Err(last_error); }
+                *slot = Some(dial_connection(host, port, addresses, config, &secret).await?);
             }
             slot.as_ref().expect("authenticated connection").clone()
         };
-        let (send, recv) = pooled.connection.open_bi().await.map_err(io::Error::other)?;
-        Ok(QuicStream::new(send, recv, pooled.connection.clone(), pooled.owner.clone()))
-    }).await.map_err(timeout)?
+        let (send, recv) = pooled
+            .connection
+            .open_bi()
+            .await
+            .map_err(io::Error::other)?;
+        Ok(QuicStream::new(
+            send,
+            recv,
+            pooled.connection.clone(),
+            pooled.owner.clone(),
+        ))
+    })
+    .await
+    .map_err(timeout)?
+}
+
+async fn dial_connection(
+    host: &str,
+    port: u16,
+    addresses: &[IpAddr],
+    config: quinn::ClientConfig,
+    secret: &[u8],
+) -> io::Result<Arc<PooledConnection>> {
+    let _permit = DIAL_SLOTS.acquire().await.map_err(io::Error::other)?;
+    let started = std::time::Instant::now();
+    let mut last_error = io::Error::new(io::ErrorKind::NotFound, "no QUIC address");
+    // Address selection occurs before authentication or application data.
+    for address in addresses {
+        let bind = if address.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
+        let mut endpoint = Endpoint::client(bind.parse().expect("literal socket address"))?;
+        endpoint.set_default_client_config(config.clone());
+        let owner = Arc::new(EndpointOwner(endpoint));
+        let connecting = owner
+            .0
+            .connect(SocketAddr::new(*address, port), host)
+            .map_err(io::Error::other)?;
+        match tokio::time::timeout(Duration::from_secs(4), connecting).await {
+            Ok(Ok(connection)) => {
+                if let Err(error) = authenticate(&connection, secret, false).await {
+                    connection.close(AUTH_FAILED, b"authentication failed");
+                    return Err(error);
+                }
+                tracing::info!(
+                    carrier = "quic", peer = %connection.remote_address(),
+                    handshake_us = started.elapsed().as_micros() as u64,
+                    "opened authenticated QUIC connection"
+                );
+                return Ok(Arc::new(PooledConnection { connection, owner }));
+            }
+            Ok(Err(error)) => last_error = io::Error::other(error),
+            Err(error) => last_error = timeout(error),
+        }
+    }
+    Err(last_error)
 }
 
 /// Close this runtime's pooled connections and retain UDP drivers until drained.
