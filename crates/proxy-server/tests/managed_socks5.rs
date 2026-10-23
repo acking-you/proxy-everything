@@ -163,12 +163,17 @@ impl Server {
 
     /// Serve on loopback, where the test destinations also live.
     async fn serve(&self, protocol: WireProtocol) -> Socks5Status {
+        self.serve_at(SocketAddr::from(([127, 0, 0, 1], 0)), protocol)
+            .await
+    }
+
+    async fn serve_at(&self, listen: SocketAddr, protocol: WireProtocol) -> Socks5Status {
         self.update(Socks5Update {
             allow_private_destinations: Some(true),
             ..Default::default()
         })
         .await;
-        self.enable("127.0.0.1:0", protocol).await
+        self.enable(&listen.to_string(), protocol).await
     }
 
     async fn stop(mut self) {
@@ -184,6 +189,27 @@ impl Drop for Server {
     fn drop(&mut self) {
         self.cancel.cancel();
     }
+}
+
+/// A free loopback address below every ephemeral port range (Linux starts at
+/// 32768, macOS and Windows at 49152), for tests that release a listener's port
+/// and bind it again. The kernel can hand a just-released ephemeral port to any
+/// socket the parallel tests open, so binding it again fails intermittently; a
+/// port outside that range is taken only by an explicit bind.
+fn restartable_address() -> SocketAddr {
+    static HANDED_OUT: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+    let mut handed_out = HANDED_OUT.lock().unwrap();
+    // Start at a per-process offset so concurrent test binaries rarely probe
+    // the same ports.
+    let first = (std::process::id() % 10_000) as u16;
+    let port = (0..10_000)
+        .map(|offset| 20_000 + (first + offset) % 10_000)
+        .find(|port| {
+            !handed_out.contains(port) && std::net::TcpListener::bind(("127.0.0.1", *port)).is_ok()
+        })
+        .expect("a free loopback port below the ephemeral range");
+    handed_out.push(port);
+    SocketAddr::from(([127, 0, 0, 1], port))
 }
 
 struct Echo {
@@ -553,7 +579,10 @@ async fn destination_policy_and_source_allowlist_are_enforced() {
 async fn rotation_revokes_sessions_and_persists_credentials_and_enabled_state() {
     let dir = tempfile::tempdir().unwrap();
     let server = Server::start(dir.path()).await;
-    let old = server.serve(WireProtocol::V3).await;
+    // The restarted server restores this exact port.
+    let old = server
+        .serve_at(restartable_address(), WireProtocol::V3)
+        .await;
     let echo = Echo::tcp("127.0.0.1:0").await;
     let mut client = authenticated(&old.config).await;
     assert_eq!(
@@ -896,7 +925,10 @@ async fn admin_cli_manages_listener_and_returns_failure_for_occupied_port() {
 async fn failed_restore_keeps_management_available_and_can_retry() {
     let dir = tempfile::tempdir().unwrap();
     let server = Server::start(dir.path()).await;
-    let enabled = server.serve(WireProtocol::Legacy).await;
+    // The test occupies, releases and binds this exact port again.
+    let enabled = server
+        .serve_at(restartable_address(), WireProtocol::Legacy)
+        .await;
     server.stop().await;
     let occupied = TcpListener::bind(enabled.config.listen).await.unwrap();
     let server = Server::start(dir.path()).await;
