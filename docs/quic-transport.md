@@ -49,7 +49,11 @@ http-proxy-cli -s proxy.example -p 10811 --transport quic -c 1080
   `--quic-ca`, `quic_ca` or `PROXY_QUIC_CA` (the variable also covers the app's
   native library). Host names are always verified; there is no insecure mode.
 
-In the app, choose QUIC for the node, or paste a `quic://host:port` address.
+In the app, choose QUIC in the server configuration, or paste a
+`quic://host:port` address. Switching the carrier there fills in the port the
+catalogue reports for it, since a node's QUIC listener is a different port.
+On the node map, the TCP/QUIC choice in the toolbar or a node's panel decides
+what tests and connections use wherever a node serves both; see below.
 
 ## Switching upstreams
 
@@ -77,9 +81,16 @@ predate the operation reject it, which clients treat as unknown rather than as
 
 The app asks the whole catalogue after each refresh with the `quic_endpoints`
 operation: one call, answered in order, 16 nodes at a time by default, each with
-its own deadline. It marks capable nodes and can test one over QUIC by probing
+its own deadline. It marks capable nodes and tests one over QUIC by probing
 `quic://<host>:<port>`, where `<host>` is the address the app reached the node at.
 The node's certificate must cover that name.
+
+For nodes serving both, the node map's carrier choice applies to every test,
+connection and latency it shows; nodes serving one carrier always use it. Each
+carrier keeps its own last result, persisted apart, so a node's panel shows TCP
+and QUIC side by side. A configured `quic://` server is recognised as its
+catalogue node by host and reported QUIC port, or by host alone when no other
+node shares it.
 
 ## How it works
 
