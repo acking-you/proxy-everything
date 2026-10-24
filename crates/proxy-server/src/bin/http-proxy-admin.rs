@@ -113,7 +113,7 @@ enum Socks5Command {
         #[arg(long)]
         handshake_timeout: Option<u64>,
     },
-    /// Restrict which client networks may connect (empty allows all).
+    /// Further restrict client networks; mainland China sources are always denied.
     Allow {
         #[command(subcommand)]
         command: AllowCommand,
@@ -143,7 +143,7 @@ enum AllowCommand {
         #[arg(required = true)]
         networks: Vec<ipnet::IpNet>,
     },
-    /// Allow every client address again.
+    /// Clear the allowlist; the mainland China source block remains in force.
     Clear,
 }
 

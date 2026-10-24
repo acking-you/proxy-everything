@@ -467,13 +467,11 @@ pub async fn start_server_with_quic(
     quic: Option<QuicListenConfig>,
 ) -> std::io::Result<()> {
     let quic_endpoint = if let Some(quic) = quic {
-        let configured = proxy_core::config::runtime::with_secret_key(|key, _| {
-            key.len() == 32 && key != proxy_core::config::DEFAULT_SECRET_KEY.as_bytes()
-        });
+        let configured = proxy_core::config::runtime::with_secret_key(|key, _| key.len() == 32);
         if !configured {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "QUIC requires an explicit 32-byte SECRET_KEY",
+                "QUIC requires a 32-byte SECRET_KEY",
             ));
         }
         let certificate = tokio::fs::read(quic.certificate).await?;

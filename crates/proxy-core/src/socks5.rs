@@ -83,7 +83,8 @@ pub struct Socks5Config {
     /// cleartext and the server's own services usually listen there.
     #[serde(default)]
     pub allow_private_destinations: bool,
-    /// Client networks allowed to connect. Empty allows every source.
+    /// Additional client networks allowed to connect. Empty imposes no extra
+    /// restriction; mainland China sources are always refused.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_sources: Vec<IpNet>,
     #[serde(default = "default_max_sessions")]
@@ -217,9 +218,14 @@ impl Socks5Config {
         }
     }
 
+    /// Enforce the bundled mainland China block before the optional allowlist.
+    /// The server checks this on the TCP peer before SOCKS5 authentication;
+    /// IPv4-mapped IPv6 addresses cannot bypass either restriction.
     pub fn allows_source(&self, ip: IpAddr) -> bool {
         let ip = ip.to_canonical();
-        self.allowed_sources.is_empty() || self.allowed_sources.iter().any(|net| net.contains(&ip))
+        !crate::geo::is_china_ip(ip)
+            && (self.allowed_sources.is_empty()
+                || self.allowed_sources.iter().any(|net| net.contains(&ip)))
     }
 
     pub fn allows_destination(&self, ip: IpAddr) -> bool {
@@ -849,6 +855,67 @@ mod tests {
         assert_eq!(config.allowed_sources, vec!["10.0.0.0/8".parse().unwrap()]);
         assert!(config.allows_source("::ffff:10.9.9.9".parse().unwrap()));
         assert!(!config.allows_source("192.168.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn mainland_sources_are_denied_even_with_an_explicit_allowlist() {
+        let mut config = Socks5Config::new(
+            "0.0.0.0:1080".parse().unwrap(),
+            "user".into(),
+            "secret".into(),
+        );
+        let mainland = [
+            "223.5.5.5",
+            "119.29.29.29",
+            "2400:3200::1",
+            "2402:4e00::",
+            "::ffff:223.5.5.5",
+        ];
+        for ip in mainland {
+            assert!(!config.allows_source(ip.parse().unwrap()), "{ip}");
+        }
+        config
+            .apply(Socks5Update {
+                add_allowed_sources: vec!["0.0.0.0/0".parse().unwrap(), "::/0".parse().unwrap()],
+                allow_private_destinations: Some(true),
+                ..Default::default()
+            })
+            .unwrap();
+        // Persisted settings and admin updates cannot override this admission rule.
+        let restored: Socks5Config =
+            serde_json::from_slice(&serde_json::to_vec(&config).unwrap()).unwrap();
+        for ip in mainland {
+            assert!(!restored.allows_source(ip.parse().unwrap()), "{ip}");
+        }
+        assert!(restored.allows_destination("223.5.5.5".parse().unwrap()));
+    }
+
+    #[test]
+    fn hong_kong_macao_taiwan_and_foreign_sources_remain_eligible() {
+        let mut config = Socks5Config::new(
+            "0.0.0.0:1080".parse().unwrap(),
+            "user".into(),
+            "secret".into(),
+        );
+        for ip in [
+            "203.198.7.66", // Hong Kong
+            "202.175.3.8",  // Macao
+            "168.95.1.1",   // Taiwan
+            "::ffff:203.198.7.66",
+            "::ffff:202.175.3.8",
+            "::ffff:168.95.1.1",
+            "43.161.216.219",
+            "43.160.197.235",
+            "1.1.1.1",
+            "2606:4700:4700::1111",
+            "127.0.0.1",
+            "::1",
+        ] {
+            assert!(config.allows_source(ip.parse().unwrap()), "{ip}");
+        }
+        config.allowed_sources = vec!["168.95.0.0/16".parse().unwrap()];
+        assert!(config.allows_source("168.95.1.1".parse().unwrap()));
+        assert!(!config.allows_source("203.198.7.66".parse().unwrap()));
     }
 
     #[test]

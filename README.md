@@ -24,7 +24,8 @@ App ─► local client (HTTP · SOCKS5 · TUN) ══ encrypted, over TCP or QU
   on desktop; the platform VPN API on mobile.
 - **Routing**: geo-based direct or proxy decisions, a reverse mode and keyword lists.
 - **Control plane**: nodes, groups, relay chains with load balancing, metrics
-  and a managed SOCKS5 endpoint.
+  and a managed SOCKS5 endpoint that rejects mainland China source IPs
+  (Hong Kong, Macao and Taiwan remain eligible).
 - **App proxies**: send single apps through the proxy without TUN (macOS and Windows).
 
 ## Quick start

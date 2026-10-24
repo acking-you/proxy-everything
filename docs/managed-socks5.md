@@ -5,6 +5,11 @@ clients. It supports TCP `CONNECT` (IPv4, IPv6, and domain names) and UDP
 `ASSOCIATE`, with mandatory username/password authentication. BIND and the
 CipherRelay-specific ICMP command are not supported on this endpoint.
 
+Mainland China client IPs are always refused before authentication, including
+IPv6 and IPv4-mapped IPv6 peers. Hong Kong, Macao and Taiwan are not part of this
+block. It applies to the managed SOCKS5 endpoint's incoming TCP peer, not to
+proxy destinations or the native encrypted TCP/QUIC listeners.
+
 Traffic leaves the way the node's native traffic does: directly, or through the
 node's relay target (another node or an external SOCKS5/HTTP proxy) when relay
 is enabled. Existing encrypted native connections, the local client's
@@ -72,7 +77,7 @@ http-proxy-admin -H SERVER_IP -p 1081 socks5 disable
 | `set-credentials [--username NAME] [--password-stdin]` | Choose the username and/or read a password from the first line of stdin |
 | `set-advertise HOST[:PORT]` / `set-advertise --clear` | The address links name, for NAT, port mapping or a domain |
 | `set-policy [--udp on\|off] [--private-destinations allow\|deny] [--max-sessions N] [--handshake-timeout SECS]` | UDP, destination and resource policy |
-| `allow add CIDR...` / `allow remove CIDR...` / `allow clear` | Client networks allowed to connect; empty allows all |
+| `allow add CIDR...` / `allow remove CIDR...` / `allow clear` | Additional client allowlist; empty allows sources outside the mainland China block |
 | `link [--host HOST]` | The `socks5://` link; the host defaults to `-H` unless one is advertised |
 | `sessions` | Active sessions: id, client, command, destination, start time |
 | `kick --id N` / `kick --peer IP` / `kick --all` | Close sessions |
@@ -116,6 +121,20 @@ the actual one. Moving between overlapping addresses on one port, such as
 it if the new address cannot be bound. Neither operation affects native sessions.
 
 ## Network policy
+
+The server checks the actual TCP peer against the bundled mainland China IPv4
+and IPv6 ranges before reading a SOCKS5 greeting or allocating a session.
+The source allowlist, including `0.0.0.0/0` or `::/0`, cannot override this
+block. Both `CONNECT` and `UDP ASSOCIATE` require that TCP connection, and UDP
+packets remain pinned to the admitted peer. No online geolocation lookup is
+performed on incoming connections.
+
+The range source and pinned revision are recorded in
+`crates/proxy-core/data/china-ip/manifest.json`. IP allocation and routing can
+change; refresh the bundled snapshot with
+`python3 scripts/geo/update-china-ip.py --revision FULL_COMMIT_SHA` and rebuild
+to apply updated ranges. A connection through another proxy is classified by
+that proxy's source IP as seen by this server.
 
 SOCKS5 follows [RFC 1928](https://www.rfc-editor.org/rfc/rfc1928) and
 username/password authentication follows

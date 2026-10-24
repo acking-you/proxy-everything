@@ -1,16 +1,16 @@
 {
   "source": "https://github.com/gaoyifan/china-operator-ip.git",
-  "revision": "c71fe73f6f4ab528b6462d82da162170f4ea8cfa",
+  "revision": "14ac65e3c3bedf75f5c87d383f6d05c87c0fd911",
   "files": {
     "ipv4.bin": {
-      "ranges": 6525,
-      "sha256": "d185a86656ff8487c6594fe03411aafdb48c946e29a842686f7b48349a5222a9",
-      "source_sha256": "329f319fc3fff6234393ce549c2ff0933ebaf12600efef48644dc037cb56be5a"
+      "ranges": 6526,
+      "sha256": "c65db1f0fadcf08a7807bc7b3af294e0ba4063b4240010a5aa30403614de4e87",
+      "source_sha256": "96381ba2ec8ebad93634365f6f1ca74bdb80af1307640ee59deb9b2deed598bc"
     },
     "ipv6.bin": {
       "ranges": 3488,
-      "sha256": "ac6ea5d7e2435a5d62a12cdae783db7d34df53a61c76db0b7b6e57e5a974e650",
-      "source_sha256": "8a7ca9de5fcd62a0d46e6e7d627a30bada7181236bd2489aff18f887c51985ff"
+      "sha256": "f18795a28a0f347f35d1947770250401b26845abf279fdc715902f21c647c4a4",
+      "source_sha256": "56462a0a1b70a6889a95beac700e657fa6eaa9967597f6986382d8b055d7fcc8"
     }
   }
 }
