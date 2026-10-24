@@ -16,8 +16,11 @@ fallback: a QUIC failure fails that session, and choosing TCP is explicit.
 ## Server
 
 QUIC listens on a UDP port next to the TCP listener. It needs a certificate
-whose SAN matches the host clients dial, and an explicit, non-default 32-byte
-`SECRET_KEY`:
+whose SAN matches the host clients dial, and the same 32-byte `SECRET_KEY` as
+the clients. Like TCP, QUIC also accepts the built-in default key; migrating
+an existing node to QUIC does not require changing its clients' key. A private
+random key is recommended for deployments. Certificate validation remains
+mandatory regardless of the application key:
 
 ```sh
 export SECRET_KEY='<32-byte secret shared with clients>'
