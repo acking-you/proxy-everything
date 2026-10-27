@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import struct
 import tarfile
 import zipfile
 
@@ -21,6 +22,24 @@ FFI_TARGETS = (
     "aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android",
     "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc",
 )
+# Android 15+ devices can run with 16 KB pages. A 64-bit library whose LOAD
+# segments are aligned to less fails to load there, and Google Play rejects it.
+ANDROID_16K_TARGETS = ("aarch64-linux-android", "x86_64-linux-android")
+ANDROID_PAGE_SIZE = 16 * 1024
+
+
+def load_alignments(elf):
+    """Return the alignment of every PT_LOAD segment of a little-endian ELF64 file."""
+    if elf[:6] != b"\x7fELF\x02\x01":
+        raise ValueError("not a little-endian ELF64 file")
+    (phoff,) = struct.unpack_from("<Q", elf, 0x20)
+    phentsize, phnum = struct.unpack_from("<HH", elf, 0x36)
+    alignments = []
+    for index in range(phnum):
+        header = phoff + index * phentsize
+        if struct.unpack_from("<I", elf, header)[0] == 1:  # PT_LOAD
+            alignments.append(struct.unpack_from("<Q", elf, header + 0x30)[0])
+    return alignments
 
 
 def verify(directory, version, source_commit):
@@ -66,6 +85,10 @@ def verify(directory, version, source_commit):
             for name in required:
                 if not read(name):
                     raise ValueError(f"{path.name}: empty {name}")
+            if target in ANDROID_16K_TARGETS:
+                alignments = load_alignments(read("libhttp_proxy.so"))
+                if not alignments or min(alignments) < ANDROID_PAGE_SIZE:
+                    raise ValueError(f"{path.name}: libhttp_proxy.so LOAD alignment {alignments} is below 16 KB")
         with path.open("rb") as file:
             digest = hashlib.file_digest(file, "sha256").hexdigest()
         manifest["assets"].append({"name": path.name, "size": path.stat().st_size,
