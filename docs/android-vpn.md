@@ -171,8 +171,9 @@ ui/flutter/native/android/armeabi-v7a/libhttp_proxy.so
 ```
 
 Use `-Configuration Release` for a release build. The default NDK is
-`28.2.13676358`, matching the Flutter 3.38.6 Android toolchain; override
-`-NdkVersion` only when the pinned Flutter SDK changes.
+`28.2.13676358` (r28c), the `flutter.ndkVersion` of the pinned Flutter SDK and
+the NDK the release workflow uses; override `-NdkVersion` only when the pinned
+Flutter SDK changes. NDK r28 and newer align LOAD segments to 16 KB by default.
 
 Build the Flutter package with FVM:
 
@@ -281,6 +282,10 @@ Verify APK zip alignment and ELF load-segment alignment before release:
   Select-String LOAD
 # Every LOAD line must report alignment 0x4000 or greater.
 ```
+
+The release workflow enforces the same rule: `scripts/release/verify-native-assets.py`
+refuses to publish an `aarch64-linux-android` or `x86_64-linux-android`
+`libhttp_proxy.so` with any LOAD segment aligned below 16 KB.
 
 ## Troubleshooting
 
