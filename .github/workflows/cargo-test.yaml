@@ -25,7 +25,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: nightly-2026-01-26
+          toolchain: nightly-2026-10-26
           components: clippy, rustfmt
       - name: cargo fmt
         run: cargo fmt -p proxy-crypto -p proxy-core -p proxy-client -p proxy-server -p proxy-tui -p proxy-ffi -p proxy-updater -p proxy-ui-services -p galaxy-geometry -- --check
@@ -55,8 +55,8 @@ jobs:
           .\scripts\windows\stage-ui-native.ps1 -Configuration Release -SkipBuild
           $fvmDir = Join-Path $env:RUNNER_TEMP 'fvm'
           $archive = Join-Path $env:RUNNER_TEMP 'fvm.zip'
-          Invoke-WebRequest 'https://github.com/btwld/fvm/releases/download/4.1.0/fvm-4.1.0-windows-x64.zip' -OutFile $archive
-          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne '70527bbfdc1beb3fc028043ffeadbceae575f801be423edc819a81dfa6abd8da') { throw 'FVM checksum mismatch' }
+          Invoke-WebRequest 'https://github.com/btwld/fvm/releases/download/4.3.2/fvm-4.3.2-windows-x64.zip' -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne '97696d118ad35bf25dc91fd28c70bb3d77b6d1fee6658fbd744e838b5f81da4a') { throw 'FVM checksum mismatch' }
           Expand-Archive $archive -DestinationPath $fvmDir
           $fvmExe = @(Get-ChildItem $fvmDir -Filter fvm.exe -Recurse)
           if ($fvmExe.Count -ne 1) { throw 'FVM executable missing or ambiguous' }

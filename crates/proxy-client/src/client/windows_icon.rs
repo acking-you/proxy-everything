@@ -109,7 +109,7 @@ fn render_icon_rgba(icon: windows_sys::Win32::UI::WindowsAndMessaging::HICON) ->
         let bgra =
             std::slice::from_raw_parts(bits.cast::<u8>(), (ICON_SIZE * ICON_SIZE * 4) as usize);
         let mut rgba = bgra.to_vec();
-        for pixel in rgba.chunks_exact_mut(4) {
+        for pixel in rgba.as_chunks_mut::<4>().0 {
             pixel.swap(0, 2);
         }
         SelectObject(memory, previous);

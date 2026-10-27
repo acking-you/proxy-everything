@@ -16,7 +16,7 @@ use proxy_core::{
     MyAsyncCodecReader, MyAsyncReadExt, MyAsyncWriteExt, ProxyHeader, ProxyTransport,
     get_data_size, set_data_size,
 };
-use smallvec::{SmallVec, smallvec};
+use smallvec::SmallVec;
 use snafu::ResultExt;
 use tracing::{Instrument, field};
 
@@ -292,7 +292,8 @@ async fn handle_connect_inner(
         }
 
         const STACK_SIZE: usize = MAX_HEADER_SIZE as usize / 2;
-        let mut header_buf: SmallVec<u8, STACK_SIZE> = smallvec![0u8; msg_len as usize];
+        let mut header_buf = SmallVec::<u8, STACK_SIZE>::new();
+        header_buf.resize(msg_len as usize, 0);
         client_reader
             .read_exact(&mut header_buf)
             .await

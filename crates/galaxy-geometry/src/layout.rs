@@ -26,11 +26,11 @@ fn pair_angle(a: u32, b: u32) -> f64 {
 /// Output is interleaved x/z, in the original sorted country order.
 pub fn relax(seeds: &[Seed], output: &mut [f64]) {
     assert_eq!(output.len(), seeds.len() * 2);
-    for (seed, point) in seeds.iter().zip(output.chunks_exact_mut(2)) {
-        point.copy_from_slice(&[seed.x, seed.z]);
+    for (seed, point) in seeds.iter().zip(output.as_chunks_mut::<2>().0) {
+        *point = [seed.x, seed.z];
     }
     for _ in 0..240 {
-        for (seed, point) in seeds.iter().zip(output.chunks_exact_mut(2)) {
+        for (seed, point) in seeds.iter().zip(output.as_chunks_mut::<2>().0) {
             point[0] += (seed.x - point[0]) * 0.015;
             point[1] += (seed.z - point[1]) * 0.015;
             let radius = (point[0] * point[0] + point[1] * point[1]).sqrt();

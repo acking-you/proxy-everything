@@ -189,20 +189,11 @@ async fn main() -> std::io::Result<()> {
                         state.page_offset = 0;
                     }
                     KeyCode::Up => match state.tab_index {
-                        0 => {
-                            if state.selected_node > 0 {
-                                state.selected_node -= 1;
-                            }
-                        }
-                        1 => {
-                            if state.selected_group > 0 {
-                                state.selected_group -= 1;
-                            }
-                        }
+                        0 => state.selected_node = state.selected_node.saturating_sub(1),
+                        1 => state.selected_group = state.selected_group.saturating_sub(1),
                         2 => {
-                            if state.selected_relay_target > 0 {
-                                state.selected_relay_target -= 1;
-                            }
+                            state.selected_relay_target =
+                                state.selected_relay_target.saturating_sub(1)
                         }
                         _ => {}
                     },

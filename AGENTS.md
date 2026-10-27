@@ -28,7 +28,7 @@ then implementation simplicity.
   project files. Windows uses the MSVC target with Visual Studio 2022 Build
   Tools (Desktop development with C++) and CMake. Keep `Cargo.lock` committed,
   and change it only when dependency resolution changes.
-- **Flutter**: FVM only. `ui/flutter/.fvmrc` pins the SDK (Flutter 3.47.7).
+- **Flutter**: FVM only. `ui/flutter/.fvmrc` pins the SDK (Flutter 3.47.8).
   Never run bare `flutter` or `dart`; use `fvm flutter …` and `fvm dart …` from
   `ui/flutter`, and run `fvm install` after cloning or an SDK change. Never
   commit `.fvm/`, `.dart_tool/`, `build/` or `ui/flutter/native/`, which holds

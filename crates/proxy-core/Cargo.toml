@@ -36,7 +36,6 @@ parking_lot = { workspace = true }
 
 # Collections
 indexmap = { workspace = true }
-lru = { workspace = true }
 moka = { workspace = true }
 
 # Async utilities
@@ -47,7 +46,6 @@ reqwest = { workspace = true }
 rustls = { workspace = true }
 quinn = { workspace = true }
 webpki-roots = "1"
-ureq = { workspace = true }
 tokio-socks = { workspace = true }
 ipnet = { workspace = true }
 percent-encoding = { workspace = true }
@@ -70,8 +68,6 @@ indicatif = { workspace = true, optional = true }
 
 # auto-proxy dependencies (optional)
 hashbrown = { workspace = true, optional = true }
-kanal = { workspace = true, optional = true }
-async-broadcast = { workspace = true, optional = true }
 
 # `test-util` provides the paused clock the geo rate-limiter tests need, so they
 # assert timing without sleeping in real time.
@@ -84,8 +80,9 @@ tokio = { workspace = true, features = [
 
 # Descriptor-limit policy (see src/rlimit.rs)
 [target.'cfg(unix)'.dependencies]
-# nix 0.31 still references iOS system-control types removed by libc 0.2.190.
-# Keep the latest compatible bindings until nix restricts those APIs to macOS.
+# nix 0.31.3 still references iOS system-control types removed by libc 0.2.190.
+# nix-rust/nix#2821 restricts them to macOS but is not released yet; lift this
+# pin (and move parking_lot to 0.13) once a nix release carries it.
 libc = "=0.2.189"
 
 [target.'cfg(windows)'.dependencies]
@@ -101,5 +98,5 @@ windows-sys = { version = "0.61", features = [
 no-external-geo = []
 default = ["tokio", "auto-proxy"]
 tokio = ["dep:tokio", "dep:tokio-util"]
-auto-proxy = ["dep:hashbrown", "dep:kanal", "dep:async-broadcast"]
+auto-proxy = ["dep:hashbrown"]
 cli-dep = ["dep:indicatif"]

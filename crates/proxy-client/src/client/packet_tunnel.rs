@@ -14,7 +14,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio_util::sync::{CancellationToken, PollSender};
 use tokio_util::task::TaskTracker;
-use tun2proxy::{ArgDns, ArgProxy, ArgUdpStrategy, Args, VirtualDnsState};
+use tun2proxy::{ArgDns, ArgUdpStrategy, Args, ProxyParameters, VirtualDnsState};
 
 use super::{ClientConfig, ClientRuntimeConfig, run_client_with_listener_runtime_config};
 
@@ -236,11 +236,10 @@ impl PacketTunnelRuntime {
             input: input_rx,
             output: PollSender::new(output_tx),
         };
+        let proxy = ProxyParameters::try_from(format!("socks5://127.0.0.1:{local_port}").as_str())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid loopback proxy"))?;
         let args = Args {
-            proxy: ArgProxy::try_from(format!("socks5://127.0.0.1:{local_port}").as_str())
-                .map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "invalid loopback proxy")
-                })?,
+            proxy,
             setup: false,
             dns: if config.tun_fake_ip {
                 ArgDns::Virtual
