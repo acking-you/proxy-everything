@@ -12,9 +12,11 @@ members = [
     "crates/galaxy-geometry",
 ]
 exclude = [
+    "deps/better_mimalloc_rs",
     "deps/quinn",
     "deps/kanal",
     "deps/uni-stream",
+    "deps/rust-smallvec",
     "deps/sysproxy-rs",
     "deps/tun2proxy",
     "deps/ipstack",
@@ -53,14 +55,14 @@ tracing-subscriber = { version = "0.3.23", features = [
 
 # Concurrency
 dashmap = "6.2.1"
-arc-swap = "1.9.2"
+arc-swap = "1.9.3"
 once_cell = "1.21.4"
+# 0.13 needs libc >= 0.2.191, which proxy-core cannot take yet (see its libc pin).
 parking_lot = "0.12"
 
 # Collections
 indexmap = "2"
 hashbrown = "0.17.1"
-lru = "0.18"
 moka = { version = "0.12.16", features = ["sync"] }
 
 # Async utilities
@@ -73,7 +75,7 @@ reqwest = { version = "0.13", default-features = false, features = [
     "json",
     "stream",
 ] }
-rustls = { version = "0.23.45", default-features = false, features = ["std", "ring", "tls12"] }
+rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 tokio-socks = "0.5.3"
 ipnet = { version = "2.12", features = ["serde"] }
@@ -101,8 +103,7 @@ chrono = "0.4"
 
 # System
 dirs = "7"
-# sysinfo 0.39 uses cfg_select, not stabilized in the pinned January nightly.
-sysinfo = "0.38"
+sysinfo = "0.39"
 
 # Memory allocator
 better_mimalloc_rs = { path = "deps/better_mimalloc_rs", features = ["config"] }
@@ -111,10 +112,15 @@ better_mimalloc_rs = { path = "deps/better_mimalloc_rs", features = ["config"] }
 rand = "0.10"
 
 # Local dependencies
-kanal = { path = "deps/kanal" }
+kanal = { package = "kanal-plus", path = "deps/kanal" }
 sysproxy = { path = "deps/sysproxy-rs" }
 smallvec = { path = "deps/rust-smallvec", features = ["std"] }
 tun2proxy = { path = "deps/tun2proxy", default-features = false }
 # `deps/ipstack` has no entry here on purpose: nothing in the workspace uses it
 # directly. `tun2proxy` depends on it by path, which is what pulls the fork into
 # the build.
+
+# uni-stream is published and so requires kanal-plus from crates.io; resolve it
+# to the same fork checkout so the build carries one channel crate.
+[patch.crates-io]
+kanal-plus = { path = "deps/kanal" }

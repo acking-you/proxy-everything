@@ -887,7 +887,8 @@ resolving names locally first, which fake-IP DNS makes impossible under TUN.
 
 ## References
 
-- **Rust toolchain**: 1.87.0 (see `rust-toolchain.toml`)
+- **Rust toolchain**: pinned nightly (see `rust-toolchain.toml`); `rustfmt.toml` uses
+  nightly-only options, and CI installs the same date
 - **Crypto library**: `ring` (AES-256-GCM)
 - **Async runtime**: `tokio` (default) or `monoio` (io_uring)
-- **Flutter version**: 3.38.6 (see `ui/flutter/.github/workflows/build.yaml`)
+- **Flutter version**: 3.47.8 (see `ui/flutter/.fvmrc`)

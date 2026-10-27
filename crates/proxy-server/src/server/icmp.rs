@@ -156,7 +156,7 @@ impl EchoSocket {
         }
         self.sent += 1;
         let token = NEXT_PROBE
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 value.checked_add(1)
             })
             .map_err(|_| io::Error::other("ICMP probe identifiers exhausted"))?;

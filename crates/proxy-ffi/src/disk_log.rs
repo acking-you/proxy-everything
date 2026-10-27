@@ -102,7 +102,7 @@ impl DiskLog {
         let length = line.len();
         if self
             .queued_bytes
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bytes| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |bytes| {
                 (length <= MAX_QUEUED_BYTES.saturating_sub(bytes)).then_some(bytes + length)
             })
             .is_err()

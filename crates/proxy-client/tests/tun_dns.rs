@@ -8,7 +8,7 @@ use proxy_client::client::tun::TunConfig;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
-use tun2proxy::{ArgProxy, ArgUdpStrategy, Args, VirtualDnsState};
+use tun2proxy::{ArgUdpStrategy, Args, ProxyParameters, VirtualDnsState};
 
 const CLIENT: [u8; 4] = [10, 77, 0, 2];
 const PORTAL: [u8; 4] = [10, 77, 0, 1];
@@ -21,7 +21,7 @@ async fn udp_dns_retries_and_id_collisions_survive_one_tcp_relay() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let args = Args {
             setup: false,
-            proxy: ArgProxy::try_from(
+            proxy: ProxyParameters::try_from(
                 format!("socks5://{}", listener.local_addr().unwrap()).as_str(),
             )
             .unwrap(),
@@ -196,7 +196,8 @@ async fn real_listener_forces_dns_through_remote_without_forcing_other_traffic()
             };
             let args = Args {
                 setup: false,
-                proxy: ArgProxy::try_from(format!("socks5://{local_addr}").as_str()).unwrap(),
+                proxy: ProxyParameters::try_from(format!("socks5://{local_addr}").as_str())
+                    .unwrap(),
                 dns: TunConfig::new(Vec::<String>::new()).unwrap().dns_mode(),
                 dns_addr: resolver.parse().unwrap(),
                 udp_strategy: ArgUdpStrategy::Block,
@@ -348,7 +349,7 @@ async fn disabling_fake_ip_proxies_udp_and_tcp_dns_and_preserves_cached_domains(
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut args = Args {
             setup: false,
-            proxy: ArgProxy::try_from(
+            proxy: ProxyParameters::try_from(
                 format!("socks5://{}", listener.local_addr().unwrap()).as_str(),
             )
             .unwrap(),

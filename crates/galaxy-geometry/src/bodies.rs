@@ -151,7 +151,12 @@ pub fn place_stars(
     yaw: f64,
     tilt: f64,
 ) {
-    for (star, out) in input.chunks_exact(3).zip(output.chunks_exact_mut(2)) {
+    for (star, out) in input
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(output.as_chunks_mut::<2>().0)
+    {
         let parallax = star[2] as f64;
         let shift_x = yaw / TAU * width * parallax * 2.2;
         let shift_y = (tilt - 0.6) * height * parallax * 0.6;
@@ -183,8 +188,10 @@ mod tests {
         );
         assert!(
             output
-                .chunks_exact(2)
-                .all(|p| (0.0..800.0).contains(&p[0]) && (0.0..600.0).contains(&p[1]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .all(|[x, y]| (0.0..800.0).contains(x) && (0.0..600.0).contains(y))
         );
     }
 }

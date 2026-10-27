@@ -18,7 +18,7 @@ use std::os::fd::{IntoRawFd, OwnedFd};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
-use tun2proxy::{ArgDns, ArgProxy, ArgUdpStrategy, Args};
+use tun2proxy::{ArgDns, ArgUdpStrategy, Args, ProxyParameters};
 pub use tun2proxy::{
     NetworkTeardownError as TunNetworkTeardownError, ProcessBypass,
     VirtualDnsState as TunVirtualDnsState,
@@ -841,7 +841,7 @@ async fn run_with_ready_inner(
         }
         return Err(error);
     }
-    let proxy = ArgProxy::try_from(format!("socks5://127.0.0.1:{local_port}").as_str())
+    let proxy = ProxyParameters::try_from(format!("socks5://127.0.0.1:{local_port}").as_str())
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
     let platform_owned_tun = tun_fd.is_some();
     let mut args = Args {
