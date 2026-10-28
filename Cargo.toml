@@ -23,7 +23,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.6.14"
+version = "0.6.15"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/acking-you/proxy-everything"
