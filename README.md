@@ -21,7 +21,8 @@ App ─► local client (HTTP · SOCKS5 · TUN) ══ encrypted, over TCP or QU
 - **Local proxy**: HTTP, HTTPS CONNECT and SOCKS5, including UDP ASSOCIATE, on
   one port. Optionally sets the system proxy.
 - **TUN capture**: whole-device capture with process bypass and loop prevention
-  on desktop; the platform VPN API on mobile.
+  on desktop; the platform VPN API on mobile. Windows process-bypassed UDP
+  preserves source mappings across STUN/P2P targets ([details](docs/client-usage.md#loop-prevention-invariant)).
 - **Routing**: geo-based direct or proxy decisions, a reverse mode and keyword lists.
 - **Control plane**: nodes, groups, relay chains with load balancing, metrics
   and a managed SOCKS5 endpoint that rejects mainland China source IPs

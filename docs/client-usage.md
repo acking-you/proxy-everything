@@ -417,6 +417,33 @@ Other bypassed processes connect directly to their original destinations and
 therefore do not use the proxy. Do not add an application to the bypass list if
 its traffic should remain proxied.
 
+On Windows, process-bypassed unicast UDP reuses one physical socket across
+destinations for each application source endpoint. STUN discovery and subsequent
+P2P probes therefore use the same physical source port. This removes the extra
+destination-dependent mapping previously introduced by TUN forwarding; it does
+not change the physical network's NAT or guarantee P2P connectivity. This path
+applies before the ordinary UDP proxy/block setting. DNS and multicast keep
+their dedicated handling.
+
+Ownership is checked using the Windows socket's PID and bind timestamp, so
+closing and reopening the same port does not inherit another socket's mapping.
+If Windows cannot supply an unambiguous owner, forwarding retains the isolated
+per-destination behavior instead of sharing an uncertain endpoint. A single
+receiver dispatches replies only to active flows for contacted remote endpoints,
+preserving the original destination seen by the application, including Fake-IP.
+Packets from uncontacted peers are dropped; unsolicited inbound P2P discovery is
+not enabled by this change. Two active virtual destinations resolving to the
+same real peer are rejected when their replies cannot be disambiguated.
+
+Mappings survive individual target flows and expire after 120 seconds of idle
+time. Socket ownership and physical egress are rechecked every two seconds;
+an owner change, failed ownership verification, egress change, bypass revocation,
+or TUN shutdown retires the affected endpoints. Normal per-flow UDP idle timeouts
+still apply. The endpoint pool is capped by the session limit (at most 1024), with
+at most 256 peers per endpoint, 16 queued replies per peer and 8 MiB of queued
+payloads across the pool. Under pressure, idle mappings can be reclaimed and
+excess replies dropped; active mappings are not reassigned to another source.
+
 For excluded local HTTP/SOCKS clients, loopback destinations do not require a
 physical adapter. `localhost` supports both loopback families, including an
 IPv6-only service. Physical DNS resolution and socket binding are deferred
