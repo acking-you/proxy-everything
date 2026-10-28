@@ -963,7 +963,10 @@ async fn failed_restore_keeps_management_available_and_can_retry() {
 async fn overlapping_listen_addresses_on_one_port_can_be_switched() {
     let dir = tempfile::tempdir().unwrap();
     let server = Server::start(dir.path()).await;
-    let status = server.serve(WireProtocol::V3).await;
+    // Switching releases the port and binds it again (see `restartable_address`).
+    let status = server
+        .serve_at(restartable_address(), WireProtocol::V3)
+        .await;
     let port = status.config.listen.port();
     let loopback = SocketAddr::from(([127, 0, 0, 1], port));
     let moved = server
