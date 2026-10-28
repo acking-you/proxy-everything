@@ -425,22 +425,36 @@ not change the physical network's NAT or guarantee P2P connectivity. This path
 applies before the ordinary UDP proxy/block setting. DNS and multicast keep
 their dedicated handling.
 
-Ownership is checked using the Windows socket's PID and bind timestamp, so
-closing and reopening the same port does not inherit another socket's mapping.
-If Windows cannot supply an unambiguous owner, forwarding retains the isolated
-per-destination behavior instead of sharing an uncertain endpoint. A single
+Ownership is checked using the Windows socket's PID and bind timestamp as a
+best-effort fingerprint. Observed disappearance, ambiguity, or a changed
+fingerprint retires the mapping. Windows timestamps are not unique socket IDs:
+a same-process close/rebind between snapshots can be indistinguishable when the
+timestamp is reused. Polling cannot guarantee isolation of those socket lifetimes.
+If the initial classification cannot supply an unambiguous owner, forwarding
+retains the isolated per-destination behavior. An IPv6 wildcard may also own
+IPv4 traffic; Windows does not expose its V6ONLY flag in this table, so IPv4
+sharing remains disabled when such a bind makes ownership uncertain. A single
 receiver dispatches replies only to active flows for contacted remote endpoints,
 preserving the original destination seen by the application, including Fake-IP.
 Packets from uncontacted peers are dropped; unsolicited inbound P2P discovery is
 not enabled by this change. Two active virtual destinations resolving to the
-same real peer are rejected when their replies cannot be disambiguated.
+same real peer use isolated sockets when their replies cannot be disambiguated.
+The same fallback applies when all shared endpoint slots are active. If ownership
+or policy changes during setup, or cannot be revalidated before the setup timeout,
+the new flow is rejected rather than inheriting an earlier owner's bypass decision.
 
 Mappings survive individual target flows and expire after 120 seconds of idle
 time. Socket ownership and physical egress are rechecked every two seconds;
-an owner change, failed ownership verification, egress change, bypass revocation,
-or TUN shutdown retires the affected endpoints. Normal per-flow UDP idle timeouts
-still apply. The endpoint pool is capped by the session limit (at most 1024), with
-at most 256 peers per endpoint, 16 queued replies per peer and 8 MiB of queued
+an observed owner change, egress change, bypass revocation, or TUN shutdown
+retires the affected endpoints. Transient snapshot failures preserve existing
+mappings for at most six seconds; new shared flows still require verification.
+Policy revocation also closes retained mappings that have no active target
+flows. A DNS-server-only change
+does not replace an unchanged UDP interface binding. Normal per-flow UDP idle
+timeouts still apply: after a target flow expires, its replies are dropped until
+the application contacts it again, even while the physical mapping is retained.
+The endpoint pool is capped by the session limit (at most 1024); active peers share
+the global session limit, with 16 queued replies per peer and 8 MiB of queued
 payloads across the pool. Under pressure, idle mappings can be reclaimed and
 excess replies dropped; active mappings are not reassigned to another source.
 
