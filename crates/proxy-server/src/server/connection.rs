@@ -149,10 +149,14 @@ pub(super) async fn handle_connect(
         "proxy_connection",
         trace_id,
         carrier = ?conn.carrier(),
+        quic_connection_id = field::Empty,
         peer = %peer_addr,
         dest = field::Empty,
         mode = field::Empty
     );
+    if let CarrierStream::Quic(stream) = &conn {
+        span.record("quic_connection_id", stream.connection_id());
+    }
     async move {
         tracing::info!("connection accepted");
         let _active = ActiveConnection::new(&ctx.metrics);

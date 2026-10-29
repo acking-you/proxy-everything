@@ -455,3 +455,38 @@ retries explicit cleanup/quit and minimizing cannot hide it behind the removed
 icon. The retry uses the current proxy state even after tray listeners detach.
 Saved TUN intent is preserved for the elevated child. No test restarts the
 currently running old application.
+
+## QUIC shared-connection black holes (2026-10-29)
+
+The 2.0.17 incident logs contained thousands of QUIC timeout errors across
+otherwise unrelated requests. Independent TCP and QUIC probes still succeeded.
+This distinguishes a reusable connection's health from a node probe's health:
+`open_bi` can succeed locally while every new stream inherits the same broken
+UDP path. Physical interface changes were also observed, but the logs do not
+establish the cause of every path failure or implicate the Windows shared UDP
+bypass implementation. Later rollback logs also contain QUIC timeouts; the
+initial quiet period is not proof of a lasting cure.
+
+Native 0.6.16 / app 2.0.18+93 adds per-connection ACK monitoring and admission
+isolation. Authentication, trust, wire formats, FFI layouts and carrier choice
+are unchanged. The hot data path still uses the existing pooled connection;
+statistics are sampled once per second, not per packet. Existing streams keep
+their connection, and application data is never replayed. See
+[QUIC recovery and diagnostics](quic-transport.md) for budgets and limitations.
+
+The recovery regression uses a real loopback UDP relay that drops replies to
+one client source port while allowing fresh connections. It exhausts the old
+connection's stream credit and parks 16 concurrent callers, then verifies
+replacement within their original acquisition deadlines, reuse of one new
+connection, recovery of the old stream, and no application replay. This caught
+an initial monitoring gap: Quinn PTO probes may send `IMMEDIATE_ACK` without
+STREAM or PING. All ACK-eliciting frames now count; ACK-only traffic does not.
+Diagnostic logging only reads health state and cannot affect admission.
+The monitor is cancelled when its last connection owner is released; a
+regression verifies that dropping a server connection closes it even while
+the shared listener remains alive.
+
+These checks reproduce a shared-state failure and establish recovery behavior.
+They do not certify that every cause of the user's live-network instability is
+resolved. Keep the previous installation available, and validate the new
+version on the same node and carrier before considering the incident closed.

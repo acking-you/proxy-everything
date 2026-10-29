@@ -21,6 +21,8 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{Mutex, Semaphore};
 
+mod health;
+
 pub const ALPN: &[u8] = b"proxy-everything/1";
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
@@ -199,17 +201,28 @@ async fn authenticate(connection: &Connection, key: &[u8], server: bool) -> io::
 struct SharedConnection {
     connection: Connection,
     owner: Arc<EndpointOwner>,
+    health: Arc<health::Health>,
     /// Streams opened so far, so the pool can tell idle from short-lived use.
     opened: AtomicU64,
 }
 
 impl SharedConnection {
-    fn new(connection: Connection, owner: Arc<EndpointOwner>) -> Arc<Self> {
+    fn new(connection: Connection, owner: Arc<EndpointOwner>, side: quinn::Side) -> Arc<Self> {
+        let health = health::Health::start(&connection, owner.0.local_addr().ok(), side);
         Arc::new(Self {
             connection,
             owner,
+            health,
             opened: AtomicU64::new(0),
         })
+    }
+}
+
+impl Drop for SharedConnection {
+    fn drop(&mut self) {
+        // A monitor's Connection clone must not keep an abandoned server-side
+        // connection alive when its shared listener endpoint remains running.
+        self.health.released.cancel();
     }
 }
 
@@ -235,8 +248,11 @@ impl AuthenticatedConnection {
             connection.close(AUTH_FAILED, b"authentication failed");
             return Err(error);
         }
-        tracing::info!(carrier = "quic", peer = %connection.remote_address(), "authenticated QUIC connection");
-        Ok(Self(SharedConnection::new(connection, owner)))
+        let shared = SharedConnection::new(connection, owner, quinn::Side::Server);
+        tracing::info!(carrier = "quic", connection_id = shared.health.id,
+            local_addr = ?shared.owner.0.local_addr().ok(), peer = %shared.connection.remote_address(),
+            "authenticated QUIC connection");
+        Ok(Self(shared))
     }
 
     pub async fn accept_stream(&self) -> io::Result<QuicStream> {
@@ -286,25 +302,17 @@ impl QuicStream {
     }
 
     pub fn connection_id(&self) -> usize {
-        self.shared.connection.stable_id()
+        self.shared.health.id
     }
 
     pub fn record_diagnostics(&self, observation: &'static str) {
         if tracing::enabled!(tracing::Level::DEBUG) {
-            let stats = self.shared.connection.stats();
-            tracing::debug!(
-                observation, carrier = "quic", peer = %self.peer_addr(),
-                connection_id = self.connection_id(),
-                rtt_us = stats.path.rtt.as_micros() as u64,
-                cwnd = stats.path.cwnd, mtu = stats.path.current_mtu,
-                sent_packets = stats.path.sent_packets, lost_packets = stats.path.lost_packets,
-                congestion_events = stats.path.congestion_events,
-                tx_bytes = stats.udp_tx.bytes, rx_bytes = stats.udp_rx.bytes,
-                tx_datagrams = stats.udp_tx.datagrams, tx_ios = stats.udp_tx.ios,
-                rx_datagrams = stats.udp_rx.datagrams, rx_ios = stats.udp_rx.ios,
-                peer_stream_blocked = stats.frame_rx.stream_data_blocked,
-                peer_connection_blocked = stats.frame_rx.data_blocked,
-                "QUIC cumulative connection statistics"
+            self.shared.health.record(
+                &self.shared.connection,
+                tracing::Level::DEBUG,
+                observation,
+                "observation",
+                None,
             );
         }
     }
@@ -446,29 +454,41 @@ pub async fn connect_addresses(
     };
     let entry = POOL.get_with(pool_key, PoolEntry::default);
     tokio::time::timeout(CONNECT_TIMEOUT, async {
-        let shared = {
-            let mut slot = entry.lock().await;
-            match slot.as_ref() {
-                Some(shared) if shared.connection.close_reason().is_none() => Arc::clone(shared),
-                _ => {
-                    let shared = dial(host, port, addresses, &trust.config).await?;
-                    tokio::spawn(close_when_idle(
-                        shared.connection.clone(),
-                        Arc::downgrade(&entry),
-                        POOL_LINGER,
-                    ));
-                    *slot = Some(Arc::clone(&shared));
-                    shared
+        loop {
+            let shared = {
+                let mut slot = entry.lock().await;
+                match slot.as_ref() {
+                    Some(shared)
+                        if !shared.health.isolated.is_cancelled()
+                            && shared.connection.close_reason().is_none() =>
+                    {
+                        Arc::clone(shared)
+                    }
+                    _ => {
+                        let shared = dial(host, port, addresses, &trust.config).await?;
+                        tokio::spawn(close_when_idle(
+                            shared.connection.clone(),
+                            Arc::downgrade(&entry),
+                            POOL_LINGER,
+                        ));
+                        *slot = Some(Arc::clone(&shared));
+                        shared
+                    }
                 }
+            };
+            let (send, recv) = tokio::select! {
+                biased;
+                _ = shared.health.isolated.cancelled() => continue,
+                stream = shared.connection.open_bi() => stream.map_err(io::Error::other)?,
+            };
+            if shared.health.isolated.is_cancelled() {
+                // No application byte has been handed to the caller. Only stream
+                // acquisition may move to another connection; payloads never do.
+                continue;
             }
-        };
-        let (send, recv) = shared
-            .connection
-            .open_bi()
-            .await
-            .map_err(io::Error::other)?;
-        shared.opened.fetch_add(1, Ordering::Relaxed);
-        Ok(QuicStream { send, recv, shared })
+            shared.opened.fetch_add(1, Ordering::Relaxed);
+            return Ok(QuicStream { send, recv, shared });
+        }
     })
     .await
     .map_err(timeout)?
@@ -505,12 +525,14 @@ async fn dial(
         connection.close(AUTH_FAILED, b"authentication failed");
         return Err(error);
     }
+    let shared = SharedConnection::new(connection, owner, quinn::Side::Client);
     tracing::info!(
-        carrier = "quic", peer = %connection.remote_address(),
+        carrier = "quic", connection_id = shared.health.id,
+        local_addr = ?shared.owner.0.local_addr().ok(), peer = %shared.connection.remote_address(),
         handshake_us = started.elapsed().as_micros() as u64,
         "opened authenticated QUIC connection"
     );
-    Ok(SharedConnection::new(connection, owner))
+    Ok(shared)
 }
 
 async fn handshake(
@@ -689,7 +711,7 @@ mod tests {
             let config = client_config(Some(CERT)).unwrap();
             let (connection, owner) = handshake(addr, "localhost", &config).await.unwrap();
             authenticate(&connection, SECRET, false).await.unwrap();
-            SharedConnection::new(connection, owner)
+            SharedConnection::new(connection, owner, quinn::Side::Client)
         };
         let (server, client) = tokio::join!(server, client);
         (endpoint, server, client)
@@ -729,6 +751,17 @@ mod tests {
             assert_eq!(received, expected);
         }
         server.close();
+        endpoint.0.close(0u32.into(), b"done");
+    }
+
+    #[tokio::test]
+    async fn dropping_server_connection_releases_its_monitor_while_listener_stays_alive() {
+        let (endpoint, server, client) = authenticated_pair().await;
+        drop(server);
+        tokio::time::timeout(Duration::from_secs(2), client.connection.closed())
+            .await
+            .unwrap();
+        assert_eq!(Arc::strong_count(&endpoint), 1);
         endpoint.0.close(0u32.into(), b"done");
     }
 

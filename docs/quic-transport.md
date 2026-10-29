@@ -114,11 +114,29 @@ resolved addresses, credential digest and trust generation, with up to 32
 entries. Dialing races addresses the way TCP does: IPv4 and IPv6 interleaved, a
 250 ms stagger, 4 s per attempt and 16 dials at once. If every cached address
 fails, DNS is refreshed once. A session has 10 s to obtain a stream.
-Application bytes are never replayed; only a dial, which sends none, is retried.
+Application bytes are never replayed; only acquisition before handing a stream
+to the caller can retry on a fresh connection.
 
 **Keep-alive.** The client pings every 10 s, so idle sessions and NAT bindings
 survive the 30 s idle timeout. A pooled connection with no open or new sessions
 for 30–60 s is closed, so an idle client stops pinging.
+
+**Connection isolation.** A connection monitor samples QUIC counters once per
+second. After sending an ACK-eliciting frame (including stream data, keep-alive
+or `IMMEDIATE_ACK` probes), a client connection that
+receives no further authenticated ACKs for the greater of 10 s or eight RTTs
+is permanently excluded from the pool. Retransmissions, additional requests
+and raw UDP receipt do not extend that deadline. New sessions and callers
+still waiting to acquire a stream dial a fresh authenticated connection,
+within their original 10 s acquisition deadline. Existing streams remain on
+their original connection and may recover if its path recovers; no request or
+application byte is replayed. Isolation does not change the selected carrier.
+
+ACK-only traffic and an application waiting for a backend response do not
+start an ACK deadline. This is a connection liveness check, not a timeout on
+individual requests or a guarantee that every stream is making progress.
+Detection takes up to one sampling interval after the deadline; a fully idle
+connection first has to send its next keep-alive.
 
 **Server limits.** 64 concurrent handshakes, separate from 128 authenticated
 connections, so peers that never authenticate cannot displace clients. Streams
@@ -149,9 +167,32 @@ segments ([validation record](quic-validation.md)). Set `PROXY_QUIC_GSO=true`
 only on hosts where it was verified; other values are rejected. CUBIC is the
 congestion controller.
 
-`RUST_LOG=info,proxy_core::quic=debug` logs connection totals (RTT, congestion
-window, MTU, loss, UDP I/O, flow-control blocking) when a stream closes, and
-the authenticated handshake time of each dial.
+Connection establishment and normal closure are logged at `info`; isolation
+and abnormal closure at `warn`, including in the app's default native logs.
+Each connection has a process-local, monotonically assigned `connection_id`;
+server session spans include it as `quic_connection_id`. IDs are independent
+on the two endpoints: correlate them using peer/local addresses and time.
+
+`QUIC connection diagnostics` includes the observation (`isolated` or
+`closed`), cause and numeric close code, connection age, time since the last
+received UDP datagram and authenticated ACK, pending ACK age and budget,
+RTT, congestion window, MTU/black-hole detections, sent/lost packets, UDP
+bytes/datagrams/I/O, ACK/PING/STREAM frame counts, and flow-control blocking.
+The timestamps are sampled estimates. Peer-supplied close text, payloads and
+credentials are never included in these events.
+
+- `ack_progress_timeout`: new sessions have stopped using this connection;
+  check whether received UDP and ACK counts also stopped progressing.
+- `idle_timeout`: Quinn's negotiated idle timeout closed the connection.
+- `stateless_reset`, `peer_transport_close` or `transport_error`: compare the
+  peer's logs and the numeric error code with the path statistics.
+- `local_close` / `peer_application_close`: distinguish a normal shutdown
+  (application code zero) from an application rejection.
+
+`RUST_LOG=info,proxy_core::quic=debug` additionally emits these statistics on
+stream closure and explicit I/O observations. The monitor does not log each
+packet or successful sample, and retains neither pooled sessions nor the UDP
+endpoint after their owners release them.
 
 ### Benchmark
 
@@ -174,6 +215,7 @@ python3 scripts/bench/quic_transport.py \
 
 ```sh
 cargo test -p proxy-core quic::
+cargo test -p proxy-core --test quic_recovery
 cargo test -p proxy-server --test quic_transport
 ```
 
@@ -181,4 +223,8 @@ Both use loopback listeners. They cover TLS, ALPN and credential rejection,
 stream close semantics, mixed legacy and v3 streams, concurrent transfers,
 half-close, reuse and reconnect, control requests, UDP boundaries, live
 endpoint switching, health probes, managed SOCKS5, and relays in both carrier
-directions.
+directions. The recovery test drops the old connection's return UDP path while
+leaving fresh connections reachable, then verifies isolation, replacement,
+recovery of the original stream, and absence of replay. It exhausts the old
+connection's stream credit and verifies that 16 waiting callers wake on
+isolation and reuse one replacement within their original deadlines.

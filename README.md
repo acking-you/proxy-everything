@@ -17,7 +17,9 @@ App ─► local client (HTTP · SOCKS5 · TUN) ══ encrypted, over TCP or QU
 - **Wire protocols**: legacy, the default, works with every deployed node; v3
   needs no extra round trip.
 - **Carriers**: TCP by default, or TLS 1.3 QUIC per node. A switch affects new
-  sessions only.
+  sessions only. QUIC pools isolate connections that stop acknowledging traffic
+  so new sessions can reconnect, without replaying existing requests
+  ([recovery behavior](docs/quic-transport.md#how-it-works)).
 - **Local proxy**: HTTP, HTTPS CONNECT and SOCKS5, including UDP ASSOCIATE, on
   one port. Optionally sets the system proxy.
 - **TUN capture**: whole-device capture with process bypass and loop prevention
