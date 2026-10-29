@@ -435,6 +435,10 @@ pub async fn run_server_with_listener(
                     }
                     Err(e) => {
                         tracing::warn!("accept error: {}", error_report(&e));
+                        tokio::select! {
+                            _ = cancel_token.cancelled() => break,
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
+                        }
                     }
                 }
             }

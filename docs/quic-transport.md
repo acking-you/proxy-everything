@@ -115,7 +115,10 @@ entries. Dialing races addresses the way TCP does: IPv4 and IPv6 interleaved, a
 250 ms stagger, 4 s per attempt and 16 dials at once. If every cached address
 fails, DNS is refreshed once. A session has 10 s to obtain a stream.
 Application bytes are never replayed; only acquisition before handing a stream
-to the caller can retry on a fresh connection.
+to the caller can retry once on a fresh connection. This includes a connection
+closing between pool checkout and stream opening, even before its monitor runs.
+The retry shares the original acquisition deadline. Pool identity and application
+authentication use the same credential snapshot throughout a handshake.
 
 **Keep-alive.** The client pings every 10 s, so idle sessions and NAT bindings
 survive the 30 s idle timeout. A pooled connection with no open or new sessions

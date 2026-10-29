@@ -490,3 +490,31 @@ These checks reproduce a shared-state failure and establish recovery behavior.
 They do not certify that every cause of the user's live-network instability is
 resolved. Keep the previous installation available, and validate the new
 version on the same node and carrier before considering the incident closed.
+
+### Disconnect review follow-up (0.6.17 / 2.0.19+94)
+
+Stream acquisition now handles a pooled connection closing between checkout
+and `open_bi`, including callers waiting for stream credit. It retires that
+connection immediately and allows one replacement within the original deadline.
+No already-returned stream or business data is retried. A regression closes
+the connection with its monitor stopped, so recovery cannot accidentally depend
+on the monitor winning the scheduling race.
+
+The pool credential digest and authentication HMAC key now come from one
+immutable snapshot. Changing the runtime credential during TLS negotiation
+cannot put a connection authenticated with one key under another key's pool
+entry. An isolated integration test changes the key before TLS completes,
+verifies the original attempt's identity, rejects reuse under the new key, and
+checks reuse after restoring the original key.
+
+Client and native-server TCP listeners now yield for 100 ms after an accept
+error, matching the managed SOCKS5 listener. Persistent resource exhaustion
+therefore cannot create a tight retry loop that starves existing forwarding
+tasks. Shutdown cancels the delay; successful accepts have no added delay.
+
+Windows release acceptance must use an explicit test config with both TUN and
+system proxy disabled, and a separate `PROXY_DATA_DIR` for every child process.
+Stop on the first failed warm-up request. A prior manual benchmark inherited
+local configuration and changed the system proxy; its results were discarded
+and the original listener restored. Subsequent isolated checks verify both the
+packaged DLL and the unchanged system-proxy setting.

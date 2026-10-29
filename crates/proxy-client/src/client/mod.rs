@@ -457,8 +457,17 @@ pub async fn run_client_with_listener_runtime_config(
     loop {
         tokio::select! {
             ret = listener.accept() => {
-                let Ok((stream, _)) = ret else {
-                    continue;
+                let (stream, _) = match ret {
+                    Ok(accepted) => accepted,
+                    Err(error) => {
+                        tracing::warn!(%error, "local proxy accept failed; retrying");
+                        // Resource exhaustion can make accept fail immediately.
+                        // Yield before retrying so forwarding tasks can drain.
+                        tokio::select! {
+                            _ = cancel_token.cancelled() => break,
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => continue,
+                        }
+                    }
                 };
                 let token = cancel_token.clone();
                 #[cfg(feature = "auto-proxy")]

@@ -158,14 +158,13 @@ fn binding(connection: &Connection, role: &[u8]) -> io::Result<[u8; 32]> {
     Ok(binding)
 }
 
-async fn authenticate(connection: &Connection, key: &[u8], server: bool) -> io::Result<()> {
-    let key = hmac::Key::new(hmac::HMAC_SHA256, key);
+async fn authenticate(connection: &Connection, key: &hmac::Key, server: bool) -> io::Result<()> {
     let (send_role, receive_role): (&[u8], &[u8]) = if server {
         (b"server", b"client")
     } else {
         (b"client", b"server")
     };
-    let own_tag = hmac::sign(&key, &binding(connection, send_role)?);
+    let own_tag = hmac::sign(key, &binding(connection, send_role)?);
     let peer_binding = binding(connection, receive_role)?;
     let (mut send, mut recv) = if server {
         connection.accept_bi().await
@@ -180,7 +179,7 @@ async fn authenticate(connection: &Connection, key: &[u8], server: bool) -> io::
         send.finish().map_err(io::Error::other)?;
     }
     let tag = recv.read_to_end(32).await.map_err(io::Error::other)?;
-    hmac::verify(&key, &peer_binding, &tag).map_err(|_| {
+    hmac::verify(key, &peer_binding, &tag).map_err(|_| {
         io::Error::new(
             io::ErrorKind::PermissionDenied,
             "QUIC application authentication failed",
@@ -235,12 +234,13 @@ impl AuthenticatedConnection {
         owner: Arc<EndpointOwner>,
         key: &[u8],
     ) -> io::Result<Self> {
+        let key = hmac::Key::new(hmac::HMAC_SHA256, key);
         let connection = tokio::time::timeout(CONNECT_TIMEOUT, incoming)
             .await
             .map_err(timeout)?
             .map_err(io::Error::other)?;
         if let Err(error) =
-            tokio::time::timeout(CONNECT_TIMEOUT, authenticate(&connection, key, true))
+            tokio::time::timeout(CONNECT_TIMEOUT, authenticate(&connection, &key, true))
                 .await
                 .map_err(timeout)
                 .and_then(|r| r)
@@ -408,12 +408,24 @@ fn trust() -> io::Result<Arc<Trust>> {
     Ok(Option::clone(&previous).unwrap_or(trust))
 }
 
-fn credential() -> [u8; 32] {
-    crate::config::runtime::with_secret_key(|key, _| {
-        let mut credential = [0; 32];
-        credential.copy_from_slice(digest::digest(&digest::SHA256, key).as_ref());
-        credential
-    })
+struct Credential {
+    digest: [u8; 32],
+    key: hmac::Key,
+}
+
+impl Credential {
+    fn new(secret: &[u8]) -> Self {
+        let mut digest = [0; 32];
+        digest.copy_from_slice(digest::digest(&digest::SHA256, secret).as_ref());
+        Self {
+            digest,
+            key: hmac::Key::new(hmac::HMAC_SHA256, secret),
+        }
+    }
+
+    fn snapshot() -> Self {
+        crate::config::runtime::with_secret_key(|key, _| Self::new(key))
+    }
 }
 
 /// Dial a new session, reusing only a fully authenticated connection. A failed
@@ -444,16 +456,31 @@ pub async fn connect_addresses(
     addresses: &Arc<[IpAddr]>,
 ) -> io::Result<QuicStream> {
     let trust = trust()?;
+    // Pool identity and authentication must use the same immutable credential,
+    // even if configuration changes while waiting for a slot or handshake.
+    let credential = Credential::snapshot();
     let pool_key = PoolKey {
         runtime: tokio::runtime::Handle::current().id(),
         host: host.into(),
         port,
-        credential: credential(),
+        credential: credential.digest,
         trust_generation: trust.generation,
         addresses: Arc::clone(addresses),
     };
     let entry = POOL.get_with(pool_key, PoolEntry::default);
+    connect_pooled(&entry, host, port, addresses, &trust.config, &credential).await
+}
+
+async fn connect_pooled(
+    entry: &PoolEntry,
+    host: &str,
+    port: u16,
+    addresses: &[IpAddr],
+    config: &quinn::ClientConfig,
+    credential: &Credential,
+) -> io::Result<QuicStream> {
     tokio::time::timeout(CONNECT_TIMEOUT, async {
+        let mut replaced = false;
         loop {
             let shared = {
                 let mut slot = entry.lock().await;
@@ -465,10 +492,10 @@ pub async fn connect_addresses(
                         Arc::clone(shared)
                     }
                     _ => {
-                        let shared = dial(host, port, addresses, &trust.config).await?;
+                        let shared = dial(host, port, addresses, config, credential).await?;
                         tokio::spawn(close_when_idle(
                             shared.connection.clone(),
-                            Arc::downgrade(&entry),
+                            Arc::downgrade(entry),
                             POOL_LINGER,
                         ));
                         *slot = Some(Arc::clone(&shared));
@@ -476,16 +503,26 @@ pub async fn connect_addresses(
                     }
                 }
             };
-            let (send, recv) = tokio::select! {
+            let acquired = tokio::select! {
                 biased;
-                _ = shared.health.isolated.cancelled() => continue,
-                stream = shared.connection.open_bi() => stream.map_err(io::Error::other)?,
+                _ = shared.health.isolated.cancelled() => Err(unavailable()),
+                stream = shared.connection.open_bi() => stream.map_err(io::Error::other),
             };
-            if shared.health.isolated.is_cancelled() {
-                // No application byte has been handed to the caller. Only stream
-                // acquisition may move to another connection; payloads never do.
-                continue;
+            let stale =
+                shared.health.isolated.is_cancelled() || shared.connection.close_reason().is_some();
+            if stale {
+                shared.health.isolated.cancel();
+                // No application bytes have reached the caller. Retry admission
+                // once, regardless of whether closure or the monitor woke us.
+                // A peer that immediately closes replacements cannot cause a
+                // handshake loop or restart the original acquisition deadline.
+                if !replaced {
+                    replaced = true;
+                    continue;
+                }
+                return Err(acquired.err().unwrap_or_else(unavailable));
             }
+            let (send, recv) = acquired?;
             shared.opened.fetch_add(1, Ordering::Relaxed);
             return Ok(QuicStream { send, recv, shared });
         }
@@ -494,14 +531,25 @@ pub async fn connect_addresses(
     .map_err(timeout)?
 }
 
+fn unavailable() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::ConnectionAborted,
+        "QUIC connection unavailable for new streams",
+    )
+}
+
 /// Confirm that an authenticated peer answers, without opening a session.
 /// A pooled connection cannot prove this: opening a stream on it is local.
 pub async fn probe(host: &str, port: u16) -> io::Result<()> {
     let addresses = crate::transport::resolve_host_addresses(host).await?;
     let trust = trust()?;
-    let shared = tokio::time::timeout(CONNECT_TIMEOUT, dial(host, port, &addresses, &trust.config))
-        .await
-        .map_err(timeout)??;
+    let credential = Credential::snapshot();
+    let shared = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        dial(host, port, &addresses, &trust.config, &credential),
+    )
+    .await
+    .map_err(timeout)??;
     shared.connection.close(0u32.into(), b"probe");
     Ok(())
 }
@@ -511,6 +559,7 @@ async fn dial(
     port: u16,
     addresses: &[IpAddr],
     config: &quinn::ClientConfig,
+    credential: &Credential,
 ) -> io::Result<Arc<SharedConnection>> {
     let _permit = DIAL_SLOTS.acquire().await.map_err(io::Error::other)?;
     let started = Instant::now();
@@ -520,8 +569,7 @@ async fn dial(
         handshake(address, host, config)
     })
     .await?;
-    let secret = crate::config::runtime::with_secret_key(|key, _| key.to_vec());
-    if let Err(error) = authenticate(&connection, &secret, false).await {
+    if let Err(error) = authenticate(&connection, &credential.key, false).await {
         connection.close(AUTH_FAILED, b"authentication failed");
         return Err(error);
     }
@@ -674,7 +722,12 @@ mod tests {
                         .unwrap()
                         .await
                         .map_err(io::Error::other)?;
-                    authenticate(&connection, b"wrong-credential", false).await
+                    authenticate(
+                        &connection,
+                        &hmac::Key::new(hmac::HMAC_SHA256, b"wrong-credential"),
+                        false,
+                    )
+                    .await
                 }
                 .await;
                 assert!(
@@ -710,7 +763,13 @@ mod tests {
         let client = async {
             let config = client_config(Some(CERT)).unwrap();
             let (connection, owner) = handshake(addr, "localhost", &config).await.unwrap();
-            authenticate(&connection, SECRET, false).await.unwrap();
+            authenticate(
+                &connection,
+                &hmac::Key::new(hmac::HMAC_SHA256, SECRET),
+                false,
+            )
+            .await
+            .unwrap();
             SharedConnection::new(connection, owner, quinn::Side::Client)
         };
         let (server, client) = tokio::join!(server, client);
@@ -751,6 +810,61 @@ mod tests {
             assert_eq!(received, expected);
         }
         server.close();
+        endpoint.0.close(0u32.into(), b"done");
+    }
+
+    #[tokio::test]
+    async fn waiting_stream_reconnects_when_the_pooled_connection_closes_before_monitor_runs() {
+        let (endpoint, server, client) = authenticated_pair().await;
+        client.health.released.cancel();
+        tokio::task::yield_now().await;
+        let mut held = Vec::new();
+        loop {
+            match tokio::time::timeout(Duration::from_millis(20), client.connection.open_bi()).await
+            {
+                Ok(pair) => held.push(pair.unwrap()),
+                Err(_) => break,
+            }
+            assert!(held.len() <= MAX_STREAMS as usize);
+        }
+        let entry = Arc::new(Mutex::new(Some(client.clone())));
+        let address = endpoint.0.local_addr().unwrap();
+        let addresses = [address.ip()];
+        let config = client_config(Some(CERT)).unwrap();
+        let credential = Credential::new(SECRET);
+        let pending = connect_pooled(
+            &entry,
+            "localhost",
+            address.port(),
+            &addresses,
+            &config,
+            &credential,
+        );
+        tokio::pin!(pending);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut pending)
+                .await
+                .is_err()
+        );
+        client.connection.close(0u32.into(), b"path closed");
+        let accept = async {
+            AuthenticatedConnection::accept(
+                endpoint.0.accept().await.unwrap(),
+                endpoint.clone(),
+                SECRET,
+            )
+            .await
+            .unwrap()
+        };
+        let (replacement, peer) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(pending, accept)
+        })
+        .await
+        .unwrap();
+        assert_ne!(replacement.unwrap().connection_id(), client.health.id);
+        peer.close();
+        server.close();
+        drop(held);
         endpoint.0.close(0u32.into(), b"done");
     }
 
