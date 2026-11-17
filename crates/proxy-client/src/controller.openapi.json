@@ -1,0 +1,102 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "CipherRelay local controller", "version": "1"},
+  "security": [{"bearer": []}],
+  "paths": {
+    "/v1/nodes": {"get": {
+      "operationId": "listNodes",
+      "summary": "List selectable node IDs and their available endpoints",
+      "responses": {
+        "200": {"description": "Current catalogue", "content": {"application/json": {"schema": {
+          "type": "object", "required": ["nodes"],
+          "properties": {"nodes": {"type": "array", "items": {"$ref": "#/components/schemas/Node"}}}
+        }}}},
+        "default": {"$ref": "#/components/responses/Error"}
+      }
+    }},
+    "/v1/status": {"get": {
+      "operationId": "getStatus",
+      "summary": "Read listener state and active selection",
+      "responses": {"200": {"$ref": "#/components/responses/Status"}, "default": {"$ref": "#/components/responses/Error"}}
+    }},
+    "/v1/rules": {
+      "get": {
+        "operationId": "listWebsiteRules", "summary": "Read saved website routes",
+        "responses": {"200": {"$ref": "#/components/responses/Rules"}, "default": {"$ref": "#/components/responses/Error"}}
+      },
+      "put": {
+        "operationId": "setWebsiteRule", "summary": "Add or replace one website route for new connections",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RuleInput"}}}},
+        "responses": {"200": {"$ref": "#/components/responses/Rules"}, "default": {"$ref": "#/components/responses/Error"}}
+      },
+      "delete": {
+        "operationId": "removeWebsiteRule", "summary": "Remove one website route",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "required": ["site"], "additionalProperties": false, "properties": {"site": {"type": "string"}}
+        }}}},
+        "responses": {"200": {"$ref": "#/components/responses/Rules"}, "default": {"$ref": "#/components/responses/Error"}}
+      }
+    },
+    "/v1/switch": {"post": {
+      "operationId": "switchNode",
+      "summary": "Select the upstream used by subsequent proxy connections",
+      "requestBody": {"required": true, "content": {"application/json": {"schema": {
+        "type": "object", "required": ["node_id", "transport"], "additionalProperties": false,
+        "properties": {
+          "node_id": {"type": "string", "pattern": "\\S", "description": "ID from listNodes"},
+          "transport": {"$ref": "#/components/schemas/Transport"},
+          "close_existing": {"type": "boolean", "default": false, "description": "Close open listener sessions after the switch succeeds"}
+        }
+      }}}},
+      "responses": {"200": {"$ref": "#/components/responses/Status"}, "default": {"$ref": "#/components/responses/Error"}}
+    }}
+  },
+  "components": {
+    "securitySchemes": {"bearer": {"type": "http", "scheme": "bearer"}},
+    "schemas": {
+      "Transport": {"type": "string", "enum": ["tcp", "quic"]},
+      "Endpoint": {
+        "type": "object", "required": ["host", "port", "transport"],
+        "properties": {"host": {"type": "string"}, "port": {"type": "integer", "minimum": 1, "maximum": 65535}, "transport": {"$ref": "#/components/schemas/Transport"}}
+      },
+      "Node": {
+        "type": "object", "required": ["id", "endpoints"],
+        "properties": {"id": {"type": "string"}, "endpoints": {"type": "array", "items": {"$ref": "#/components/schemas/Endpoint"}}}
+      },
+      "Status": {
+        "type": "object", "required": ["running", "active", "local_port"],
+        "properties": {
+          "running": {"type": "boolean", "description": "Whether the local proxy listener is running"},
+          "local_port": {"type": ["integer", "null"]},
+          "active": {"type": ["object", "null"], "required": ["node_id", "endpoint"], "properties": {
+            "node_id": {"type": ["string", "null"]}, "endpoint": {"$ref": "#/components/schemas/Endpoint"}
+          }}
+        }
+      },
+      "Direct": {"type": "object", "required": ["action"], "additionalProperties": false, "properties": {"action": {"const": "direct"}}},
+      "NodeTarget": {"type": "object", "required": ["action", "node_id", "transport"], "properties": {
+        "action": {"const": "node"}, "node_id": {"type": "string"}, "transport": {"$ref": "#/components/schemas/Transport"}
+      }},
+      "RuleInput": {"type": "object", "required": ["site", "target"], "additionalProperties": false, "properties": {
+        "site": {"type": "string", "description": "Exact host or *.suffix with optional port. HTTP(S) URLs select the effective host and port."},
+        "target": {"oneOf": [{"$ref": "#/components/schemas/Direct"}, {"$ref": "#/components/schemas/NodeTarget", "unevaluatedProperties": false}]}
+      }},
+      "SavedRule": {"type": "object", "required": ["site", "target"], "properties": {
+        "site": {"type": "string"},
+        "target": {"oneOf": [{"$ref": "#/components/schemas/Direct"}, {
+          "allOf": [{"$ref": "#/components/schemas/NodeTarget"}, {"$ref": "#/components/schemas/Endpoint"}]
+        }]}
+      }},
+      "Failure": {
+        "type": "object", "required": ["error"], "properties": {"error": {
+          "type": "object", "required": ["kind", "message"], "properties": {"kind": {"type": "string"}, "message": {"type": "string"}}
+        }}
+      }
+    },
+    "responses": {
+      "Status": {"description": "Current listener and upstream", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Status"}}}},
+      "Rules": {"description": "Saved rules with canonical sites and resolved destinations", "content": {"application/json": {"schema": {"type": "object", "required": ["rules"], "properties": {"rules": {"type": "array", "items": {"$ref": "#/components/schemas/SavedRule"}}}}}}},
+      "Error": {"description": "Stable error kind and actionable message", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Failure"}}}}
+    }
+  }
+}

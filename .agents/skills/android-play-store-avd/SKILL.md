@@ -1,6 +1,6 @@
 ---
 name: android-play-store-avd
-description: Start or reuse this repository's persistent Google Play Android Virtual Device, route it through proxy_ui, open an app listing or search in Google Play, and diagnose stalled downloads without erasing emulator data. Use when asked to launch the local Android emulator, download or install a Play Store app, reopen the saved Google Play device, or troubleshoot Play downloads stuck at pending.
+description: Launch the project's saved Google Play emulator through CipherRelay, open or install a Play Store app, and diagnose pending downloads while preserving the signed-in device.
 ---
 
 # Android Play Store AVD

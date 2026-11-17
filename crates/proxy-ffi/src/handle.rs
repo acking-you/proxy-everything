@@ -17,7 +17,7 @@ use proxy_client::client::tun::{
     running_process_names, running_processes,
 };
 use proxy_client::client::{
-    ClientConfig, ClientRuntimeConfig, run_client_with_listener_runtime_config,
+    ClientConfig, ClientRuntimeConfig, ListenerSessions, run_client_with_sessions,
 };
 use proxy_core::util::error_report;
 use tokio::net::TcpListener;
@@ -54,6 +54,7 @@ const PRIVILEGED_TUN_READY_TIMEOUT: std::time::Duration = std::time::Duration::f
 pub struct ProxyHandle {
     pub(crate) runtime: Runtime,
     pub(crate) cancel_token: Option<CancellationToken>,
+    pub(crate) sessions: ListenerSessions,
     listener_task: Option<tokio::task::JoinHandle<()>>,
     pub(crate) running: Arc<AtomicBool>,
     pub(crate) local_port: u16,
@@ -137,6 +138,7 @@ pub extern "C" fn proxy_create() -> *mut ProxyHandle {
     Box::into_raw(Box::new(ProxyHandle {
         runtime,
         cancel_token: None,
+        sessions: ListenerSessions::default(),
         listener_task: None,
         running: Arc::new(AtomicBool::new(false)),
         local_port: 0,
@@ -601,6 +603,17 @@ fn proxy_start_inner(
         }
     };
 
+    handle.sessions.sites = match cache_dir
+        .as_deref()
+        .map(crate::site_routes::open)
+        .transpose()
+    {
+        Ok(sites) => sites,
+        Err(error) => {
+            record_error(handle, &error_report(&error));
+            return ProxyResult::RuntimeError;
+        }
+    };
     if let Some(cache_dir) = &cache_dir {
         if let Err(error) = crate::disk_log::configure(&cache_dir.join("logs")) {
             send_log(
@@ -772,6 +785,7 @@ fn proxy_start_inner(
         (config, ready_message)
     });
 
+    let sessions = handle.sessions.clone();
     // Spawn proxy task using existing client logic
     handle.listener_task = Some(handle.runtime.spawn(async move {
         let connections = TaskTracker::new();
@@ -790,11 +804,12 @@ fn proxy_start_inner(
             "proxy started"
         );
 
-        run_client_with_listener_runtime_config(
+        run_client_with_sessions(
             listener,
             cancel_token,
             Some(connections.clone()),
             Some(client_config),
+            Some(sessions),
         )
         .await;
 

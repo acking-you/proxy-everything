@@ -9,6 +9,7 @@
 ))]
 mod app_proxies;
 mod disk_log;
+mod external_controller;
 mod galaxy;
 mod groups;
 mod handle;
@@ -20,6 +21,7 @@ mod operations;
 mod packet_tunnel;
 mod probe;
 mod runtime;
+mod site_routes;
 mod types;
 mod updates;
 

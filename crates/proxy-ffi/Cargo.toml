@@ -10,6 +10,8 @@ name = "http_proxy"
 crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
+snafu.workspace = true
+futures.workspace = true
 galaxy-geometry = { path = "../galaxy-geometry" }
 proxy-core = { path = "../proxy-core" }
 proxy-client = { path = "../proxy-client" }

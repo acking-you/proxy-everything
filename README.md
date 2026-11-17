@@ -78,6 +78,13 @@ Compatibility and recovery behaviour: [network resilience](docs/network-resilien
 
 ## Management
 
+The desktop subscription page and `http-proxy-cli --controller-port` can enable a
+loopback HTTP API for scripts to list nodes, inspect the running listener and
+switch its upstream. See [local controller](docs/local-controller.md) for setup,
+JSON responses, curl and a CodeMode example. The **Website rules** page and
+controller API also support persistent per-domain and per-port routing through
+a selected TCP/QUIC node or a direct connection.
+
 | Tool | Purpose |
 | --- | --- |
 | `proxy-tui` | Terminal monitor and runtime configuration of nodes, groups, relay and metrics |

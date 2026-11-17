@@ -6,6 +6,13 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+arc-swap.workspace = true
+tempfile.workspace = true
+url.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+subtle.workspace = true
 proxy-core = { path = "../proxy-core", features = ["cli-dep"] }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

@@ -9,6 +9,7 @@ async fn a_client_that_stalls_after_socks_greeting_still_times_out() {
         upstream_proxy: None,
         honor_forced_direct: false,
         enable_udp: false,
+        sites: None,
         #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
         process_matcher: None,
     }));
@@ -61,6 +62,7 @@ async fn client_input_deadline_does_not_cancel_outbound_setup() {
         upstream_proxy: None,
         honor_forced_direct: false,
         enable_udp: false,
+        sites: None,
         stream,
     };
     let slots = tokio::sync::Semaphore::new(1);

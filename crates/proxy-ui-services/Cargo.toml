@@ -49,4 +49,4 @@ path = "src/bin/app_launcher.rs"
 [dev-dependencies]
 reqwest.workspace = true
 rustls.workspace = true
-tempfile = "3"
+tempfile.workspace = true

@@ -29,6 +29,11 @@ license = "MIT"
 repository = "https://github.com/acking-you/proxy-everything"
 
 [workspace.dependencies]
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+subtle = "2.6"
+tempfile = "3"
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7.20", features = ["full"] }

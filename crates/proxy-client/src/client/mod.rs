@@ -120,6 +120,7 @@ pub struct ProxyContext<'a> {
     force_proxy: bool,
     /// Optional external upstream proxy used instead of the encrypted proxy server.
     upstream_proxy: Option<&'a ExternalProxyTarget>,
+    sites: Option<&'a crate::site_routes::Store>,
     /// Honour [`proxy_core::config::FORCED_DIRECT_HOSTS`]. Disabled only while a
     /// TUN session owns the routes, where a direct socket from this process
     /// would be captured back into the local listener.
@@ -146,6 +147,28 @@ pub trait ForwarderProvider {
 }
 
 impl ProxyContext<'_> {
+    async fn site_connection(&self, host: &str, port: u16) -> Result<Option<ServerConnection>> {
+        // Captured DNS and compiled-in direct hosts have dedicated routing guarantees.
+        if port == 53
+            || (self.honor_forced_direct && proxy_core::config::is_forced_direct_host(host))
+        {
+            return Ok(None);
+        }
+        match self.sites.and_then(|sites| sites.resolve(host, port)) {
+            None => Ok(None),
+            Some(crate::site_routes::Target::Direct) => Ok(Some(ServerConnection {
+                stream: get_tcp_stream(host, port, "website direct rule").await?,
+                need_proxy: false,
+                msg_key: None,
+            })),
+            Some(crate::site_routes::Target::Node { endpoint, .. }) => {
+                connect_native(host, port, &endpoint.qualified_host(), endpoint.port)
+                    .await
+                    .map(Some)
+            }
+        }
+    }
+
     async fn connect(&self, host: &str, port: u16) -> Result<ServerConnection> {
         #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
         if let Some(iface) = self.direct_interface {
@@ -160,6 +183,9 @@ impl ProxyContext<'_> {
                 need_proxy: false,
                 msg_key: None,
             });
+        }
+        if let Some(connection) = self.site_connection(host, port).await? {
+            return Ok(connection);
         }
         resolve_server_connection(
             host,
@@ -179,6 +205,7 @@ pub struct ClientProxyContext {
     sender: Option<RouteSelector>,
     force_proxy: bool,
     upstream_proxy: Option<ExternalProxyTarget>,
+    sites: Option<Arc<crate::site_routes::Store>>,
     honor_forced_direct: bool,
     enable_udp: bool,
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
@@ -271,6 +298,7 @@ pub async fn handle_client(mut context: ClientProxyContext) -> Result<()> {
         sender: context.sender.as_ref(),
         force_proxy: context.force_proxy,
         upstream_proxy: context.upstream_proxy.as_ref(),
+        sites: context.sites.as_deref(),
         honor_forced_direct: context.honor_forced_direct,
         enable_udp: context.enable_udp,
         #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
@@ -353,11 +381,37 @@ fn auto_proxy_applies(enable_auto_proxy: bool, has_upstream_proxy: bool) -> bool
     cfg!(feature = "auto-proxy") && enable_auto_proxy && !has_upstream_proxy
 }
 
+/// All local HTTP and SOCKS connections accepted since the last explicit drain.
+#[derive(Clone, Default)]
+pub struct ListenerSessions {
+    generations: tokio::sync::watch::Sender<CancellationToken>,
+    pub sites: Option<Arc<crate::site_routes::Store>>,
+}
+
+impl ListenerSessions {
+    pub fn close_existing(&self) {
+        self.generations.send_modify(|old| {
+            old.cancel();
+            *old = CancellationToken::new();
+        });
+    }
+}
+
 pub async fn run_client_with_listener_runtime_config(
     listener: TcpListener,
     cancel_token: CancellationToken,
     tracker: Option<TaskTracker>,
     config: Option<ClientRuntimeConfig>,
+) {
+    run_client_with_sessions(listener, cancel_token, tracker, config, None).await
+}
+
+pub async fn run_client_with_sessions(
+    listener: TcpListener,
+    cancel_token: CancellationToken,
+    tracker: Option<TaskTracker>,
+    config: Option<ClientRuntimeConfig>,
+    sessions: Option<ListenerSessions>,
 ) {
     let enable_auto_proxy = config
         .as_ref()
@@ -470,6 +524,7 @@ pub async fn run_client_with_listener_runtime_config(
                     }
                 };
                 let token = cancel_token.clone();
+                let generation = sessions.as_ref().map(|s| s.generations.borrow().clone());
                 #[cfg(feature = "auto-proxy")]
                 let sender = if force_proxy_controller
                     .as_ref()
@@ -497,6 +552,7 @@ pub async fn run_client_with_listener_runtime_config(
                     sender,
                     force_proxy,
                     upstream_proxy: upstream_proxy.clone(),
+                    sites: sessions.as_ref().and_then(|s| s.sites.clone()),
                     // Left as-is under TUN. This path calls the same
                     // `get_tcp_stream` as auto-proxy's direct decision, so the
                     // bypass relay would repair its destination too and enabling
@@ -511,7 +567,13 @@ pub async fn run_client_with_listener_runtime_config(
                 let wrapped_task = async move {
                     tokio::select! {
                         _ = token.cancelled() => {}
-                        _ = task => {}
+                        _ = async move {
+                            if let Some(generation) = generation {
+                                generation.run_until_cancelled_owned(task).await;
+                            } else {
+                                task.await;
+                            }
+                        } => {}
                     }
                 };
                 if let Some(ref t) = tracker {
@@ -552,6 +614,14 @@ pub async fn start_client_with_runtime_config(
             uri: None,
             detail: "Client listener error",
         })?;
+    serve_client_until_shutdown(listener, config, None).await
+}
+
+pub async fn serve_client_until_shutdown(
+    listener: TcpListener,
+    config: Option<ClientRuntimeConfig>,
+    sessions: Option<ListenerSessions>,
+) -> Result<()> {
     let mut manager = GracefulShutdownManagerImpl::new();
     if !manager.spawn_graceful_signals() {
         RegisterSignalSnafu {}.fail()?
@@ -559,8 +629,10 @@ pub async fn start_client_with_runtime_config(
     let cancel_token = manager.cancellation_token();
     let tracker = manager.tracker().clone();
 
-    run_client_with_listener_runtime_config(listener, cancel_token, Some(tracker), config).await;
+    run_client_with_sessions(listener, cancel_token, Some(tracker), config, sessions).await;
 
+    // TUN setup can cancel the listener independently of the signal handler.
+    manager.tracker().close();
     tracing::info!("graceful shutdown, waiting for tasks to complete...");
     manager.wait().await;
     proxy_core::quic::shutdown_clients().await;

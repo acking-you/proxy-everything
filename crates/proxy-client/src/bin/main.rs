@@ -1,3 +1,5 @@
+mod controller;
+
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
@@ -15,6 +17,9 @@ use proxy_core::relay::ExternalProxyTarget;
 #[derive(Parser)]
 #[command(author = "L_B__", version, about, long_about = None)]
 struct Cli {
+    /// Enable the loopback control API on this port (0 picks a free port).
+    #[arg(long)]
+    controller_port: Option<u16>,
     /// Native upstream carrier. Each new session uses the selected carrier.
     #[arg(long, value_parser = ["tcp", "quic"])]
     transport: Option<String>,
@@ -103,6 +108,8 @@ impl Cli {
             server_port: self.server_port,
             client_port: self.client_port,
             listen_host: self.listen_host.clone(),
+            controller_port: self.controller_port,
+            controller_nodes: Default::default(),
             upstream_proxy: self.upstream_proxy.clone(),
             secret_key: self.secret_key.clone(),
             auto_proxy: self.auto_proxy,
@@ -137,7 +144,8 @@ impl Cli {
 
     /// Check if CLI has any meaningful args
     fn has_args(&self) -> bool {
-        self.transport.is_some()
+        self.controller_port.is_some()
+            || self.transport.is_some()
             || self.quic_ca.is_some()
             || self.server_host.is_some()
             || self.server_port.is_some()
@@ -557,9 +565,44 @@ async fn main() -> Result<()> {
         } else {
             "0.0.0.0"
         });
-    start_client_with_runtime_config(listen_host, client_port, Some(client_config))
-        .await
-        .context("local proxy failed")?;
+    let sites = if upstream_mode {
+        None
+    } else {
+        let profile = cli
+            .config
+            .clone()
+            .or_else(find_config)
+            .map(Ok)
+            .unwrap_or_else(get_default_config_path)?;
+        Some(std::sync::Arc::new(proxy_client::site_routes::Store::open(
+            profile.with_added_extension("sites.json"),
+        )?))
+    };
+    if let Some(port) = cli.controller_port.or(config.controller_port) {
+        controller::run(
+            port,
+            config.controller_nodes,
+            listen_host,
+            client_port,
+            client_config,
+            sites.context("The controller requires a native proxy upstream")?,
+        )
+        .await?;
+    } else if let Some(sites) = sites {
+        let mut sessions = proxy_client::client::ListenerSessions::default();
+        sessions.sites = Some(sites);
+        let listener = tokio::net::TcpListener::bind((listen_host, client_port)).await?;
+        proxy_client::client::serve_client_until_shutdown(
+            listener,
+            Some(client_config),
+            Some(sessions),
+        )
+        .await?;
+    } else {
+        start_client_with_runtime_config(listen_host, client_port, Some(client_config))
+            .await
+            .context("local proxy failed")?;
+    }
 
     Ok(())
 }
