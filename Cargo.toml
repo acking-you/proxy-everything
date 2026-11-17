@@ -32,6 +32,9 @@ repository = "https://github.com/acking-you/proxy-everything"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+# Model Context Protocol server for the local controller
+rmcp = { version = "3.5", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
+schemars = "1"
 subtle = "2.6"
 tempfile = "3"
 # Async runtime

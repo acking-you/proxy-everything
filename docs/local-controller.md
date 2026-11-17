@@ -3,17 +3,22 @@
 The CLI and desktop subscription page can expose the same HTTP/1 JSON API on
 `127.0.0.1`. It is off by default. The controller has its own port and bearer
 token, independent of the proxy listener, LAN subscription URLs and server
-control-plane credentials.
+control-plane credentials. The same port also serves these operations as MCP
+tools at `/mcp`; [connect an agent](mcp.md) to call them without writing HTTP
+requests.
 
 ## Enable it
 
 **Desktop** — Open **Subscription → Local control API**, turn the switch on,
-and copy the URL and access token. Each start allocates a free port and a
-fresh token. The API reads the Nodes page's catalogue and uses its reported
+and copy the URL and access token, or use **Connect an agent** for an MCP
+client. The first start picks a free port and a token. Both persist, and the
+API starts again with the app until you turn the switch off. **Issue a new
+token** replaces the token; if the saved port is taken, **Use a new port**
+picks another. The API reads the Nodes page's catalogue and uses its reported
 TCP and QUIC ports. Refresh the Nodes page to discover additional nodes or
 transports. You can inspect the catalogue with the proxy stopped. Start the
-proxy before switching. Closing the app or turning off the switch ends access.
-This entry is available in Windows, Linux and non-App-Store macOS desktop builds.
+proxy before switching. This entry is available in Windows, Linux and
+non-App-Store macOS desktop builds.
 
 **CLI** — Set `CIPHERRELAY_CONTROLLER_TOKEN` to a dedicated random secret of
 32–256 printable ASCII characters without spaces. For example, in a POSIX shell:
@@ -140,27 +145,8 @@ All three operations return `{"rules":[...]}` on success. Rule errors include
 
 ## Composing calls in CodeMode
 
-Run this JavaScript in a local runtime with access to loopback and inject
-`base` and `token` from the host. A remotely hosted agent needs a local tool
-that can issue these requests.
-
-```js
-async function call(path, body) {
-  const response = await fetch(base + '/v1/' + path, {
-    method: body ? 'POST' : 'GET',
-    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-    body: body && JSON.stringify(body),
-  });
-  const result = await response.json();
-  if (!response.ok) throw Object.assign(new Error(result.error.message), result.error);
-  return result;
-}
-
-const { nodes } = await call('nodes');
-const node = nodes.find(n => n.endpoints.some(e => e.transport === 'quic'));
-const before = await call('status');
-if (node && before.running &&
-    (before.active?.node_id !== node.id || before.active?.endpoint.transport !== 'quic')) {
-  await call('switch', { node_id: node.id, transport: 'quic' });
-}
-```
+Connect the [MCP server](mcp.md). Code-mode runtimes then expose its three
+tools as typed functions, so a script needs no `fetch` helper, token handling
+or error parsing; [using the tools from code](mcp.md#using-the-tools-from-code)
+shows a complete example. Use the REST routes above only from runtimes without
+MCP support.

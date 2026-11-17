@@ -218,5 +218,99 @@ second = ["quic://127.0.0.1:{quic_port}"]"#
         .await
         .unwrap();
     assert_eq!(removed["rules"], json!([]));
+
+    // The same operations as MCP tools, called the way an agent host does.
+    let mcp_url = format!("{base}/mcp");
+    let anonymous = http.post(&mcp_url).json(&json!({})).send().await.unwrap();
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+    let rpc = |id: u64, method: &str, params: Value| {
+        http.post(&mcp_url)
+            .bearer_auth(token)
+            .header("Accept", "application/json, text/event-stream")
+            .json(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
+            .send()
+    };
+    let call = |id: u64, name: &str, arguments: Value| {
+        rpc(
+            id,
+            "tools/call",
+            json!({"name": name, "arguments": arguments}),
+        )
+    };
+    let answer = |response: reqwest::Response| async move {
+        let body: Value = response.error_for_status().unwrap().json().await.unwrap();
+        body["result"].clone()
+    };
+    let initialized = answer(
+        rpc(
+            1,
+            "initialize",
+            json!({
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "integration-test", "version": "1"},
+            }),
+        )
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(initialized["serverInfo"]["name"], "cipherrelay");
+    let listed = answer(rpc(2, "tools/list", json!({})).await.unwrap()).await;
+    let mut names = listed["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .inspect(|tool| assert!(tool["outputSchema"].is_object(), "{tool}"))
+        .map(|tool| tool["name"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(
+        names,
+        ["get_proxy_state", "set_website_rule", "switch_node"]
+    );
+
+    let routed = answer(
+        call(
+            3,
+            "set_website_rule",
+            json!({"site": site, "route": "direct"}),
+        )
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        routed["structuredContent"]["website_rules"],
+        json!([{"site": site, "route": "direct"}])
+    );
+    let refused = answer(
+        call(4, "switch_node", json!({"node_id": "missing"}))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(refused["isError"], true);
+    assert!(
+        refused["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("unknown_node:")
+    );
+    let state = answer(call(5, "get_proxy_state", json!({})).await.unwrap()).await;
+    let state = &state["structuredContent"];
+    assert_eq!(state["active"]["node_id"], "second");
+    assert!(state["nodes"].as_array().unwrap().len() >= 2);
+    let reset = answer(
+        call(
+            6,
+            "set_website_rule",
+            json!({"site": site, "route": "default"}),
+        )
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(reset["structuredContent"]["website_rules"], json!([]));
     process.kill().await.unwrap();
 }

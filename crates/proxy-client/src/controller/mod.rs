@@ -1,9 +1,12 @@
-//! Authenticated loopback HTTP API shared by the CLI and the desktop app.
+//! Authenticated loopback HTTP API shared by the CLI and the desktop app,
+//! as REST under `/v1` and as MCP tools at `/mcp`.
 //!
 //! The controller owns HTTP, authentication, error kinds and website rules.
 //! What depends on the live proxy — its node catalogue, listener state and
 //! upstream switching — belongs to a [`Host`] that the embedding process
 //! implements.
+mod mcp;
+
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -11,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, io};
 
+use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::{Bytes, Incoming};
 use hyper::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HeaderValue, ORIGIN};
@@ -26,6 +30,7 @@ use snafu::{ResultExt, Snafu};
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::site_rules::{NodeId, Rule, RuleSet, RulesError, Site, SiteRules, Target};
 
@@ -151,17 +156,18 @@ pub enum ApiError {
     NotFound,
     #[snafu(display("Use the method documented for this resource."))]
     MethodNotAllowed,
-    #[snafu(display("Send a JSON object with node_id, transport and optional close_existing."))]
+    #[snafu(display("Send a node_id, a transport and optionally close_existing."))]
     InvalidRequest,
     #[snafu(display(
-        "Provide a valid site and a direct or node target as documented by /v1/openapi.json."
+        "Use a domain, *.domain, IP address or http(s) URL with an optional port, and a direct or \
+         node target."
     ))]
     InvalidRule,
     #[snafu(display(
         "Cannot save these website rules. Check the rule limit and local file permissions."
     ))]
     RuleStorage,
-    #[snafu(display("Select a node ID from GET /v1/nodes."))]
+    #[snafu(display("Use a node ID from the node list."))]
     UnknownNode,
     #[snafu(display("Select a transport listed for this node."))]
     UnsupportedTransport,
@@ -231,9 +237,12 @@ pub struct BindError {
 }
 
 /// A bound controller. [`Controller::serve`] answers requests until dropped.
-pub struct Controller<H> {
+pub struct Controller<H: Host> {
     listener: TcpListener,
     shared: Arc<Shared<H>>,
+    mcp: mcp::Service<H>,
+    /// Ends MCP work still in flight when the controller is dropped.
+    _stop: DropGuard,
 }
 
 struct Shared<H> {
@@ -241,6 +250,8 @@ struct Shared<H> {
     host: H,
     rules: Arc<SiteRules>,
 }
+
+type Body = BoxBody<Bytes, Infallible>;
 
 impl<H: Host> Controller<H> {
     /// Port zero picks a free port.
@@ -253,9 +264,13 @@ impl<H: Host> Controller<H> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
             .await
             .context(BindSnafu { port })?;
+        let shared = Arc::new(Shared { token, host, rules });
+        let stop = CancellationToken::new();
         Ok(Self {
             listener,
-            shared: Arc::new(Shared { token, host, rules }),
+            mcp: mcp::service(shared.clone(), stop.clone()),
+            shared,
+            _stop: stop.drop_guard(),
         })
     }
 
@@ -279,17 +294,25 @@ impl<H: Host> Controller<H> {
                             continue;
                         }
                     };
-                    connections.spawn(serve_connection(socket, self.shared.clone()));
+                    connections.spawn(serve_connection(
+                        socket,
+                        self.shared.clone(),
+                        self.mcp.clone(),
+                    ));
                 }
             }
         }
     }
 }
 
-async fn serve_connection<H: Host>(socket: tokio::net::TcpStream, shared: Arc<Shared<H>>) {
+async fn serve_connection<H: Host>(
+    socket: tokio::net::TcpStream,
+    shared: Arc<Shared<H>>,
+    mcp: mcp::Service<H>,
+) {
     let service = service_fn(move |request| {
-        let shared = shared.clone();
-        async move { Ok::<_, Infallible>(shared.respond(request).await) }
+        let (shared, mcp) = (shared.clone(), mcp.clone());
+        async move { Ok::<_, Infallible>(respond(&shared, &mcp, request).await) }
     });
     let connection = http1::Builder::new()
         .timer(TokioTimer::new())
@@ -337,38 +360,48 @@ impl Route {
     }
 }
 
-impl<H: Host> Shared<H> {
-    async fn respond(&self, request: Request<Incoming>) -> Response<Full<Bytes>> {
-        match self.answer(request).await {
-            Ok(body) => response(StatusCode::OK, body),
-            Err(error) => {
-                #[derive(Serialize)]
-                struct Body {
-                    error: Detail,
-                }
-                #[derive(Serialize)]
-                struct Detail {
-                    kind: ApiError,
-                    message: String,
-                }
-                let body = Body {
-                    error: Detail {
-                        kind: error,
-                        message: error.to_string(),
-                    },
-                };
-                response(error.status(), encode(&body).unwrap_or_default())
+async fn respond<H: Host>(
+    shared: &Shared<H>,
+    mcp: &mcp::Service<H>,
+    request: Request<Incoming>,
+) -> Response<Body> {
+    // A browser page names its origin. Only local programs may call.
+    let result = if !shared
+        .token
+        .authorizes(request.headers().get(AUTHORIZATION))
+        || request.headers().contains_key(ORIGIN)
+    {
+        Err(ApiError::Unauthorized)
+    } else if request.uri().path() == mcp::PATH {
+        return mcp.handle(request).await;
+    } else {
+        shared.rest(request).await
+    };
+    match result {
+        Ok(body) => response(StatusCode::OK, body),
+        Err(error) => {
+            #[derive(Serialize)]
+            struct Failure {
+                error: Detail,
             }
+            #[derive(Serialize)]
+            struct Detail {
+                kind: ApiError,
+                message: String,
+            }
+            let body = Failure {
+                error: Detail {
+                    kind: error,
+                    message: error.to_string(),
+                },
+            };
+            response(error.status(), encode(&body).unwrap_or_default())
         }
     }
+}
 
-    async fn answer(&self, request: Request<Incoming>) -> Result<Bytes, ApiError> {
-        // A browser page names its origin. Only local programs may call.
-        if !self.token.authorizes(request.headers().get(AUTHORIZATION))
-            || request.headers().contains_key(ORIGIN)
-        {
-            return Err(ApiError::Unauthorized);
-        }
+impl<H: Host> Shared<H> {
+    async fn rest(&self, request: Request<Incoming>) -> Result<Bytes, ApiError> {
         match Route::find(request.method(), request.uri().path())? {
             Route::OpenApi => Ok(Bytes::from_static(OPENAPI)),
             Route::Nodes => encode(&Nodes {
@@ -382,17 +415,25 @@ impl<H: Host> Shared<H> {
             Route::Rules => encode(&*self.rules.snapshot()),
             Route::SetRule => {
                 let RuleInput { site, target } = read_json(request, ApiError::InvalidRule).await?;
-                let rule = Rule {
-                    site,
-                    target: self.target(target).await?,
-                };
-                self.edit_rules(move |rules| rules.set(rule)).await
+                encode(&*self.set_rule(site, target).await?)
             }
             Route::RemoveRule => {
                 let RuleRemoval { site } = read_json(request, ApiError::InvalidRule).await?;
-                self.edit_rules(move |rules| rules.remove(&site)).await
+                encode(&*self.remove_rule(site).await?)
             }
         }
+    }
+
+    async fn set_rule(&self, site: Site, target: TargetInput) -> Result<Arc<RuleSet>, ApiError> {
+        let rule = Rule {
+            site,
+            target: self.target(target).await?,
+        };
+        self.edit_rules(move |rules| rules.set(rule)).await
+    }
+
+    async fn remove_rule(&self, site: Site) -> Result<Arc<RuleSet>, ApiError> {
+        self.edit_rules(move |rules| rules.remove(&site)).await
     }
 
     /// Pin a node rule to the endpoint the catalogue lists now.
@@ -416,7 +457,7 @@ impl<H: Host> Shared<H> {
     async fn edit_rules(
         &self,
         edit: impl FnOnce(&SiteRules) -> Result<Arc<RuleSet>, RulesError> + Send + 'static,
-    ) -> Result<Bytes, ApiError> {
+    ) -> Result<Arc<RuleSet>, ApiError> {
         let rules = self.rules.clone();
         let edited = tokio::task::spawn_blocking(move || edit(&rules))
             .await
@@ -425,9 +466,8 @@ impl<H: Host> Shared<H> {
                 tracing::warn!(error = %error_report(&error), "website rule update failed");
                 ApiError::from(error)
             })?;
-        let body = encode(&*edited)?;
-        self.host.rules_changed(edited).await;
-        Ok(body)
+        self.host.rules_changed(edited.clone()).await;
+        Ok(edited)
     }
 }
 
@@ -452,8 +492,8 @@ fn encode(value: &impl Serialize) -> Result<Bytes, ApiError> {
     })
 }
 
-fn response(status: StatusCode, body: Bytes) -> Response<Full<Bytes>> {
-    let mut response = Response::new(Full::new(body));
+fn response(status: StatusCode, body: Bytes) -> Response<Body> {
+    let mut response = Response::new(Full::new(body).boxed());
     *response.status_mut() = status;
     let headers = response.headers_mut();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
