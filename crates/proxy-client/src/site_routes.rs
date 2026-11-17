@@ -292,6 +292,22 @@ impl Store {
                 });
             }
         }
+        let result = self.update_locked(site, target, dir);
+        // A concurrently spawned child can briefly inherit the open description
+        // on Unix. Release the advisory lock before closing our descriptor.
+        if let Err(error) = lock.unlock() {
+            tracing::warn!(?error, "could not explicitly unlock the website rules file");
+        }
+        result
+    }
+
+    fn update_locked(
+        &self,
+        site: Site,
+        target: Option<Target>,
+        dir: &Path,
+    ) -> Result<Value, StoreError> {
+        let path = self.path.as_path();
         let mut rules = Self::read(path)?;
         if let Some(target) = target {
             rules.insert(site, target);
