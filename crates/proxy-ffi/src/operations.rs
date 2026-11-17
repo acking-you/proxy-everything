@@ -5,6 +5,7 @@ use std::ffi::{CStr, CString, c_char};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use proxy_core::util::error_report;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -68,13 +69,13 @@ enum Request {
         directory: std::path::PathBuf,
     },
     FlushLogs,
-    ExternalController {
-        request: crate::external_controller::Request,
-    },
+    /// Runs on the async runtime and holds no blocking worker while it waits.
+    LocalController(crate::local_controller::Request),
     CloseListenerSessions,
     SiteRules {
         directory: std::path::PathBuf,
-        edit: Option<crate::site_routes::Edit>,
+        #[serde(flatten)]
+        change: crate::site_rules::Change,
     },
     StartSubscription {
         port: u16,
@@ -136,7 +137,7 @@ impl Request {
                 | Self::ConfigureLogs { .. }
                 | Self::FlushLogs
                 | Self::SiteRules { .. }
-                | Self::ExternalController { .. }
+                | Self::LocalController(_)
                 | Self::StartSubscription { .. }
                 | Self::StopSubscription { .. }
                 | Self::Processes
@@ -194,63 +195,57 @@ pub unsafe extern "C" fn proxy_operation_start_v1(
         let Some(runtime) = crate::runtime::control() else {
             return 0;
         };
-        let Ok(mut state) = active().lock() else {
-            return 0;
-        };
-        // Keep capacity to revoke the controller while the regular pool is full.
-        let limit = if matches!(
-            request,
-            Request::ExternalController {
-                request: crate::external_controller::Request::Stop { .. }
-            }
-        ) {
-            33
-        } else {
-            32
-        };
-        if state.jobs >= limit || (address != 0 && !state.handles.insert(address)) {
-            return 0;
-        }
-        state.jobs += 1;
-        drop(state);
         static NEXT: AtomicU64 = AtomicU64::new(1);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        let finish = move |result: std::thread::Result<Result<Value, String>>| {
-            let response = match result {
-                Ok(Ok(data)) => json!({"type": "complete", "data": data}),
-                Ok(Err(error)) => json!({"type": "failed", "message": error}),
-                Err(_) => json!({"type": "failed", "message": "Native control operation failed"}),
-            };
-            let mut state = active().lock().unwrap_or_else(|error| error.into_inner());
-            state.jobs -= 1;
-            state.handles.remove(&address);
-            drop(state);
-            let message = CString::new(response.to_string()).expect("JSON contains no NUL");
-            callback(id, message.into_raw());
-        };
-        match request {
-            Request::ExternalController { request } => {
+        // Controller calls park on the async runtime, not in the worker pool,
+        // so a waiting `next` can never starve other operations or a stop.
+        let request = match request {
+            Request::LocalController(request) => {
                 use futures::FutureExt;
+                let id = NEXT.fetch_add(1, Ordering::Relaxed);
                 runtime.spawn(async move {
                     let result = std::panic::AssertUnwindSafe(request.execute())
                         .catch_unwind()
                         .await;
-                    finish(
-                        result.map(|reply| reply.map_err(|e| proxy_core::util::error_report(&e))),
+                    respond(
+                        callback,
+                        id,
+                        result.map(|result| result.map_err(|error| error_report(&error))),
                     );
                 });
+                return id;
             }
-            request => {
-                runtime.spawn_blocking(move || {
-                    finish(std::panic::catch_unwind(|| {
-                        execute(address as *mut ProxyHandle, request)
-                    }));
-                });
-            }
+            request => request,
+        };
+        let Ok(mut state) = active().lock() else {
+            return 0;
+        };
+        if state.jobs >= 32 || (address != 0 && !state.handles.insert(address)) {
+            return 0;
         }
+        state.jobs += 1;
+        drop(state);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        runtime.spawn_blocking(move || {
+            let result = std::panic::catch_unwind(|| execute(address as *mut ProxyHandle, request));
+            let mut state = active().lock().unwrap_or_else(|error| error.into_inner());
+            state.jobs -= 1;
+            state.handles.remove(&address);
+            drop(state);
+            respond(callback, id, result);
+        });
         id
     })
     .unwrap_or(0)
+}
+
+fn respond(callback: Callback, id: u64, result: std::thread::Result<Result<Value, String>>) {
+    let response = match result {
+        Ok(Ok(data)) => json!({"type": "complete", "data": data}),
+        Ok(Err(error)) => json!({"type": "failed", "message": error}),
+        Err(_) => json!({"type": "failed", "message": "Native control operation failed"}),
+    };
+    let message = CString::new(response.to_string()).expect("serde_json escapes NUL in strings");
+    callback(id, message.into_raw());
 }
 
 fn string(value: String) -> Result<CString, String> {
@@ -462,29 +457,22 @@ fn execute(handle: *mut ProxyHandle, request: Request) -> Result<Value, String> 
                 crate::disk_log::flush_result().map_err(|error| error.to_string())?;
                 return Ok(json!({}));
             }
-            Request::SiteRules { directory, edit } => {
-                use proxy_client::controller::Failure;
-                let rules = crate::site_routes::open(&directory)
-                    .map_err(Failure::from)
-                    .and_then(|store| match edit {
-                        Some(edit) => {
-                            let site = edit.site.try_into().map_err(|_| Failure::InvalidRule)?;
-                            store.update(site, edit.target).map_err(Failure::from)
-                        }
-                        None => Ok(store.view()),
-                    });
-                return Ok(json!(rules));
+            Request::SiteRules { directory, change } => {
+                // `{"Ok": {"rules": [...]}}` or `{"Err": kind}`, so the page
+                // can tell an invalid site from a storage failure.
+                let rules = crate::site_rules::apply(&directory, change);
+                return serde_json::to_value(rules.as_deref()).map_err(|error| error.to_string());
             }
             Request::CloseListenerSessions => {
                 if (*handle).running.load(Ordering::Acquire) {
-                    (*handle).sessions.close_existing();
+                    (*handle).drain.drain();
                     crate::ProxyResult::Ok
                 } else {
                     crate::ProxyResult::NotRunning
                 }
             }
-            Request::ExternalController { .. } => {
-                unreachable!("controller exchanges are dispatched on the async runtime")
+            Request::LocalController(_) => {
+                unreachable!("start dispatches controller requests to the async runtime")
             }
             Request::StartSubscription { port, config } => {
                 let mut servers = subscriptions()

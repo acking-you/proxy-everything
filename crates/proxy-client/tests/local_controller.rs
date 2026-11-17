@@ -8,7 +8,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpStream, UdpSocket};
 
 #[tokio::test]
-async fn cli_switches_carrier_without_rebinding_and_can_drain_existing_sessions() {
+async fn cli_controller_switches_drains_and_routes_website_rules() {
     tokio::time::timeout(Duration::from_secs(20), exercise_cli())
         .await
         .unwrap();
@@ -161,5 +161,62 @@ second = ["quic://127.0.0.1:{quic_port}"]"#
     next.write_all(&[5, 1, 0]).await.unwrap();
     next.read_exact(&mut greeting).await.unwrap();
     assert_eq!(greeting, [5, 0]);
+
+    // Both upstreams are unreachable, so only a direct rule reaches this echo.
+    let echo = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let echo_port = echo.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (mut stream, _) = echo.accept().await.unwrap();
+        let (mut read, mut write) = stream.split();
+        tokio::io::copy(&mut read, &mut write).await.unwrap();
+    });
+    let rules = |method: reqwest::Method, body: Value| {
+        http.request(method, format!("{base}/v1/rules"))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+    };
+    let site = format!("127.0.0.1:{echo_port}");
+    let unknown = rules(
+        reqwest::Method::PUT,
+        json!({"site": site, "target": {"action":"node","node_id":"missing","transport":"tcp"}}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    let saved: Value = rules(
+        reqwest::Method::PUT,
+        json!({"site": format!("http://{site}/ignored?path"), "target": {"action":"direct"}}),
+    )
+    .await
+    .unwrap()
+    .error_for_status()
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(saved["rules"][0]["site"], site);
+    let mut routed = TcpStream::connect(proxy).await.unwrap();
+    routed.write_all(&[5, 1, 0]).await.unwrap();
+    routed.read_exact(&mut greeting).await.unwrap();
+    let mut connect = vec![5, 1, 0, 1, 127, 0, 0, 1];
+    connect.extend_from_slice(&echo_port.to_be_bytes());
+    routed.write_all(&connect).await.unwrap();
+    let mut reply = [0; 10];
+    routed.read_exact(&mut reply).await.unwrap();
+    assert_eq!(reply[1], 0, "the direct rule should connect");
+    routed.write_all(b"ping").await.unwrap();
+    let mut echoed = [0; 4];
+    routed.read_exact(&mut echoed).await.unwrap();
+    assert_eq!(&echoed, b"ping");
+    let removed: Value = rules(reqwest::Method::DELETE, json!({ "site": site }))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(removed["rules"], json!([]));
     process.kill().await.unwrap();
 }

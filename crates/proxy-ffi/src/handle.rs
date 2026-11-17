@@ -17,7 +17,7 @@ use proxy_client::client::tun::{
     running_process_names, running_processes,
 };
 use proxy_client::client::{
-    ClientConfig, ClientRuntimeConfig, ListenerSessions, run_client_with_sessions,
+    ClientConfig, ClientRuntimeConfig, ListenerDrain, run_client_with_listener_runtime_config,
 };
 use proxy_core::util::error_report;
 use tokio::net::TcpListener;
@@ -54,7 +54,7 @@ const PRIVILEGED_TUN_READY_TIMEOUT: std::time::Duration = std::time::Duration::f
 pub struct ProxyHandle {
     pub(crate) runtime: Runtime,
     pub(crate) cancel_token: Option<CancellationToken>,
-    pub(crate) sessions: ListenerSessions,
+    pub(crate) drain: ListenerDrain,
     listener_task: Option<tokio::task::JoinHandle<()>>,
     pub(crate) running: Arc<AtomicBool>,
     pub(crate) local_port: u16,
@@ -138,7 +138,7 @@ pub extern "C" fn proxy_create() -> *mut ProxyHandle {
     Box::into_raw(Box::new(ProxyHandle {
         runtime,
         cancel_token: None,
-        sessions: ListenerSessions::default(),
+        drain: ListenerDrain::default(),
         listener_task: None,
         running: Arc::new(AtomicBool::new(false)),
         local_port: 0,
@@ -603,12 +603,14 @@ fn proxy_start_inner(
         }
     };
 
-    handle.sessions.sites = match cache_dir
+    // A rules file that cannot be read stops the start: proxying a site the
+    // user sent direct, or the reverse, would be a silent policy change.
+    let site_rules = match cache_dir
         .as_deref()
-        .map(crate::site_routes::open)
+        .map(crate::site_rules::open)
         .transpose()
     {
-        Ok(sites) => sites,
+        Ok(rules) => rules,
         Err(error) => {
             record_error(handle, &error_report(&error));
             return ProxyResult::RuntimeError;
@@ -707,6 +709,8 @@ fn proxy_start_inner(
             dns_fallback: Some(dns_server),
         }),
         packet_routing: None,
+        site_rules,
+        drain: Some(handle.drain.clone()),
     };
 
     // Bind listener synchronously before reporting start success.
@@ -785,7 +789,6 @@ fn proxy_start_inner(
         (config, ready_message)
     });
 
-    let sessions = handle.sessions.clone();
     // Spawn proxy task using existing client logic
     handle.listener_task = Some(handle.runtime.spawn(async move {
         let connections = TaskTracker::new();
@@ -804,12 +807,11 @@ fn proxy_start_inner(
             "proxy started"
         );
 
-        run_client_with_sessions(
+        run_client_with_listener_runtime_config(
             listener,
             cancel_token,
             Some(connections.clone()),
             Some(client_config),
-            Some(sessions),
         )
         .await;
 

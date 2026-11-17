@@ -229,6 +229,8 @@ impl PacketTunnelRuntime {
             force_proxy: None,
             process_bypass: None,
             packet_routing: config.auto_proxy.then(|| routing.clone()),
+            site_rules: None,
+            drain: None,
         };
         let (input, input_rx) = mpsc::channel(QUEUE_CAPACITY);
         let (output_tx, output) = mpsc::channel(QUEUE_CAPACITY);

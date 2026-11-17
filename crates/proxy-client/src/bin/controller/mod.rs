@@ -1,212 +1,199 @@
+//! The CLI side of the local controller: a fixed catalogue from the profile,
+//! and switching by replacing the runtime upstream of the running listener.
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, ensure};
 use proxy_client::client::tun::TunConfig;
-use proxy_client::client::{ClientRuntimeConfig, ListenerSessions, serve_client_until_shutdown};
-use proxy_client::controller::{Call, Command, Failure, NodeId, Reply, Selection, Server};
+use proxy_client::client::{ClientRuntimeConfig, ListenerDrain, serve_client_until_shutdown};
+use proxy_client::controller::{
+    Active, ApiError, Controller, Host, Node, Selection, Status, Token,
+};
+use proxy_client::site_rules::{NodeId, SiteRules};
 use proxy_core::config::runtime;
-use proxy_core::upstream::UpstreamAddress;
-use serde_json::{Value, json};
+use proxy_core::upstream::{Carrier, UpstreamAddress};
 use tokio::net::TcpListener;
 
-type Nodes = BTreeMap<NodeId, Vec<UpstreamAddress>>;
+/// Names the initial endpoint when the profile lists no node for it.
+const STARTUP_NODE: &str = "startup";
 
-struct Client {
-    nodes: Nodes,
-    active_id: NodeId,
-    active: UpstreamAddress,
+struct CliHost {
+    catalogue: BTreeMap<NodeId, Vec<UpstreamAddress>>,
     local_port: u16,
-    sessions: ListenerSessions,
-    sites: std::sync::Arc<proxy_client::site_routes::Store>,
+    active: Mutex<(NodeId, UpstreamAddress)>,
+    /// Held across route preparation, so a second switch is refused.
+    switching: tokio::sync::Mutex<()>,
+    drain: ListenerDrain,
     tun: Option<TunConfig>,
     #[cfg(windows)]
     udp: bool,
 }
 
-fn endpoint(address: &UpstreamAddress) -> Value {
-    json!({"host":address.host, "port":address.port, "transport":address.carrier})
-}
-
-impl Client {
-    fn status(&self) -> Value {
-        json!({"running":true, "local_port":self.local_port, "active":{
-            "node_id": self.active_id, "endpoint":endpoint(&self.active)
-        }})
+impl CliHost {
+    fn active(&self) -> std::sync::MutexGuard<'_, (NodeId, UpstreamAddress)> {
+        self.active.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    fn lookup(
-        &self,
-        id: &NodeId,
-        carrier: proxy_core::upstream::Carrier,
-    ) -> Result<&UpstreamAddress, Failure> {
-        self.nodes
-            .get(id)
-            .ok_or(Failure::UnknownNode)?
-            .iter()
-            .find(|address| address.carrier == carrier)
-            .ok_or(Failure::UnsupportedTransport)
+    fn current(&self) -> Status {
+        let (node_id, endpoint) = self.active().clone();
+        Status {
+            running: true,
+            local_port: Some(self.local_port),
+            active: Some(Active {
+                node_id: Some(node_id),
+                endpoint,
+            }),
+        }
     }
 
-    async fn update_rule(
-        &self,
-        site: proxy_client::site_routes::Site,
-        target: Option<proxy_client::site_routes::Target>,
-    ) -> Reply {
-        let sites = self.sites.clone();
-        tokio::task::spawn_blocking(move || sites.update(site, target))
-            .await
-            .map_err(|_| Failure::Unavailable)?
-            .map_err(Failure::from)
-    }
-
-    async fn dispatch(&mut self, command: Command) -> Reply {
-        match command {
-            Command::Rules => Ok(self.sites.view()),
-            Command::SetRule(rule) => {
-                use proxy_client::controller::RuleTarget;
-                use proxy_client::site_routes::Target;
-                let target = match rule.target {
-                    RuleTarget::Direct => Target::Direct,
-                    RuleTarget::Node { node_id, transport } => {
-                        let endpoint = self.lookup(&node_id, transport)?.clone();
-                        Target::Node { node_id, endpoint }
-                    }
-                };
-                self.update_rule(rule.site, Some(target)).await
-            }
-            Command::RemoveRule { site } => self.update_rule(site, None).await,
-            Command::Status => Ok(self.status()),
-            Command::Nodes => Ok(json!({"nodes": self.nodes.iter().map(|(id, addresses)| {
-                json!({"id": id, "endpoints": addresses.iter().map(endpoint).collect::<Vec<_>>()})
-            }).collect::<Vec<_>>() })),
-            Command::Switch(Selection {
-                node_id,
-                transport,
-                close_existing,
-            }) => {
-                let selected = self.lookup(&node_id, transport)?;
-                if self.active != *selected {
-                    if let Some(tun) = &self.tun {
-                        #[cfg(windows)]
-                        {
-                            let prepared = tun
-                                .bypass
-                                .prepare_upstream(
-                                    &selected.qualified_host(),
-                                    selected.port,
-                                    self.udp,
-                                )
-                                .await
-                                .and_then(|p| p.commit());
-                            if let Err(error) = prepared {
-                                tracing::warn!(?error, "failed to prepare upstream route");
-                                return Err(Failure::SwitchFailed);
-                            }
-                        }
-                        #[cfg(not(windows))]
-                        {
-                            let _ = tun;
-                            if !self.active.host.eq_ignore_ascii_case(&selected.host) {
-                                tracing::warn!(
-                                    "stop CLI TUN capture before changing the upstream host"
-                                );
-                                return Err(Failure::SwitchFailed);
-                            }
-                        }
-                    }
-                    runtime::set_server_endpoint(selected.qualified_host(), selected.port);
-                    self.active = selected.clone();
-                }
-                self.active_id = node_id;
-                if close_existing {
-                    self.sessions.close_existing();
-                }
-                Ok(self.status())
+    /// A TUN capture holds a route exception for the upstream host, which has
+    /// to move before new connections may use another host.
+    async fn reroute(&self, from: &UpstreamAddress, to: &UpstreamAddress) -> Result<(), ApiError> {
+        let Some(tun) = &self.tun else {
+            return Ok(());
+        };
+        #[cfg(windows)]
+        {
+            let _ = from;
+            tun.bypass
+                .prepare_upstream(&to.qualified_host(), to.port, self.udp)
+                .await
+                .and_then(|prepared| prepared.commit())
+                .map_err(|error| {
+                    tracing::warn!(%error, "could not route the selected upstream around TUN");
+                    ApiError::SwitchFailed
+                })
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = tun;
+            if from.host.eq_ignore_ascii_case(&to.host) {
+                Ok(())
+            } else {
+                tracing::warn!("stop CLI TUN capture before changing the upstream host");
+                Err(ApiError::SwitchFailed)
             }
         }
     }
 }
 
+impl Host for CliHost {
+    async fn nodes(&self) -> Result<Vec<Node>, ApiError> {
+        Ok(self
+            .catalogue
+            .iter()
+            .map(|(id, endpoints)| Node {
+                id: id.clone(),
+                endpoints: endpoints.clone(),
+            })
+            .collect())
+    }
+
+    async fn status(&self) -> Result<Status, ApiError> {
+        Ok(self.current())
+    }
+
+    async fn switch(&self, selection: Selection) -> Result<Status, ApiError> {
+        let Selection {
+            node_id,
+            transport,
+            close_existing,
+        } = selection;
+        let _switching = self.switching.try_lock().map_err(|_| ApiError::Busy)?;
+        let selected = self
+            .catalogue
+            .get(&node_id)
+            .ok_or(ApiError::UnknownNode)?
+            .iter()
+            .find(|endpoint| endpoint.carrier == transport)
+            .ok_or(ApiError::UnsupportedTransport)?
+            .clone();
+        let current = self.active().1.clone();
+        if current != selected {
+            self.reroute(&current, &selected).await?;
+            runtime::set_server_endpoint(selected.qualified_host(), selected.port);
+        }
+        *self.active() = (node_id, selected);
+        if close_existing {
+            self.drain.drain();
+        }
+        Ok(self.current())
+    }
+}
+
+/// Parse `[controller_nodes]`, at most one endpoint per carrier and node.
+fn catalogue(
+    configured: BTreeMap<NodeId, Vec<String>>,
+) -> Result<BTreeMap<NodeId, Vec<UpstreamAddress>>> {
+    configured
+        .into_iter()
+        .map(|(id, entries)| {
+            ensure!(
+                id.as_str() != STARTUP_NODE,
+                "{STARTUP_NODE} is reserved for the initial CLI endpoint"
+            );
+            ensure!(!entries.is_empty(), "node {id} needs at least one endpoint");
+            let mut endpoints: Vec<UpstreamAddress> = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let endpoint = UpstreamAddress::parse(&entry)
+                    .with_context(|| format!("invalid controller endpoint for {id}"))?;
+                ensure!(
+                    endpoints.iter().all(|e| e.carrier != endpoint.carrier),
+                    "node {id} lists more than one {} endpoint",
+                    match endpoint.carrier {
+                        Carrier::Tcp => "TCP",
+                        Carrier::Quic => "QUIC",
+                    }
+                );
+                endpoints.push(endpoint);
+            }
+            Ok((id, endpoints))
+        })
+        .collect()
+}
+
+/// Serve the proxy on `listener` with the controller beside it, until shutdown.
 pub(super) async fn run(
     port: u16,
     configured: BTreeMap<NodeId, Vec<String>>,
-    listen_host: &str,
-    client_port: u16,
-    config: ClientRuntimeConfig,
-    sites: std::sync::Arc<proxy_client::site_routes::Store>,
+    listener: TcpListener,
+    mut config: ClientRuntimeConfig,
+    rules: Arc<SiteRules>,
 ) -> Result<()> {
-    let active = runtime::server_endpoint();
-    let active = UpstreamAddress::from_host(&active.host, active.port)?;
-    let mut nodes = Nodes::new();
-    for (id, entries) in configured {
-        ensure!(
-            id != NodeId::startup(),
-            "startup is reserved for the initial CLI endpoint"
-        );
-        ensure!(!entries.is_empty(), "node {id} needs at least one endpoint");
-        let mut addresses = Vec::<UpstreamAddress>::new();
-        for entry in entries {
-            let address = UpstreamAddress::parse(&entry)
-                .with_context(|| format!("invalid controller endpoint for {id}"))?;
-            ensure!(
-                addresses.iter().all(|a| a.carrier != address.carrier),
-                "duplicate transport for node {id}"
-            );
-            addresses.push(address);
-        }
-        nodes.insert(id, addresses);
-    }
-    let active_id = nodes
-        .iter()
-        .find(|(_, entries)| entries.contains(&active))
-        .map(|(id, _)| id.clone())
-        .unwrap_or_else(|| {
-            let id = NodeId::startup();
-            nodes.insert(id.clone(), vec![active.clone()]);
-            id
-        });
     let token = std::env::var("CIPHERRELAY_CONTROLLER_TOKEN")
         .context("Set CIPHERRELAY_CONTROLLER_TOKEN before enabling the controller")?;
-    let (server, mut calls) = Server::bind(port, token)
-        .await
-        .context("bind local controller")?;
-    let listener = TcpListener::bind((listen_host, client_port))
-        .await
-        .context("bind local proxy")?;
-    let mut sessions = ListenerSessions::default();
-    sessions.sites = Some(sites.clone());
-    let mut client = Client {
-        nodes,
-        active_id,
-        active,
+    let token = Token::try_from(token)?;
+    let mut catalogue = catalogue(configured)?;
+    let initial = runtime::server_endpoint();
+    let initial = UpstreamAddress::from_host(&initial.host, initial.port)?;
+    let active_id = match catalogue
+        .iter()
+        .find(|(_, endpoints)| endpoints.contains(&initial))
+    {
+        Some((id, _)) => id.clone(),
+        None => {
+            let id = NodeId::try_from(STARTUP_NODE.to_owned())?;
+            catalogue.insert(id.clone(), vec![initial.clone()]);
+            id
+        }
+    };
+    let drain = ListenerDrain::default();
+    config.drain = Some(drain.clone());
+    let host = CliHost {
+        catalogue,
         local_port: listener.local_addr()?.port(),
-        sessions: sessions.clone(),
-        sites,
+        active: Mutex::new((active_id, initial)),
+        switching: tokio::sync::Mutex::new(()),
+        drain,
         tun: config.tun.clone(),
         #[cfg(windows)]
         udp: config.client.enable_udp,
     };
-    eprintln!("Local controller: http://127.0.0.1:{}", server.port()?);
-    let control = async {
-        let dispatch = async {
-            while let Some(Call { command, reply }) = calls.recv().await {
-                if !reply.is_closed() {
-                    let _ = reply.send(client.dispatch(command).await);
-                }
-            }
-        };
-        tokio::select! {
-            result = server.serve() => if let Err(error) = result {
-                tracing::error!(?error, "local controller stopped");
-            },
-            () = dispatch => {}
-        }
-    };
-    let proxy = serve_client_until_shutdown(listener, Some(config), Some(sessions));
-    tokio::pin!(proxy);
+    let controller = Controller::bind(port, token, host, rules).await?;
+    eprintln!("Local controller: http://{}", controller.local_addr()?);
     tokio::select! {
-        result = &mut proxy => result?,
-        () = control => proxy.await?,
+        result = serve_client_until_shutdown(listener, Some(config)) => result?,
+        () = controller.serve() => {}
     }
     Ok(())
 }

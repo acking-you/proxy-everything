@@ -117,9 +117,13 @@ node that fails reports a forwarding failure.
   Process bypass, mandatory direct exceptions and protected DNS keep precedence.
 
 The CLI stores rules next to its TOML profile as `<filename>.sites.json`. The app
-uses `website-rules.json` in its support directory. API updates atomically replace
-the file and publish a new in-memory snapshot. Up to 256 website rules fit in
-one profile.
+uses `website-rules.json` in its support directory. Both files hold the same
+`{"rules":[...]}` document that `GET /v1/rules` returns. A running process owns
+its file: each edit starts from the published rules, atomically replaces the
+file and then publishes the new snapshot, so make changes through the app or
+the API rather than by hand. A file that cannot be read stops the proxy from
+starting instead of silently dropping its routes. Up to 256 website rules fit
+in one profile.
 
 ```sh
 curl --noproxy '*' -H "$auth" "$base/v1/rules"

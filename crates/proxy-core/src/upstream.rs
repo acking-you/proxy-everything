@@ -17,11 +17,49 @@ pub enum Carrier {
 }
 
 /// Immutable, per-dial choice. Bare addresses keep their historical TCP meaning.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Serialized as `{"host", "port", "transport"}`, the spelling the local
+/// controller API and saved website rules share. Decoding validates the host
+/// and port as [`Self::parse`] does.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "EndpointFields", into = "EndpointFields")]
 pub struct UpstreamAddress {
     pub host: String,
     pub port: u16,
     pub carrier: Carrier,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EndpointFields {
+    host: String,
+    port: u16,
+    #[serde(default)]
+    transport: Carrier,
+}
+
+impl TryFrom<EndpointFields> for UpstreamAddress {
+    type Error = io::Error;
+
+    fn try_from(fields: EndpointFields) -> io::Result<Self> {
+        if fields.port == 0 {
+            return Err(invalid("upstream requires a nonzero port"));
+        }
+        Ok(Self {
+            host: bare_host(&fields.host)?.to_owned(),
+            port: fields.port,
+            carrier: fields.transport,
+        })
+    }
+}
+
+impl From<UpstreamAddress> for EndpointFields {
+    fn from(address: UpstreamAddress) -> Self {
+        Self {
+            host: address.host,
+            port: address.port,
+            transport: address.carrier,
+        }
+    }
 }
 
 impl UpstreamAddress {

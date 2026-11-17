@@ -1,8 +1,9 @@
 mod controller;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use comfy_table::{Cell, Color, Table, presets};
 use proxy_client::cli_config::{
@@ -10,9 +11,11 @@ use proxy_client::cli_config::{
     get_default_config_path,
 };
 use proxy_client::client::tun::{TunConfig, TunVirtualDnsState, running_process_names};
-use proxy_client::client::{ClientConfig, ClientRuntimeConfig, start_client_with_runtime_config};
+use proxy_client::client::{ClientConfig, ClientRuntimeConfig, serve_client_until_shutdown};
+use proxy_client::site_rules::SiteRules;
 use proxy_core::config::{CLIENT_PORT, SERVER_PORT, init_tracing};
 use proxy_core::relay::ExternalProxyTarget;
+use tokio::net::TcpListener;
 
 #[derive(Parser)]
 #[command(author = "L_B__", version, about, long_about = None)]
@@ -542,6 +545,19 @@ async fn main() -> Result<()> {
     } else {
         None
     };
+    // Website rules live beside the profile. An external upstream carries
+    // every connection to a third party, so it has no native route to choose.
+    let site_rules = if upstream_mode {
+        None
+    } else {
+        let profile = match cli.config.clone().or_else(find_config) {
+            Some(profile) => profile,
+            None => get_default_config_path()?,
+        };
+        Some(Arc::new(SiteRules::open(
+            profile.with_added_extension("sites.json"),
+        )?))
+    };
     let client_config = ClientRuntimeConfig {
         client: ClientConfig {
             enable_auto_proxy: effective_auto_proxy,
@@ -553,6 +569,8 @@ async fn main() -> Result<()> {
         force_proxy: None,
         process_bypass: None,
         packet_routing: None,
+        site_rules: site_rules.clone(),
+        drain: None,
     };
     let env_listen_host = std::env::var("LISTEN_HOST").ok();
     let listen_host = cli
@@ -565,46 +583,29 @@ async fn main() -> Result<()> {
         } else {
             "0.0.0.0"
         });
-    let sites = if upstream_mode {
-        None
-    } else {
-        let profile = cli
-            .config
-            .clone()
-            .or_else(find_config)
-            .map(Ok)
-            .unwrap_or_else(get_default_config_path)?;
-        Some(std::sync::Arc::new(proxy_client::site_routes::Store::open(
-            profile.with_added_extension("sites.json"),
-        )?))
+    let controller_port = cli.controller_port.or(config.controller_port);
+    let controller_rules = match (controller_port, site_rules) {
+        (Some(_), None) => bail!("The local controller requires a native proxy upstream"),
+        (port, rules) => port.zip(rules),
     };
-    if let Some(port) = cli.controller_port.or(config.controller_port) {
-        controller::run(
-            port,
-            config.controller_nodes,
-            listen_host,
-            client_port,
-            client_config,
-            sites.context("The controller requires a native proxy upstream")?,
-        )
-        .await?;
-    } else if let Some(sites) = sites {
-        let mut sessions = proxy_client::client::ListenerSessions::default();
-        sessions.sites = Some(sites);
-        let listener = tokio::net::TcpListener::bind((listen_host, client_port)).await?;
-        proxy_client::client::serve_client_until_shutdown(
-            listener,
-            Some(client_config),
-            Some(sessions),
-        )
-        .await?;
-    } else {
-        start_client_with_runtime_config(listen_host, client_port, Some(client_config))
+    let listener = TcpListener::bind((listen_host, client_port))
+        .await
+        .with_context(|| format!("bind the local proxy to {listen_host}:{client_port}"))?;
+    match controller_rules {
+        Some((port, rules)) => {
+            controller::run(
+                port,
+                config.controller_nodes,
+                listener,
+                client_config,
+                rules,
+            )
             .await
-            .context("local proxy failed")?;
+        }
+        None => serve_client_until_shutdown(listener, Some(client_config))
+            .await
+            .context("local proxy failed"),
     }
-
-    Ok(())
 }
 
 #[cfg(test)]

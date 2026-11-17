@@ -21,7 +21,7 @@ pub struct Config {
     pub server_host: Option<String>,
     pub controller_port: Option<u16>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub controller_nodes: std::collections::BTreeMap<crate::controller::NodeId, Vec<String>>,
+    pub controller_nodes: std::collections::BTreeMap<crate::site_rules::NodeId, Vec<String>>,
     pub transport: Option<String>,
     pub quic_ca: Option<PathBuf>,
     pub server_port: Option<u16>,
