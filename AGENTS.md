@@ -181,11 +181,10 @@ testing. "Publish" means verified, versioned local artifacts unless the user
 explicitly asks for a tag, push or upload. The CI release flow is described in
 [docs/releasing.md](docs/releasing.md).
 
-**Mobile packages are built locally, never by CI.** CI-built APKs and IPAs
-carry a new debug certificate on every run and cannot upgrade an installed app
-(the evidence is in [docs/releasing.md](docs/releasing.md#3-mobile-packages-built-locally)).
-The release workflow collects desktop artifacts only; never add `*.apk` or
-`*.ipa` to it. Never move the signing key into CI on your own initiative.
+Android releases use the dedicated `android-release` GitHub environment on
+the Flutter repository's `main` branch. iOS packages are built and signed
+locally. Use the approved Android signing key through that environment's
+secret and keep it out of source, logs and artifacts.
 
 ### Android
 
@@ -195,7 +194,8 @@ The release workflow collects desktop artifacts only; never add `*.apk` or
 - Keep the application ID `com.proxyui.proxy_ui`. An APK updates an installed
   copy only when the ID and signing certificate match and its effective
   `versionCode` is greater.
-- Release builds use the local debug key. Never delete, regenerate or replace
+- CI signs the split APKs on a separate runner with the established Android
+  certificate. Local builds use the same existing key. Never delete, regenerate or replace
   `%USERPROFILE%\.android\debug.keystore`; a signing migration must be planned
   explicitly, because a new key breaks in-place upgrades.
 - Split APKs per ABI; build a universal APK only on request. Build `arm64-v8a`
