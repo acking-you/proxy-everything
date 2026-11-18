@@ -33,26 +33,45 @@ pub(crate) fn open(directory: &Path) -> Result<Arc<SiteRules>, RulesError> {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub(crate) enum Change {
     List,
-    Set { site: String, target: Target },
-    Remove { site: String },
+    Set {
+        #[serde(default)]
+        previous: Option<String>,
+        site: String,
+        target: Target,
+    },
+    Remove {
+        site: String,
+    },
 }
 
 /// The rules after `change`, failing with the controller API's error kinds.
 pub(crate) fn apply(directory: &Path, change: Change) -> Result<Arc<RuleSet>, ApiError> {
+    enum Operation {
+        List,
+        Set { previous: Option<Site>, rule: Rule },
+        Remove(Site),
+    }
     let site = |site: String| site.parse::<Site>().map_err(|_| ApiError::InvalidRule);
     let edit = match change {
-        Change::List => None,
+        Change::List => Operation::List,
         Change::Set {
+            previous,
             site: input,
             target,
-        } => Some((site(input)?, Some(target))),
-        Change::Remove { site: input } => Some((site(input)?, None)),
+        } => Operation::Set {
+            previous: previous.map(site).transpose()?,
+            rule: Rule {
+                site: site(input)?,
+                target,
+            },
+        },
+        Change::Remove { site: input } => Operation::Remove(site(input)?),
     };
     open(directory)
         .and_then(|rules| match edit {
-            None => Ok(rules.snapshot()),
-            Some((site, Some(target))) => rules.set(Rule { site, target }),
-            Some((site, None)) => rules.remove(&site),
+            Operation::List => Ok(rules.snapshot()),
+            Operation::Set { previous, rule } => rules.replace(previous.as_ref(), rule),
+            Operation::Remove(site) => rules.remove(&site),
         })
         .map_err(|error| {
             tracing::warn!(error = %error_report(&error), "website rule operation failed");

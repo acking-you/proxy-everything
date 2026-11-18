@@ -138,6 +138,9 @@ pub struct ProxyContext<'a> {
     /// Optional external upstream proxy used instead of the encrypted proxy server.
     upstream_proxy: Option<&'a ExternalProxyTarget>,
     site_rules: Option<&'a SiteRules>,
+    /// False only while a dynamic TUN override forces every outbound socket
+    /// through the proxy because no process-bypass relay excludes this process.
+    allow_direct: bool,
     /// Honour [`proxy_core::config::FORCED_DIRECT_HOSTS`]. Disabled only while a
     /// TUN session owns the routes, where a direct socket from this process
     /// would be captured back into the local listener.
@@ -179,6 +182,14 @@ impl ProxyContext<'_> {
         let Some(target) = self.site_rules.and_then(|rules| rules.resolve(host, port)) else {
             return Ok(None);
         };
+        if matches!(target, Target::Direct) && !self.allow_direct {
+            tracing::debug!(
+                host,
+                port,
+                "skipping direct website rule while TUN forces proxy"
+            );
+            return Ok(None);
+        }
         tracing::debug!(host, port, ?target, "website rule matched");
         match target {
             Target::Direct => Ok(Some(ServerConnection {
@@ -231,6 +242,7 @@ pub struct ClientProxyContext {
     force_proxy: bool,
     upstream_proxy: Option<ExternalProxyTarget>,
     site_rules: Option<Arc<SiteRules>>,
+    allow_direct: bool,
     honor_forced_direct: bool,
     enable_udp: bool,
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
@@ -324,6 +336,7 @@ pub async fn handle_client(mut context: ClientProxyContext) -> Result<()> {
         force_proxy: context.force_proxy,
         upstream_proxy: context.upstream_proxy.as_ref(),
         site_rules: context.site_rules.as_deref(),
+        allow_direct: context.allow_direct,
         honor_forced_direct: context.honor_forced_direct,
         enable_udp: context.enable_udp,
         #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
@@ -527,27 +540,21 @@ pub async fn run_client_with_listener_runtime_config(
                 };
                 let token = cancel_token.clone();
                 let generation = drain.as_ref().map(ListenerDrain::generation);
-                #[cfg(feature = "auto-proxy")]
-                let sender = if force_proxy_controller
+                let force_proxy_override = force_proxy_controller
                     .as_ref()
-                    .is_some_and(|controller| controller.load(Ordering::Acquire))
-                {
+                    .is_some_and(|controller| controller.load(Ordering::Acquire));
+                #[cfg(feature = "auto-proxy")]
+                let sender = if force_proxy_override {
                     None
                 } else {
                     sender.clone()
                 };
-                let tun_owns_routes = tun_active
-                    || force_proxy_controller
-                        .as_ref()
-                        .is_some_and(|controller| controller.load(Ordering::Acquire));
+                let tun_owns_routes = tun_active || force_proxy_override;
                 // `force_proxy` now comes from the auto-proxy setting and the
                 // dynamic controller alone. TUN owning the routes no longer
                 // implies it: process bypass keeps this listener's own direct
                 // sockets out of the tunnel.
-                let force_proxy = force_proxy
-                    || force_proxy_controller
-                        .as_ref()
-                        .is_some_and(|controller| controller.load(Ordering::Acquire));
+                let force_proxy = force_proxy || force_proxy_override;
                 let task = client_proxy_background_task(ClientProxyContext {
                     stream,
                     #[cfg(feature = "auto-proxy")]
@@ -555,6 +562,7 @@ pub async fn run_client_with_listener_runtime_config(
                     force_proxy,
                     upstream_proxy: upstream_proxy.clone(),
                     site_rules: site_rules.clone(),
+                    allow_direct: !force_proxy_override,
                     // Left as-is under TUN. This path calls the same
                     // `get_tcp_stream` as auto-proxy's direct decision, so the
                     // bypass relay would repair its destination too and enabling

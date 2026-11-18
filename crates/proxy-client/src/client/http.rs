@@ -290,8 +290,7 @@ impl HttpProxierProvider {
                 context.site_rule_connection(&self.host, self.port).await?
             {
                 if connection.msg_key.is_none() {
-                    connection
-                        .stream
+                    AsyncReaderWriterRef::new(&mut connection.stream)
                         .write_all(context.buffer)
                         .await
                         .with_context(|_| IoSnafu {

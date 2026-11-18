@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 arc-swap.workspace = true
+percent-encoding.workspace = true
 tempfile.workspace = true
 url.workspace = true
 http-body-util.workspace = true

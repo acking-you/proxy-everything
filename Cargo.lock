@@ -2925,6 +2925,7 @@ dependencies = [
  "libc",
  "log",
  "moka",
+ "percent-encoding",
  "png",
  "proxy-core",
  "proxy-server",

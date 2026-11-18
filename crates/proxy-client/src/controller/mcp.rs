@@ -285,7 +285,10 @@ impl<H: Host> Tools<H> {
         } = params.0;
         let status = async {
             let node_id = node_id_from(node_id)?;
-            let transport = self.transport(&node_id, transport).await?;
+            let transport = match transport {
+                Some(transport) => transport.into(),
+                None => self.shared.resolve_endpoint(&node_id, None).await?.carrier,
+            };
             self.shared
                 .host
                 .switch(Selection {
@@ -326,9 +329,8 @@ impl<H: Host> Tools<H> {
                 Route::Direct => shared.set_rule(site, TargetInput::Direct).await,
                 Route::Node => {
                     let node_id = node_id_from(node_id.ok_or(ApiError::InvalidRule)?)?;
-                    let transport = self.transport(&node_id, transport).await?;
                     shared
-                        .set_rule(site, TargetInput::Node { node_id, transport })
+                        .set_node_rule(site, node_id, transport.map(Carrier::from))
                         .await
                 }
             }
@@ -337,26 +339,6 @@ impl<H: Host> Tools<H> {
         .map_err(failure)?;
         let status = shared.host.status().await.map_err(failure)?;
         Ok(Json(ProxyState::new(status, None, &rules)))
-    }
-
-    /// The requested transport, or the node's default one.
-    async fn transport(
-        &self,
-        node_id: &NodeId,
-        requested: Option<Transport>,
-    ) -> Result<Carrier, ApiError> {
-        if let Some(transport) = requested {
-            return Ok(transport.into());
-        }
-        let nodes = self.shared.host.nodes().await?;
-        let node = nodes
-            .iter()
-            .find(|node| node.id == *node_id)
-            .ok_or(ApiError::UnknownNode)?;
-        node.endpoint(Carrier::Tcp)
-            .or_else(|| node.endpoints.first())
-            .map(|endpoint| endpoint.carrier)
-            .ok_or(ApiError::UnsupportedTransport)
     }
 }
 

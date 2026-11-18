@@ -57,17 +57,18 @@ impl FromStr for Site {
             None => (false, input),
         };
         let authority = authority.split(['/', '?', '#']).next().unwrap_or_default();
-        // Credentials never belong in a rule, and a backslash is a path
-        // separator to some parsers but not to others.
+        // Credentials and raw percent-escapes never belong in a rule, and a
+        // backslash is a path separator to some parsers but not to others.
         if authority.is_empty()
-            || authority.contains('@')
+            || authority.contains(['@', '%'])
             || input.contains('\\')
             || input.contains(char::is_whitespace)
         {
             return Err(InvalidSite);
         }
         // A scheme that is not special leaves the host opaque, so `*.` survives
-        // parsing and a bare host gets no default port.
+        // parsing and a bare host gets no default port; non-ASCII labels are
+        // percent-encoded there and decoded back before IDNA mapping below.
         let parsed = url::Url::parse(&if is_url {
             Cow::Borrowed(input)
         } else {
@@ -83,9 +84,12 @@ impl FromStr for Site {
             return Err(InvalidSite);
         }
         let raw = parsed.host_str().ok_or(InvalidSite)?.trim_end_matches('.');
-        let (subdomains, raw) = match raw.strip_prefix("*.") {
+        let decoded = percent_encoding::percent_decode_str(raw)
+            .decode_utf8()
+            .map_err(|_| InvalidSite)?;
+        let (subdomains, raw) = match decoded.strip_prefix("*.") {
             Some(suffix) => (true, suffix),
-            None => (false, raw),
+            None => (false, decoded.as_ref()),
         };
         let host = match url::Host::parse(raw).map_err(|_| InvalidSite)? {
             url::Host::Domain(domain) if is_dns_name(&domain) => domain,
@@ -376,7 +380,20 @@ impl SiteRules {
 
     /// Add or replace the rule for its site. Blocks on file I/O.
     pub fn set(&self, rule: Rule) -> Result<Arc<RuleSet>, RulesError> {
-        self.edit(|rules| rules.set(rule))
+        self.replace(None, rule)
+    }
+
+    /// Replace `previous` (when different from `rule.site`) and save `rule` in
+    /// one atomic update. Blocks on file I/O.
+    pub fn replace(&self, previous: Option<&Site>, rule: Rule) -> Result<Arc<RuleSet>, RulesError> {
+        self.edit(|rules| {
+            if let Some(previous) = previous
+                && previous != &rule.site
+            {
+                rules.remove(previous);
+            }
+            rules.set(rule)
+        })
     }
 
     /// Remove the rule for `site`, if there is one. Blocks on file I/O.
@@ -459,11 +476,22 @@ mod tests {
             "api.example.com:443"
         );
         assert_eq!(site("[2001:DB8::1]:8443").to_string(), "[2001:db8::1]:8443");
+        assert_eq!(
+            site("B\u{fc}cher.Example").to_string(),
+            "xn--bcher-kva.example"
+        );
+        assert_eq!(
+            site("*.B\u{fc}cher.Example:8443").to_string(),
+            "*.xn--bcher-kva.example:8443"
+        );
         for invalid in [
             "",
             "ftp://example.com",
             "example.com/path",
             "user@example.com",
+            "bad%20host.example.com",
+            "example%2ecom",
+            "https://example%20bad.com/",
             "*.10.0.0.1",
             "example.com:0",
             "-bad-.example.com",
@@ -534,6 +562,46 @@ mod tests {
         store.remove(&site("api.example.com:443")).unwrap();
         assert_eq!(store.resolve("api.example.com", 443), Some(Target::Direct));
         assert_eq!(SiteRules::open(path).unwrap().snapshot().rules().len(), 1);
+    }
+
+    #[test]
+    fn replacing_a_rule_renames_its_site_atomically_at_the_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rules.json");
+        let store = SiteRules::open(path).unwrap();
+        for index in 0..MAX_RULES {
+            store
+                .set(Rule {
+                    site: site(&format!("host-{index}.example.com")),
+                    target: Target::Direct,
+                })
+                .unwrap();
+        }
+        assert!(matches!(
+            store.set(Rule {
+                site: site("overflow.example.com"),
+                target: Target::Direct,
+            }),
+            Err(RulesError::Invalid {
+                source: InvalidRuleSet::TooMany
+            })
+        ));
+        let previous = site("host-0.example.com");
+        store
+            .replace(
+                Some(&previous),
+                Rule {
+                    site: site("*.host-0.example.com"),
+                    target: Target::Direct,
+                },
+            )
+            .unwrap();
+        assert_eq!(store.snapshot().rules().len(), MAX_RULES);
+        assert!(store.resolve("host-0.example.com", 443).is_none());
+        assert_eq!(
+            store.resolve("sub.host-0.example.com", 443),
+            Some(Target::Direct)
+        );
     }
 
     #[test]

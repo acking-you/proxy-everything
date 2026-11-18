@@ -50,8 +50,9 @@ upstream uses a different forwarding path.
 
 Fetch `GET /v1/openapi.json` to discover the operations and their JSON schemas.
 Use the URL and token of the instance you want to control. All routes require
-the `Authorization: Bearer` header. Requests with a browser Origin are rejected.
-Keep the token out of URLs, subscription documents, logs and model prompts.
+the `Authorization: Bearer` header and a loopback `Host` header. Requests with a
+browser Origin are rejected. Keep the token out of URLs, subscription documents,
+logs and model prompts.
 
 ```sh
 base=http://127.0.0.1:9090

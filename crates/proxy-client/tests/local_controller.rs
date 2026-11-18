@@ -69,6 +69,22 @@ second = ["quic://127.0.0.1:{quic_port}"]"#
         denied.json::<Value>().await.unwrap()["error"]["kind"],
         "unauthorized"
     );
+    let browser_origin = http
+        .get(&status_url)
+        .bearer_auth(token)
+        .header("Origin", "https://attacker.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(browser_origin.status(), StatusCode::UNAUTHORIZED);
+    let rebound_host = http
+        .get(&status_url)
+        .bearer_auth(token)
+        .header("Host", "rebind.attacker.example:9090")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rebound_host.status(), StatusCode::UNAUTHORIZED);
     let status: Value = http
         .get(&status_url)
         .bearer_auth(token)

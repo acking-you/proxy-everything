@@ -9,7 +9,7 @@ mod mcp;
 
 use std::convert::Infallible;
 use std::future::Future;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, io};
@@ -17,7 +17,7 @@ use std::{fmt, io};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::{Bytes, Incoming};
-use hyper::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HeaderValue, ORIGIN};
+use hyper::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HOST, HeaderValue, ORIGIN};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
@@ -365,11 +365,13 @@ async fn respond<H: Host>(
     mcp: &mcp::Service<H>,
     request: Request<Incoming>,
 ) -> Response<Body> {
-    // A browser page names its origin. Only local programs may call.
+    // A browser page names its origin, and DNS rebinding sends a non-loopback
+    // Host. Only local programs addressing loopback may call.
     let result = if !shared
         .token
         .authorizes(request.headers().get(AUTHORIZATION))
         || request.headers().contains_key(ORIGIN)
+        || !has_loopback_host(request.headers().get(HOST))
     {
         Err(ApiError::Unauthorized)
     } else if request.uri().path() == mcp::PATH {
@@ -425,9 +427,30 @@ impl<H: Host> Shared<H> {
     }
 
     async fn set_rule(&self, site: Site, target: TargetInput) -> Result<Arc<RuleSet>, ApiError> {
+        match target {
+            TargetInput::Direct => {
+                let rule = Rule {
+                    site,
+                    target: Target::Direct,
+                };
+                self.edit_rules(move |rules| rules.set(rule)).await
+            }
+            TargetInput::Node { node_id, transport } => {
+                self.set_node_rule(site, node_id, Some(transport)).await
+            }
+        }
+    }
+
+    async fn set_node_rule(
+        &self,
+        site: Site,
+        node_id: NodeId,
+        transport: Option<Carrier>,
+    ) -> Result<Arc<RuleSet>, ApiError> {
+        let endpoint = self.resolve_endpoint(&node_id, transport).await?;
         let rule = Rule {
             site,
-            target: self.target(target).await?,
+            target: Target::Node { node_id, endpoint },
         };
         self.edit_rules(move |rules| rules.set(rule)).await
     }
@@ -436,22 +459,25 @@ impl<H: Host> Shared<H> {
         self.edit_rules(move |rules| rules.remove(&site)).await
     }
 
-    /// Pin a node rule to the endpoint the catalogue lists now.
-    async fn target(&self, input: TargetInput) -> Result<Target, ApiError> {
-        let (node_id, transport) = match input {
-            TargetInput::Direct => return Ok(Target::Direct),
-            TargetInput::Node { node_id, transport } => (node_id, transport),
-        };
+    /// Resolve a node's endpoint from one catalogue snapshot, defaulting to TCP
+    /// when offered and otherwise the node's first listed carrier.
+    async fn resolve_endpoint(
+        &self,
+        node_id: &NodeId,
+        transport: Option<Carrier>,
+    ) -> Result<UpstreamAddress, ApiError> {
         let nodes = self.host.nodes().await?;
         let node = nodes
             .iter()
-            .find(|node| node.id == node_id)
+            .find(|node| node.id == *node_id)
             .ok_or(ApiError::UnknownNode)?;
-        let endpoint = node
-            .endpoint(transport)
-            .ok_or(ApiError::UnsupportedTransport)?
-            .clone();
-        Ok(Target::Node { node_id, endpoint })
+        let endpoint = match transport {
+            Some(transport) => node.endpoint(transport),
+            None => node
+                .endpoint(Carrier::Tcp)
+                .or_else(|| node.endpoints.first()),
+        };
+        endpoint.cloned().ok_or(ApiError::UnsupportedTransport)
     }
 
     async fn edit_rules(
@@ -490,6 +516,33 @@ fn encode(value: &impl Serialize) -> Result<Bytes, ApiError> {
         tracing::error!(%error, "could not encode a local controller response");
         ApiError::Unavailable
     })
+}
+
+fn has_loopback_host(header: Option<&HeaderValue>) -> bool {
+    fn valid_port(port: &str) -> bool {
+        !port.is_empty()
+            && port.bytes().all(|b| b.is_ascii_digit())
+            && port.parse::<u16>().is_ok_and(|p| p != 0)
+    }
+    let Some(authority) = header.and_then(|value| value.to_str().ok()).map(str::trim) else {
+        return false;
+    };
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        match bracketed.split_once(']') {
+            Some((ip, "")) => ip,
+            Some((ip, rest)) if rest.strip_prefix(':').is_some_and(valid_port) => ip,
+            _ => return false,
+        }
+    } else {
+        match authority.split_once(':') {
+            Some((host, port)) if valid_port(port) => host,
+            Some(_) => return false,
+            None => authority,
+        }
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host.eq_ignore_ascii_case("localhost.")
+        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 fn response(status: StatusCode, body: Bytes) -> Response<Body> {
