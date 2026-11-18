@@ -19,31 +19,33 @@ Docker images.
 
 ## 2. Apps
 
-Dispatch `ui/flutter/.github/workflows/build.yaml` in `Proxy-UI/Proxy-UI-Flutter`
-with that native `lib_version`, a new UI `release_tag`, and
-`create_release=true`. The workflow checks the native hashes before staging the
-libraries. Wait for every desktop job and the release job, then inspect the
-attached macOS, Windows and Linux packages.
+Dispatch `ui/flutter/.github/workflows/build.yaml` from `main` in
+`Proxy-UI/Proxy-UI-Flutter` with the native `lib_version`, a new UI
+`release_tag`, and `create_release=true`. The workflow checks native input
+hashes before building the desktop and Android packages. The publication job
+verifies the package matrix and signs the shared Ed25519 update manifest.
 
-## 3. Mobile packages, built locally
+## 3. Android signing and updates
 
-Android APKs and iOS IPAs are built and signed on the maintainer's machine and
-attached to the CI-created release by hand. CI may compile them as a check, but
-its output is never distributed.
+Before packaging, increase the Android build number in the Flutter
+`pubspec.yaml`. To build APKs for an existing release, dispatch
+`android-hotfix.yaml` on `main` with the existing `release_tag` and the chosen
+native `lib_version`. It checks the existing manifest signature and package
+hashes, adds the verified APKs and updates the signed manifest and `SHA256SUMS`.
+The manifest records the Android build and its Flutter and native commits.
 
-The reason is the signing key. Release builds are signed with the debug
-configuration, and each CI runner generates a fresh debug keystore, so every CI
-build carries a different certificate. Measured on three published releases:
+The `android-package.yaml` workflow builds unsigned split APKs for
+`arm64-v8a`, `armeabi-v7a` and `x86_64`. A separate runner signs them with the
+existing `androiddebugkey` from the `ANDROID_RELEASE_KEYSTORE` environment
+secret in `Proxy-UI/Proxy-UI-Flutter`. The `android-release` environment is
+restricted to the `main` branch. The maintainer provisions the original
+keystore as base64; enrollment preserves the local copy for recovery.
 
-| Release | Certificate (SHA-256, truncated) |
-| --- | --- |
-| v1.2.7 | `08fb5536…3354` |
-| v1.2.8 | `6852dc3d…51b5` |
-| v1.2.9 | `d99b01d4…f987` |
-| local `~/.android/debug.keystore` | `5ac9aa7c…305c` |
+Verify that all three APKs carry the published certificate with SHA-256
+`5ac9aa7c2a99b410864e7e88b4ec9a28771ddadf69c620a9b18b8dd66ac8305c`
+and application ID `com.proxyui.proxy_ui`. Flutter adds ABI offsets to the
+build number. Each APK must have a greater effective code than the installed
+APK for that ABI to upgrade in place. The workflow checks the certificate,
+package, native library, ABI, version name and effective version code.
 
-Android refuses an update whose certificate differs, so those releases could
-not upgrade one another: users had to uninstall and lose their data. Local
-builds carry the stable key in the last row and upgrade cleanly. Storing that
-key as a CI secret would also work, but it puts a signing key on GitHub; that
-is the maintainer's decision, never an agent's.
+iOS packages are built and signed locally.
