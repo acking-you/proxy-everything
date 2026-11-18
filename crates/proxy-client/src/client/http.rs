@@ -286,6 +286,22 @@ impl HttpProxierProvider {
                 return Ok((server_stream, false, None));
             }
 
+            if let Some(mut connection) =
+                context.site_rule_connection(&self.host, self.port).await?
+            {
+                if connection.msg_key.is_none() {
+                    AsyncReaderWriterRef::new(&mut connection.stream)
+                        .write_all(context.buffer)
+                        .await
+                        .with_context(|_| IoSnafu {
+                            uri: Some(self.get_uri()),
+                            detail: "write HTTP request routed by a website rule",
+                        })
+                        .context(HttpProxySnafu)?;
+                }
+                return Ok((connection.stream, connection.need_proxy, connection.msg_key));
+            }
+
             if let Some(upstream_proxy) = context.upstream_proxy {
                 tracing::info!(
                     host = %self.host,

@@ -5,6 +5,7 @@ use std::ffi::{CStr, CString, c_char};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use proxy_core::util::error_report;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -68,6 +69,14 @@ enum Request {
         directory: std::path::PathBuf,
     },
     FlushLogs,
+    /// Runs on the async runtime and holds no blocking worker while it waits.
+    LocalController(crate::local_controller::Request),
+    CloseListenerSessions,
+    SiteRules {
+        directory: std::path::PathBuf,
+        #[serde(flatten)]
+        change: crate::site_rules::Change,
+    },
     StartSubscription {
         port: u16,
         config: proxy_ui_services::subscription::Config,
@@ -127,6 +136,8 @@ impl Request {
                 | Self::HttpLatency { .. }
                 | Self::ConfigureLogs { .. }
                 | Self::FlushLogs
+                | Self::SiteRules { .. }
+                | Self::LocalController(_)
                 | Self::StartSubscription { .. }
                 | Self::StopSubscription { .. }
                 | Self::Processes
@@ -184,6 +195,27 @@ pub unsafe extern "C" fn proxy_operation_start_v1(
         let Some(runtime) = crate::runtime::control() else {
             return 0;
         };
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        // Controller calls park on the async runtime, not in the worker pool,
+        // so a waiting `next` can never starve other operations or a stop.
+        let request = match request {
+            Request::LocalController(request) => {
+                use futures::FutureExt;
+                let id = NEXT.fetch_add(1, Ordering::Relaxed);
+                runtime.spawn(async move {
+                    let result = std::panic::AssertUnwindSafe(request.execute())
+                        .catch_unwind()
+                        .await;
+                    respond(
+                        callback,
+                        id,
+                        result.map(|result| result.map_err(|error| error_report(&error))),
+                    );
+                });
+                return id;
+            }
+            request => request,
+        };
         let Ok(mut state) = active().lock() else {
             return 0;
         };
@@ -192,25 +224,28 @@ pub unsafe extern "C" fn proxy_operation_start_v1(
         }
         state.jobs += 1;
         drop(state);
-        static NEXT: AtomicU64 = AtomicU64::new(1);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
         runtime.spawn_blocking(move || {
             let result = std::panic::catch_unwind(|| execute(address as *mut ProxyHandle, request));
-            let response = match result {
-                Ok(Ok(data)) => json!({"type": "complete", "data": data}),
-                Ok(Err(error)) => json!({"type": "failed", "message": error}),
-                Err(_) => json!({"type": "failed", "message": "Native control operation failed"}),
-            };
             let mut state = active().lock().unwrap_or_else(|error| error.into_inner());
             state.jobs -= 1;
             state.handles.remove(&address);
             drop(state);
-            let message = CString::new(response.to_string()).expect("JSON contains no NUL");
-            callback(id, message.into_raw());
+            respond(callback, id, result);
         });
         id
     })
     .unwrap_or(0)
+}
+
+fn respond(callback: Callback, id: u64, result: std::thread::Result<Result<Value, String>>) {
+    let response = match result {
+        Ok(Ok(data)) => json!({"type": "complete", "data": data}),
+        Ok(Err(error)) => json!({"type": "failed", "message": error}),
+        Err(_) => json!({"type": "failed", "message": "Native control operation failed"}),
+    };
+    let message = CString::new(response.to_string()).expect("serde_json escapes NUL in strings");
+    callback(id, message.into_raw());
 }
 
 fn string(value: String) -> Result<CString, String> {
@@ -421,6 +456,23 @@ fn execute(handle: *mut ProxyHandle, request: Request) -> Result<Value, String> 
             Request::FlushLogs => {
                 crate::disk_log::flush_result().map_err(|error| error.to_string())?;
                 return Ok(json!({}));
+            }
+            Request::SiteRules { directory, change } => {
+                // `{"Ok": {"rules": [...]}}` or `{"Err": kind}`, so the page
+                // can tell an invalid site from a storage failure.
+                let rules = crate::site_rules::apply(&directory, change);
+                return serde_json::to_value(rules.as_deref()).map_err(|error| error.to_string());
+            }
+            Request::CloseListenerSessions => {
+                if (*handle).running.load(Ordering::Acquire) {
+                    (*handle).drain.drain();
+                    crate::ProxyResult::Ok
+                } else {
+                    crate::ProxyResult::NotRunning
+                }
+            }
+            Request::LocalController(_) => {
+                unreachable!("start dispatches controller requests to the async runtime")
             }
             Request::StartSubscription { port, config } => {
                 let mut servers = subscriptions()

@@ -45,6 +45,7 @@ pub use windows_icon::executable_icon_png;
 
 use self::http::HttpProxierProvider;
 use self::socks::SocksProxierProvider;
+use crate::site_rules::{SiteRules, Target};
 
 mod error;
 pub use error::ClientError;
@@ -85,18 +86,34 @@ pub struct ClientRuntimeConfig {
     pub process_bypass: Option<ProcessBypassConfig>,
     /// Only for OS-hosted sockets that are exempt from the tunnel in the kernel.
     pub packet_routing: Option<Arc<packet_routing::PacketRouter>>,
+    /// Per-website routes, consulted when a stream opens.
+    pub site_rules: Option<Arc<SiteRules>>,
+    /// Lets the owner close the sessions this listener has accepted so far.
+    pub drain: Option<ListenerDrain>,
 }
 
 impl From<ClientConfig> for ClientRuntimeConfig {
     fn from(client: ClientConfig) -> Self {
         Self {
             client,
-            upstream_proxy: None,
-            tun: None,
-            force_proxy: None,
-            process_bypass: None,
-            packet_routing: None,
+            ..Default::default()
         }
+    }
+}
+
+/// Closes every local connection accepted before the latest [`Self::drain`],
+/// UDP associations included, while the listener keeps accepting.
+#[derive(Clone, Debug, Default)]
+pub struct ListenerDrain(Arc<std::sync::Mutex<CancellationToken>>);
+
+impl ListenerDrain {
+    pub fn drain(&self) {
+        let mut current = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        std::mem::take(&mut *current).cancel();
+    }
+
+    fn generation(&self) -> CancellationToken {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 }
 
@@ -120,6 +137,10 @@ pub struct ProxyContext<'a> {
     force_proxy: bool,
     /// Optional external upstream proxy used instead of the encrypted proxy server.
     upstream_proxy: Option<&'a ExternalProxyTarget>,
+    site_rules: Option<&'a SiteRules>,
+    /// False only while a dynamic TUN override forces every outbound socket
+    /// through the proxy because no process-bypass relay excludes this process.
+    allow_direct: bool,
     /// Honour [`proxy_core::config::FORCED_DIRECT_HOSTS`]. Disabled only while a
     /// TUN session owns the routes, where a direct socket from this process
     /// would be captured back into the local listener.
@@ -146,6 +167,44 @@ pub trait ForwarderProvider {
 }
 
 impl ProxyContext<'_> {
+    /// Open the stream a website rule asks for, or None to use the default route.
+    async fn site_rule_connection(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<Option<ServerConnection>> {
+        // Captured DNS and compiled-in direct hosts keep their own guarantees.
+        if port == 53
+            || (self.honor_forced_direct && proxy_core::config::is_forced_direct_host(host))
+        {
+            return Ok(None);
+        }
+        let Some(target) = self.site_rules.and_then(|rules| rules.resolve(host, port)) else {
+            return Ok(None);
+        };
+        if matches!(target, Target::Direct) && !self.allow_direct {
+            tracing::debug!(
+                host,
+                port,
+                "skipping direct website rule while TUN forces proxy"
+            );
+            return Ok(None);
+        }
+        tracing::debug!(host, port, ?target, "website rule matched");
+        match target {
+            Target::Direct => Ok(Some(ServerConnection {
+                stream: get_tcp_stream(host, port, "website rule: direct").await?,
+                need_proxy: false,
+                msg_key: None,
+            })),
+            Target::Node { endpoint, .. } => {
+                connect_native(host, port, &endpoint.qualified_host(), endpoint.port)
+                    .await
+                    .map(Some)
+            }
+        }
+    }
+
     async fn connect(&self, host: &str, port: u16) -> Result<ServerConnection> {
         #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
         if let Some(iface) = self.direct_interface {
@@ -160,6 +219,9 @@ impl ProxyContext<'_> {
                 need_proxy: false,
                 msg_key: None,
             });
+        }
+        if let Some(connection) = self.site_rule_connection(host, port).await? {
+            return Ok(connection);
         }
         resolve_server_connection(
             host,
@@ -179,6 +241,8 @@ pub struct ClientProxyContext {
     sender: Option<RouteSelector>,
     force_proxy: bool,
     upstream_proxy: Option<ExternalProxyTarget>,
+    site_rules: Option<Arc<SiteRules>>,
+    allow_direct: bool,
     honor_forced_direct: bool,
     enable_udp: bool,
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
@@ -271,6 +335,8 @@ pub async fn handle_client(mut context: ClientProxyContext) -> Result<()> {
         sender: context.sender.as_ref(),
         force_proxy: context.force_proxy,
         upstream_proxy: context.upstream_proxy.as_ref(),
+        site_rules: context.site_rules.as_deref(),
+        allow_direct: context.allow_direct,
         honor_forced_direct: context.honor_forced_direct,
         enable_udp: context.enable_udp,
         #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
@@ -384,6 +450,8 @@ pub async fn run_client_with_listener_runtime_config(
             })
         });
     let force_proxy_controller = config.as_ref().and_then(|c| c.force_proxy.clone());
+    let site_rules = config.as_ref().and_then(|c| c.site_rules.clone());
+    let drain = config.as_ref().and_then(|c| c.drain.clone());
     let enable_udp = config
         .as_ref()
         .map(|c| c.client.enable_udp)
@@ -400,6 +468,7 @@ pub async fn run_client_with_listener_runtime_config(
         enable_udp,
         force_proxy,
         dynamic_force_proxy = force_proxy_controller.is_some(),
+        website_rules = site_rules.as_ref().map(|rules| rules.snapshot().rules().len()),
         tun_enabled = tun_config.is_some(),
         upstream_proxy = ?upstream_proxy_display,
         "client listener configured"
@@ -470,33 +539,30 @@ pub async fn run_client_with_listener_runtime_config(
                     }
                 };
                 let token = cancel_token.clone();
-                #[cfg(feature = "auto-proxy")]
-                let sender = if force_proxy_controller
+                let generation = drain.as_ref().map(ListenerDrain::generation);
+                let force_proxy_override = force_proxy_controller
                     .as_ref()
-                    .is_some_and(|controller| controller.load(Ordering::Acquire))
-                {
+                    .is_some_and(|controller| controller.load(Ordering::Acquire));
+                #[cfg(feature = "auto-proxy")]
+                let sender = if force_proxy_override {
                     None
                 } else {
                     sender.clone()
                 };
-                let tun_owns_routes = tun_active
-                    || force_proxy_controller
-                        .as_ref()
-                        .is_some_and(|controller| controller.load(Ordering::Acquire));
+                let tun_owns_routes = tun_active || force_proxy_override;
                 // `force_proxy` now comes from the auto-proxy setting and the
                 // dynamic controller alone. TUN owning the routes no longer
                 // implies it: process bypass keeps this listener's own direct
                 // sockets out of the tunnel.
-                let force_proxy = force_proxy
-                    || force_proxy_controller
-                        .as_ref()
-                        .is_some_and(|controller| controller.load(Ordering::Acquire));
+                let force_proxy = force_proxy || force_proxy_override;
                 let task = client_proxy_background_task(ClientProxyContext {
                     stream,
                     #[cfg(feature = "auto-proxy")]
                     sender,
                     force_proxy,
                     upstream_proxy: upstream_proxy.clone(),
+                    site_rules: site_rules.clone(),
+                    allow_direct: !force_proxy_override,
                     // Left as-is under TUN. This path calls the same
                     // `get_tcp_stream` as auto-proxy's direct decision, so the
                     // bypass relay would repair its destination too and enabling
@@ -509,8 +575,15 @@ pub async fn run_client_with_listener_runtime_config(
                     process_matcher: process_matcher.clone(),
                 });
                 let wrapped_task = async move {
+                    let drained = async {
+                        match generation {
+                            Some(generation) => generation.cancelled_owned().await,
+                            None => std::future::pending().await,
+                        }
+                    };
                     tokio::select! {
                         _ = token.cancelled() => {}
+                        _ = drained => {}
                         _ = task => {}
                     }
                 };
@@ -552,6 +625,15 @@ pub async fn start_client_with_runtime_config(
             uri: None,
             detail: "Client listener error",
         })?;
+    serve_client_until_shutdown(listener, config).await
+}
+
+/// Serve a bound listener until a shutdown signal or a failed TUN session,
+/// then wait for its connections.
+pub async fn serve_client_until_shutdown(
+    listener: TcpListener,
+    config: Option<ClientRuntimeConfig>,
+) -> Result<()> {
     let mut manager = GracefulShutdownManagerImpl::new();
     if !manager.spawn_graceful_signals() {
         RegisterSignalSnafu {}.fail()?
@@ -561,6 +643,8 @@ pub async fn start_client_with_runtime_config(
 
     run_client_with_listener_runtime_config(listener, cancel_token, Some(tracker), config).await;
 
+    // TUN setup can cancel the listener independently of the signal handler.
+    manager.tracker().close();
     tracing::info!("graceful shutdown, waiting for tasks to complete...");
     manager.wait().await;
     proxy_core::quic::shutdown_clients().await;

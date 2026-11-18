@@ -1,5 +1,9 @@
 # HTTP Proxy CLI Configuration
 
+# Optional script access on 127.0.0.1. Set CIPHERRELAY_CONTROLLER_TOKEN before enabling.
+# controller_port = 9090
+# controller_nodes = { west = ["tcp://west.example:1081", "quic://west.example:10811"] }
+
 # [Required] Proxy server address
 server_host = "your-server.com"
 

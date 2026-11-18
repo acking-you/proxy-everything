@@ -6,6 +6,12 @@ abstractions the owning crate already has. When goals conflict, rank them:
 wire protocol, security, data integrity, graceful shutdown, observability,
 then implementation simplicity.
 
+Every Rust implementation and review must follow the checked-in
+[Rust engineering guide](docs/2026-11-09-RUST.md). It applies to code touched
+by the task. The pinned toolchain, wire compatibility, FFI ownership and
+allocator rules below govern repository-specific choices. The guide is pinned
+to the [upstream revision](https://github.com/acking-you/agent-kit/blob/03de8037ea4d32a5233feada3fd319eccfe0860e/prompts/language-guides/rust/2026-11-09-RUST.md).
+
 ## Layout
 
 | Path | Contents |
@@ -105,6 +111,9 @@ cargo fmt --manifest-path deps/tun2proxy/Cargo.toml -- --check
 - Comments explain protocol requirements, invariants, unsafe code and
   non-obvious platform behaviour, not straightforward assignments.
 - Keep public API documentation accurate when behaviour or wire format changes.
+- Use the owning crate's error derive (usually `snafu`). Preserve typed causes
+  until a process boundary. For an HTTP API, give callers a stable error kind
+  and put the diagnostic chain in local logs.
 - `proxy-core::allocator` alone selects mimalloc and its RSS tuning. Never
   declare another `#[global_allocator]` or tune the allocator in leaf crates;
   embedded components such as `tun2proxy` inherit it.
@@ -234,9 +243,6 @@ fvm flutter build apk --release --target-platform android-arm64 --split-per-abi
 
 - Run the relevant Rust checks plus FVM analyze and tests before packaging. A
   successful compile alone is not release verification.
-- Commit inside affected submodules first, then their gitlinks and root
-  changes. Use Conventional Commits, report each hash, and confirm the root and
-  submodule worktrees are clean.
 - Never commit APKs, ZIPs, `ui/flutter/build/` or `ui/flutter/native/`.
 - Never tag, push, create a remote release or upload artifacts unless the user
   explicitly asks for that action.
@@ -246,8 +252,9 @@ fvm flutter build apk --release --target-platform android-arm64 --split-per-abi
 - The worktree may already contain user changes. Never reset or overwrite them.
 - `ui/flutter` and `deps/*` are submodules. Report changes inside a submodule
   separately from the parent gitlink.
-- Update submodule commits only when the task requires it. Before merging a
-  root PR, re-pin each submodule to the commit merged on its default branch.
+- Commit changes in each affected submodule first, then commit its gitlink in
+  the parent. Link companion PRs. Before merging the parent PR, pin the commit
+  merged on the submodule's default branch. Report hashes and final worktree status.
 - Use Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`,
   `build:`, `ci:`). A PR states what changed and why, the exact verification
   commands, protocol and ABI impact, and documentation changes.

@@ -78,6 +78,15 @@ Compatibility and recovery behaviour: [network resilience](docs/network-resilien
 
 ## Management
 
+The desktop subscription page and `http-proxy-cli --controller-port` can enable a
+loopback API for scripts and agents to list nodes, inspect the running listener
+and switch its upstream. It is served as REST and as an MCP server with three
+tools. See [local controller](docs/local-controller.md) for setup, JSON
+responses and curl, and [MCP](docs/mcp.md) to add it to Claude Code, Codex or
+another MCP client. The **Website rules** page and controller API also support
+persistent per-domain and per-port routing through a selected TCP/QUIC node or
+a direct connection.
+
 | Tool | Purpose |
 | --- | --- |
 | `proxy-tui` | Terminal monitor and runtime configuration of nodes, groups, relay and metrics |

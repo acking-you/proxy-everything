@@ -1,6 +1,6 @@
 ---
 name: azure-student-proxy-server
-description: Use when provisioning Azure for Students VMs with Azure CLI for this proxy-everything project, deploying proxy-server with the README one-click systemd installer, opening ICMP/TCP 1081, and registering nodes or groups in lb7666.top.
+description: Provision an Azure for Students VM as a CipherRelay node, deploy the systemd proxy service, verify connectivity, and register the node in the project catalogue. Use for new student-account deployments or completing an existing deployment.
 ---
 
 # Azure Student Proxy Server

@@ -1,0 +1,555 @@
+//! Authenticated loopback HTTP API shared by the CLI and the desktop app,
+//! as REST under `/v1` and as MCP tools at `/mcp`.
+//!
+//! The controller owns HTTP, authentication, error kinds and website rules.
+//! What depends on the live proxy — its node catalogue, listener state and
+//! upstream switching — belongs to a [`Host`] that the embedding process
+//! implements.
+mod mcp;
+
+use std::convert::Infallible;
+use std::future::Future;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
+use std::{fmt, io};
+
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full, Limited};
+use hyper::body::{Bytes, Incoming};
+use hyper::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HOST, HeaderValue, ORIGIN};
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::{Method, Request, Response, StatusCode};
+use hyper_util::rt::{TokioIo, TokioTimer};
+use proxy_core::upstream::{Carrier, UpstreamAddress};
+use proxy_core::util::error_report;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use snafu::{ResultExt, Snafu};
+use subtle::ConstantTimeEq;
+use tokio::net::TcpListener;
+use tokio::task::JoinSet;
+use tokio_util::sync::{CancellationToken, DropGuard};
+
+use crate::site_rules::{NodeId, Rule, RuleSet, RulesError, Site, SiteRules, Target};
+
+const OPENAPI: &[u8] = include_bytes!("openapi.json");
+const MAX_CONNECTIONS: usize = 32;
+const MAX_BODY_BYTES: usize = 4096;
+const HEADER_TIMEOUT: Duration = Duration::from_secs(5);
+const BODY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bounds slow clients and a host that never answers. A switch the host has
+/// already started still finishes there.
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Snafu)]
+#[snafu(display("A controller token is 32 to 256 printable ASCII characters without spaces"))]
+pub struct InvalidToken;
+
+/// The bearer secret, separate from every proxy and control-plane credential.
+#[derive(Clone)]
+pub struct Token(Arc<str>);
+
+impl TryFrom<String> for Token {
+    type Error = InvalidToken;
+
+    fn try_from(token: String) -> Result<Self, InvalidToken> {
+        if !(32..=256).contains(&token.len()) || !token.bytes().all(|b| b.is_ascii_graphic()) {
+            return Err(InvalidToken);
+        }
+        Ok(Self(token.into()))
+    }
+}
+
+impl fmt::Debug for Token {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Token(..)")
+    }
+}
+
+impl Token {
+    fn authorizes(&self, header: Option<&HeaderValue>) -> bool {
+        let supplied = header
+            .and_then(|value| value.as_bytes().strip_prefix(b"Bearer "))
+            .unwrap_or_default();
+        supplied.ct_eq(self.0.as_bytes()).into()
+    }
+}
+
+/// A selectable node and the endpoints it can be reached on, at most one per
+/// carrier.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Node {
+    pub id: NodeId,
+    pub endpoints: Vec<UpstreamAddress>,
+}
+
+impl Node {
+    pub fn endpoint(&self, carrier: Carrier) -> Option<&UpstreamAddress> {
+        self.endpoints.iter().find(|e| e.carrier == carrier)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Nodes {
+    pub nodes: Vec<Node>,
+}
+
+/// The local listener and the upstream new connections use.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Status {
+    pub running: bool,
+    pub local_port: Option<u16>,
+    pub active: Option<Active>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Active {
+    /// Null when the endpoint is outside the catalogue.
+    pub node_id: Option<NodeId>,
+    pub endpoint: UpstreamAddress,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Selection {
+    pub node_id: NodeId,
+    pub transport: Carrier,
+    /// Close the listener's open sessions once the switch has succeeded.
+    #[serde(default)]
+    pub close_existing: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuleInput {
+    site: Site,
+    target: TargetInput,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+enum TargetInput {
+    Direct,
+    Node { node_id: NodeId, transport: Carrier },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuleRemoval {
+    site: Site,
+}
+
+/// Stable error kinds. Callers branch on the kind; the message says what to
+/// do. Causes stay in the local log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Snafu)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiError {
+    #[snafu(display("Supply the local controller bearer token."))]
+    Unauthorized,
+    #[snafu(display("Unknown API path."))]
+    NotFound,
+    #[snafu(display("Use the method documented for this resource."))]
+    MethodNotAllowed,
+    #[snafu(display("Send a node_id, a transport and optionally close_existing."))]
+    InvalidRequest,
+    #[snafu(display(
+        "Use a domain, *.domain, IP address or http(s) URL with an optional port, and a direct or \
+         node target."
+    ))]
+    InvalidRule,
+    #[snafu(display(
+        "Cannot save these website rules. Check the rule limit and local file permissions."
+    ))]
+    RuleStorage,
+    #[snafu(display("Use a node ID from the node list."))]
+    UnknownNode,
+    #[snafu(display("Select a transport listed for this node."))]
+    UnsupportedTransport,
+    #[snafu(display("Start the local proxy listener first."))]
+    NotRunning,
+    #[snafu(display("Another operation is in progress. Query status before retrying."))]
+    Busy,
+    #[snafu(display("Switch failed. Check proxy status, TUN routes and the local log."))]
+    SwitchFailed,
+    #[snafu(display("The local controller is stopping or unavailable."))]
+    Unavailable,
+}
+
+impl ApiError {
+    pub fn status(self) -> StatusCode {
+        match self {
+            Self::Unauthorized => StatusCode::UNAUTHORIZED,
+            Self::NotFound | Self::UnknownNode => StatusCode::NOT_FOUND,
+            Self::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
+            Self::InvalidRequest | Self::InvalidRule => StatusCode::BAD_REQUEST,
+            Self::RuleStorage | Self::NotRunning | Self::Busy | Self::SwitchFailed => {
+                StatusCode::CONFLICT
+            }
+            Self::UnsupportedTransport => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+}
+
+impl From<RulesError> for ApiError {
+    fn from(error: RulesError) -> Self {
+        match error {
+            RulesError::Read { .. }
+            | RulesError::TooLarge { .. }
+            | RulesError::Decode { .. }
+            | RulesError::Write { .. }
+            | RulesError::Invalid { .. } => Self::RuleStorage,
+        }
+    }
+}
+
+/// What the controller needs from the process that owns the live proxy.
+///
+/// Calls can arrive concurrently. A host that cannot run two switches at once
+/// answers the second with [`ApiError::Busy`].
+pub trait Host: Send + Sync + 'static {
+    fn nodes(&self) -> impl Future<Output = Result<Vec<Node>, ApiError>> + Send;
+
+    fn status(&self) -> impl Future<Output = Result<Status, ApiError>> + Send;
+
+    /// Select the upstream for new connections and return the committed status.
+    fn switch(&self, selection: Selection)
+    -> impl Future<Output = Result<Status, ApiError>> + Send;
+
+    /// The controller replaced the website rules, for hosts that display them.
+    fn rules_changed(&self, rules: Arc<RuleSet>) -> impl Future<Output = ()> + Send {
+        let _ = rules;
+        async {}
+    }
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(display("Could not bind the local controller to 127.0.0.1:{port}"))]
+pub struct BindError {
+    port: u16,
+    source: io::Error,
+}
+
+/// A bound controller. [`Controller::serve`] answers requests until dropped.
+pub struct Controller<H: Host> {
+    listener: TcpListener,
+    shared: Arc<Shared<H>>,
+    mcp: mcp::Service<H>,
+    /// Ends MCP work still in flight when the controller is dropped.
+    _stop: DropGuard,
+}
+
+struct Shared<H> {
+    token: Token,
+    host: H,
+    rules: Arc<SiteRules>,
+}
+
+type Body = BoxBody<Bytes, Infallible>;
+
+impl<H: Host> Controller<H> {
+    /// Port zero picks a free port.
+    pub async fn bind(
+        port: u16,
+        token: Token,
+        host: H,
+        rules: Arc<SiteRules>,
+    ) -> Result<Self, BindError> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+            .await
+            .context(BindSnafu { port })?;
+        let shared = Arc::new(Shared { token, host, rules });
+        let stop = CancellationToken::new();
+        Ok(Self {
+            listener,
+            mcp: mcp::service(shared.clone(), stop.clone()),
+            shared,
+            _stop: stop.drop_guard(),
+        })
+    }
+
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.listener.local_addr()
+    }
+
+    /// Never returns. Dropping the future closes the listener and every open
+    /// connection.
+    pub async fn serve(self) {
+        let mut connections = JoinSet::new();
+        loop {
+            tokio::select! {
+                Some(_) = connections.join_next(), if !connections.is_empty() => {}
+                accepted = self.listener.accept(), if connections.len() < MAX_CONNECTIONS => {
+                    let socket = match accepted {
+                        Ok((socket, _)) => socket,
+                        Err(error) => {
+                            tracing::warn!(%error, "local controller accept failed; retrying");
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            continue;
+                        }
+                    };
+                    connections.spawn(serve_connection(
+                        socket,
+                        self.shared.clone(),
+                        self.mcp.clone(),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+async fn serve_connection<H: Host>(
+    socket: tokio::net::TcpStream,
+    shared: Arc<Shared<H>>,
+    mcp: mcp::Service<H>,
+) {
+    let service = service_fn(move |request| {
+        let (shared, mcp) = (shared.clone(), mcp.clone());
+        async move { Ok::<_, Infallible>(respond(&shared, &mcp, request).await) }
+    });
+    let connection = http1::Builder::new()
+        .timer(TokioTimer::new())
+        .header_read_timeout(HEADER_TIMEOUT)
+        .max_buf_size(8192)
+        .keep_alive(false)
+        .serve_connection(TokioIo::new(socket), service);
+    match tokio::time::timeout(CONNECTION_TIMEOUT, connection).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::debug!(%error, "local controller connection failed"),
+        Err(_) => tracing::debug!("local controller connection timed out"),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Route {
+    OpenApi,
+    Nodes,
+    Status,
+    Switch,
+    Rules,
+    SetRule,
+    RemoveRule,
+}
+
+impl Route {
+    fn find(method: &Method, path: &str) -> Result<Self, ApiError> {
+        let allowed: &[(Method, Self)] = match path {
+            "/v1/openapi.json" => &[(Method::GET, Self::OpenApi)],
+            "/v1/nodes" => &[(Method::GET, Self::Nodes)],
+            "/v1/status" => &[(Method::GET, Self::Status)],
+            "/v1/switch" => &[(Method::POST, Self::Switch)],
+            "/v1/rules" => &[
+                (Method::GET, Self::Rules),
+                (Method::PUT, Self::SetRule),
+                (Method::DELETE, Self::RemoveRule),
+            ],
+            _ => return Err(ApiError::NotFound),
+        };
+        allowed
+            .iter()
+            .find(|(allowed, _)| allowed == method)
+            .map(|&(_, route)| route)
+            .ok_or(ApiError::MethodNotAllowed)
+    }
+}
+
+async fn respond<H: Host>(
+    shared: &Shared<H>,
+    mcp: &mcp::Service<H>,
+    request: Request<Incoming>,
+) -> Response<Body> {
+    // A browser page names its origin, and DNS rebinding sends a non-loopback
+    // Host. Only local programs addressing loopback may call.
+    let result = if !shared
+        .token
+        .authorizes(request.headers().get(AUTHORIZATION))
+        || request.headers().contains_key(ORIGIN)
+        || !has_loopback_host(request.headers().get(HOST))
+    {
+        Err(ApiError::Unauthorized)
+    } else if request.uri().path() == mcp::PATH {
+        return mcp.handle(request).await;
+    } else {
+        shared.rest(request).await
+    };
+    match result {
+        Ok(body) => response(StatusCode::OK, body),
+        Err(error) => {
+            #[derive(Serialize)]
+            struct Failure {
+                error: Detail,
+            }
+            #[derive(Serialize)]
+            struct Detail {
+                kind: ApiError,
+                message: String,
+            }
+            let body = Failure {
+                error: Detail {
+                    kind: error,
+                    message: error.to_string(),
+                },
+            };
+            response(error.status(), encode(&body).unwrap_or_default())
+        }
+    }
+}
+
+impl<H: Host> Shared<H> {
+    async fn rest(&self, request: Request<Incoming>) -> Result<Bytes, ApiError> {
+        match Route::find(request.method(), request.uri().path())? {
+            Route::OpenApi => Ok(Bytes::from_static(OPENAPI)),
+            Route::Nodes => encode(&Nodes {
+                nodes: self.host.nodes().await?,
+            }),
+            Route::Status => encode(&self.host.status().await?),
+            Route::Switch => {
+                let selection = read_json(request, ApiError::InvalidRequest).await?;
+                encode(&self.host.switch(selection).await?)
+            }
+            Route::Rules => encode(&*self.rules.snapshot()),
+            Route::SetRule => {
+                let RuleInput { site, target } = read_json(request, ApiError::InvalidRule).await?;
+                encode(&*self.set_rule(site, target).await?)
+            }
+            Route::RemoveRule => {
+                let RuleRemoval { site } = read_json(request, ApiError::InvalidRule).await?;
+                encode(&*self.remove_rule(site).await?)
+            }
+        }
+    }
+
+    async fn set_rule(&self, site: Site, target: TargetInput) -> Result<Arc<RuleSet>, ApiError> {
+        match target {
+            TargetInput::Direct => {
+                let rule = Rule {
+                    site,
+                    target: Target::Direct,
+                };
+                self.edit_rules(move |rules| rules.set(rule)).await
+            }
+            TargetInput::Node { node_id, transport } => {
+                self.set_node_rule(site, node_id, Some(transport)).await
+            }
+        }
+    }
+
+    async fn set_node_rule(
+        &self,
+        site: Site,
+        node_id: NodeId,
+        transport: Option<Carrier>,
+    ) -> Result<Arc<RuleSet>, ApiError> {
+        let endpoint = self.resolve_endpoint(&node_id, transport).await?;
+        let rule = Rule {
+            site,
+            target: Target::Node { node_id, endpoint },
+        };
+        self.edit_rules(move |rules| rules.set(rule)).await
+    }
+
+    async fn remove_rule(&self, site: Site) -> Result<Arc<RuleSet>, ApiError> {
+        self.edit_rules(move |rules| rules.remove(&site)).await
+    }
+
+    /// Resolve a node's endpoint from one catalogue snapshot, defaulting to TCP
+    /// when offered and otherwise the node's first listed carrier.
+    async fn resolve_endpoint(
+        &self,
+        node_id: &NodeId,
+        transport: Option<Carrier>,
+    ) -> Result<UpstreamAddress, ApiError> {
+        let nodes = self.host.nodes().await?;
+        let node = nodes
+            .iter()
+            .find(|node| node.id == *node_id)
+            .ok_or(ApiError::UnknownNode)?;
+        let endpoint = match transport {
+            Some(transport) => node.endpoint(transport),
+            None => node
+                .endpoint(Carrier::Tcp)
+                .or_else(|| node.endpoints.first()),
+        };
+        endpoint.cloned().ok_or(ApiError::UnsupportedTransport)
+    }
+
+    async fn edit_rules(
+        &self,
+        edit: impl FnOnce(&SiteRules) -> Result<Arc<RuleSet>, RulesError> + Send + 'static,
+    ) -> Result<Arc<RuleSet>, ApiError> {
+        let rules = self.rules.clone();
+        let edited = tokio::task::spawn_blocking(move || edit(&rules))
+            .await
+            .map_err(|_| ApiError::Unavailable)?
+            .map_err(|error| {
+                tracing::warn!(error = %error_report(&error), "website rule update failed");
+                ApiError::from(error)
+            })?;
+        self.host.rules_changed(edited.clone()).await;
+        Ok(edited)
+    }
+}
+
+async fn read_json<T: DeserializeOwned>(
+    request: Request<Incoming>,
+    invalid: ApiError,
+) -> Result<T, ApiError> {
+    let body = tokio::time::timeout(
+        BODY_TIMEOUT,
+        Limited::new(request.into_body(), MAX_BODY_BYTES).collect(),
+    )
+    .await
+    .map_err(|_| invalid)?
+    .map_err(|_| invalid)?;
+    serde_json::from_slice(&body.to_bytes()).map_err(|_| invalid)
+}
+
+fn encode(value: &impl Serialize) -> Result<Bytes, ApiError> {
+    serde_json::to_vec(value).map(Bytes::from).map_err(|error| {
+        tracing::error!(%error, "could not encode a local controller response");
+        ApiError::Unavailable
+    })
+}
+
+fn has_loopback_host(header: Option<&HeaderValue>) -> bool {
+    fn valid_port(port: &str) -> bool {
+        !port.is_empty()
+            && port.bytes().all(|b| b.is_ascii_digit())
+            && port.parse::<u16>().is_ok_and(|p| p != 0)
+    }
+    let Some(authority) = header.and_then(|value| value.to_str().ok()).map(str::trim) else {
+        return false;
+    };
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        match bracketed.split_once(']') {
+            Some((ip, "")) => ip,
+            Some((ip, rest)) if rest.strip_prefix(':').is_some_and(valid_port) => ip,
+            _ => return false,
+        }
+    } else {
+        match authority.split_once(':') {
+            Some((host, port)) if valid_port(port) => host,
+            Some(_) => return false,
+            None => authority,
+        }
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host.eq_ignore_ascii_case("localhost.")
+        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+fn response(status: StatusCode, body: Bytes) -> Response<Body> {
+    let mut response = Response::new(Full::new(body).boxed());
+    *response.status_mut() = status;
+    let headers = response.headers_mut();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}

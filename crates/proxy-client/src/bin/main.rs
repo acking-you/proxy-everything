@@ -1,6 +1,9 @@
-use std::path::PathBuf;
+mod controller;
 
-use anyhow::{Context, Result, anyhow};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use comfy_table::{Cell, Color, Table, presets};
 use proxy_client::cli_config::{
@@ -8,13 +11,18 @@ use proxy_client::cli_config::{
     get_default_config_path,
 };
 use proxy_client::client::tun::{TunConfig, TunVirtualDnsState, running_process_names};
-use proxy_client::client::{ClientConfig, ClientRuntimeConfig, start_client_with_runtime_config};
+use proxy_client::client::{ClientConfig, ClientRuntimeConfig, serve_client_until_shutdown};
+use proxy_client::site_rules::SiteRules;
 use proxy_core::config::{CLIENT_PORT, SERVER_PORT, init_tracing};
 use proxy_core::relay::ExternalProxyTarget;
+use tokio::net::TcpListener;
 
 #[derive(Parser)]
 #[command(author = "L_B__", version, about, long_about = None)]
 struct Cli {
+    /// Enable the loopback control API on this port (0 picks a free port).
+    #[arg(long)]
+    controller_port: Option<u16>,
     /// Native upstream carrier. Each new session uses the selected carrier.
     #[arg(long, value_parser = ["tcp", "quic"])]
     transport: Option<String>,
@@ -103,6 +111,8 @@ impl Cli {
             server_port: self.server_port,
             client_port: self.client_port,
             listen_host: self.listen_host.clone(),
+            controller_port: self.controller_port,
+            controller_nodes: Default::default(),
             upstream_proxy: self.upstream_proxy.clone(),
             secret_key: self.secret_key.clone(),
             auto_proxy: self.auto_proxy,
@@ -137,7 +147,8 @@ impl Cli {
 
     /// Check if CLI has any meaningful args
     fn has_args(&self) -> bool {
-        self.transport.is_some()
+        self.controller_port.is_some()
+            || self.transport.is_some()
             || self.quic_ca.is_some()
             || self.server_host.is_some()
             || self.server_port.is_some()
@@ -534,6 +545,19 @@ async fn main() -> Result<()> {
     } else {
         None
     };
+    // Website rules live beside the profile. An external upstream carries
+    // every connection to a third party, so it has no native route to choose.
+    let site_rules = if upstream_mode {
+        None
+    } else {
+        let profile = match cli.config.clone().or_else(find_config) {
+            Some(profile) => profile,
+            None => get_default_config_path()?,
+        };
+        Some(Arc::new(SiteRules::open(
+            profile.with_added_extension("sites.json"),
+        )?))
+    };
     let client_config = ClientRuntimeConfig {
         client: ClientConfig {
             enable_auto_proxy: effective_auto_proxy,
@@ -545,6 +569,8 @@ async fn main() -> Result<()> {
         force_proxy: None,
         process_bypass: None,
         packet_routing: None,
+        site_rules: site_rules.clone(),
+        drain: None,
     };
     let env_listen_host = std::env::var("LISTEN_HOST").ok();
     let listen_host = cli
@@ -557,11 +583,29 @@ async fn main() -> Result<()> {
         } else {
             "0.0.0.0"
         });
-    start_client_with_runtime_config(listen_host, client_port, Some(client_config))
+    let controller_port = cli.controller_port.or(config.controller_port);
+    let controller_rules = match (controller_port, site_rules) {
+        (Some(_), None) => bail!("The local controller requires a native proxy upstream"),
+        (port, rules) => port.zip(rules),
+    };
+    let listener = TcpListener::bind((listen_host, client_port))
         .await
-        .context("local proxy failed")?;
-
-    Ok(())
+        .with_context(|| format!("bind the local proxy to {listen_host}:{client_port}"))?;
+    match controller_rules {
+        Some((port, rules)) => {
+            controller::run(
+                port,
+                config.controller_nodes,
+                listener,
+                client_config,
+                rules,
+            )
+            .await
+        }
+        None => serve_client_until_shutdown(listener, Some(client_config))
+            .await
+            .context("local proxy failed"),
+    }
 }
 
 #[cfg(test)]

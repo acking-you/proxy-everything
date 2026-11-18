@@ -5,6 +5,8 @@
 
 pub mod cli_config;
 pub mod client;
+pub mod controller;
+pub mod site_rules;
 
 // Re-export main types
 pub use client::{

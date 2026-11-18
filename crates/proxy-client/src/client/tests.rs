@@ -7,8 +7,10 @@ async fn a_client_that_stalls_after_socks_greeting_still_times_out() {
         sender: None,
         force_proxy: true,
         upstream_proxy: None,
+        allow_direct: true,
         honor_forced_direct: false,
         enable_udp: false,
+        site_rules: None,
         #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
         process_matcher: None,
     }));
@@ -59,8 +61,10 @@ async fn client_input_deadline_does_not_cancel_outbound_setup() {
         sender: None,
         force_proxy: true,
         upstream_proxy: None,
+        allow_direct: true,
         honor_forced_direct: false,
         enable_udp: false,
+        site_rules: None,
         stream,
     };
     let slots = tokio::sync::Semaphore::new(1);
@@ -293,6 +297,7 @@ async fn start_client_for_test(upstream_proxy: ExternalProxyTarget) -> (String, 
             force_proxy: None,
             process_bypass: None,
             packet_routing: None,
+            ..Default::default()
         }),
     ));
     (addr, token)
