@@ -18,8 +18,9 @@ App ─► local client (HTTP · SOCKS5 · TUN) ══ encrypted, over TCP or QU
   needs no extra round trip.
 - **Carriers**: TCP by default, or TLS 1.3 QUIC per node. A switch affects new
   sessions only. QUIC pools isolate connections that stop acknowledging traffic
-  so new sessions can reconnect, without replaying existing requests
-  ([recovery behavior](docs/quic-transport.md#how-it-works)).
+  and optionally switch new sessions to a per-node standby UDP port when the
+  primary port is unreachable, without replaying existing requests or falling
+  back to TCP ([recovery behavior](docs/quic-transport.md#how-it-works)).
 - **Local proxy**: HTTP, HTTPS CONNECT and SOCKS5, including UDP ASSOCIATE, on
   one port. Optionally sets the system proxy.
 - **TUN capture**: whole-device capture with process bypass and loop prevention

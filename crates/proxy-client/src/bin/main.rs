@@ -8,7 +8,7 @@ use clap::Parser;
 use comfy_table::{Cell, Color, Table, presets};
 use proxy_client::cli_config::{
     Config, DEFAULT_CONFIG_TEMPLATE, SystemProxyGuard, find_config, get_data_dir,
-    get_default_config_path,
+    get_default_config_path, resolve_quic_standby_rules,
 };
 use proxy_client::client::tun::{TunConfig, TunVirtualDnsState, running_process_names};
 use proxy_client::client::{ClientConfig, ClientRuntimeConfig, serve_client_until_shutdown};
@@ -29,6 +29,12 @@ struct Cli {
     /// Additional PEM CA for QUIC; default trust is the Mozilla root store.
     #[arg(long, env = "PROXY_QUIC_CA")]
     quic_ca: Option<PathBuf>,
+    /// Standby UDP port for the configured QUIC server node.
+    #[arg(long, value_name = "PORT")]
+    quic_standby_port: Option<u16>,
+    /// Per-node QUIC standby UDP ports (`host:primary=standby`, comma-separated).
+    #[arg(long, value_name = "RULES")]
+    quic_standby: Option<String>,
     /// [optional] Path to TOML config file
     #[arg(short = 'f', long, value_name = "CONFIG_FILE")]
     config: Option<PathBuf>,
@@ -108,6 +114,8 @@ impl Cli {
             server_host: self.server_host.clone(),
             transport: self.transport.clone(),
             quic_ca: self.quic_ca.clone(),
+            quic_standby_port: self.quic_standby_port,
+            quic_standby: Default::default(),
             server_port: self.server_port,
             client_port: self.client_port,
             listen_host: self.listen_host.clone(),
@@ -150,6 +158,8 @@ impl Cli {
         self.controller_port.is_some()
             || self.transport.is_some()
             || self.quic_ca.is_some()
+            || self.quic_standby_port.is_some()
+            || self.quic_standby.is_some()
             || self.server_host.is_some()
             || self.server_port.is_some()
             || self.client_port.is_some()
@@ -261,7 +271,7 @@ async fn main() -> Result<()> {
     if let Some(ca) = cli.quic_ca.as_ref().or(config.quic_ca.as_ref()) {
         proxy_core::quic::configure_trust(Some(ca))?;
     }
-    let (server_host, selected_server_port) = match server_host {
+    let resolved_endpoint = match server_host {
         Some(host) => {
             let mut endpoint = proxy_core::upstream::UpstreamAddress::from_host(
                 &host,
@@ -277,8 +287,30 @@ async fn main() -> Result<()> {
                     _ => return Err(anyhow!("transport must be tcp or quic")),
                 };
             }
-            (Some(endpoint.qualified_host()), Some(endpoint.port))
+            Some(endpoint)
         }
+        None => None,
+    };
+    let env_quic_standby = match std::env::var("PROXY_QUIC_STANDBY") {
+        Ok(val) => Some(val),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("PROXY_QUIC_STANDBY must be valid UTF-8");
+        }
+    };
+    let standby_rules = resolve_quic_standby_rules(
+        resolved_endpoint.as_ref(),
+        cli.quic_standby_port,
+        config.quic_standby_port,
+        cli.quic_standby.as_deref(),
+        &config.quic_standby,
+        env_quic_standby.as_deref(),
+    )?;
+    if !standby_rules.is_empty() || cli.quic_standby.is_some() || env_quic_standby.is_some() {
+        proxy_core::quic::configure_standby(standby_rules)?;
+    }
+    let (server_host, selected_server_port) = match resolved_endpoint {
+        Some(endpoint) => (Some(endpoint.qualified_host()), Some(endpoint.port)),
         None => (None, None),
     };
 

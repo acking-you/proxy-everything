@@ -518,3 +518,45 @@ Stop on the first failed warm-up request. A prior manual benchmark inherited
 local configuration and changed the system proxy; its results were discarded
 and the original listener restored. Subsequent isolated checks verify both the
 packaged DLL and the unchanged system-proxy setting.
+
+### Per-node QUIC standby UDP ingress for new sessions (Phase 1)
+
+Single-port connection replacement recovers when a stale NAT mapping affects one
+client socket, while still failing when the upstream UDP port itself is blocked
+or black-holed. Phase 1 adds an optional per-node standby UDP port
+(`--quic-standby-port`, `--quic-standby`, or `PROXY_QUIC_STANDBY`) targeting the
+same logical host, TLS SAN, `SECRET_KEY`, and disabled `0-RTT` policy. Nodes
+without a standby rule keep the single-port path unchanged.
+
+Candidate priority lives in `SelectorState` (keyed by runtime, normalized host,
+primary/standby ports, config generation, credential digest, and trust
+generation), separate from `POOL` (which stays keyed by actual dialed port and
+resolved addresses). A single 10-second stream-acquisition deadline spans both
+candidates, reserving at most 4 seconds for the first candidate and passing the
+remaining budget to the second. Concurrent callers coalesce in-flight dials per
+`(node, dialed_port)` with independent waiter deadlines; TLS, certificate, ALPN,
+and application-authentication rejections fail immediately without trying
+standby. Already-opened streams stay on their original QUIC connection with zero
+application-layer replay, and dual-UDP failure never falls back to TCP. Existing
+stream migration across server UDP ports remains out of scope for Phase 1.
+
+Controllable dual-ingress loopback verification (debug profile):
+
+- **Healthy path**: warm stream acquisition `p50 = 79 µs`, `p95 = 111 µs`
+  (`23.5 MiB/s`) single-port vs `p50 = 93 µs`, `p95 = 142 µs` (`24.7 MiB/s`)
+  with standby configured, with zero standby dials or packets.
+- **Unconfigured single-port black hole baseline**: `fault -> detection`
+  `12.00 s`; subsequent `new session -> failure` `4.26 s` (`FailureKind::Timeout`).
+- **Cold-start primary black hole, standby reachable**: `new session ->
+  authenticated stream` `4.26 s` inside the shared 10-second budget.
+- **Active-stream primary black hole, standby reachable**: `fault -> detection`
+  `11.00 s`; post-isolation `new session -> authenticated stream` `259.2 ms`
+  across 8 coalesced callers, while the existing stream stays open without
+  replay.
+- **Old-connection fault with standby down**: primary rescue succeeds in
+  `4.26 s` on a fresh UDP socket inside the shared 10-second budget.
+- **Both ingresses down**: bounded to 1 primary + 1 standby dial within the
+  shared 10-second deadline (`8.26 s` on dual-stack `localhost`, `10.0 s` across
+  4 unreachable addresses), followed by per-node `0.5 s`–`2 s` jittered backoff
+  without throttling other nodes.
+
