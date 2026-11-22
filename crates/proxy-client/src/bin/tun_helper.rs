@@ -362,6 +362,7 @@ mod macos {
             .with_udp_direct_fallback(config.udp_direct_fallback)
             .with_fake_ip(config.fake_ip)
             .with_dns_server(config.dns_server)
+            .with_direct_dns_fallback(config.direct_dns_fallback.unwrap_or(config.dns_server))
             .with_ipv6_enabled(config.ipv6_enabled)
             .with_mtu(config.mtu)
             .with_virtual_dns_state(virtual_dns);

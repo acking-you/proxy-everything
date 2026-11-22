@@ -29,7 +29,10 @@ pub use tun2proxy::{
 // giving the embedded client enough headroom for a full-device workload.
 const EMBEDDED_TUN_MAX_SESSIONS: usize = 1024;
 
-pub const DEFAULT_TUN_DNS_SERVER: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(223, 5, 5, 5));
+pub const DEFAULT_TUN_DNS_SERVER: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1));
+/// Legacy last-resort resolver for the physical/bypass route.
+pub const DEFAULT_DIRECT_TUN_DNS_FALLBACK: IpAddr =
+    IpAddr::V4(std::net::Ipv4Addr::new(223, 5, 5, 5));
 
 pub fn default_dns_server() -> IpAddr {
     DEFAULT_TUN_DNS_SERVER
@@ -324,6 +327,7 @@ pub struct TunConfig {
     pub fake_ip: bool,
     /// Resolver reached through the proxy for DNS queries to the TUN portal.
     pub dns_server: IpAddr,
+    direct_dns_fallback: IpAddr,
     pub ipv6_enabled: bool,
     pub mtu: u16,
     /// Require a successful end-to-end SOCKS5 UDP readiness check before
@@ -347,6 +351,7 @@ impl TunConfig {
             virtual_dns_state: TunVirtualDnsState::default(),
             fake_ip: false,
             dns_server: DEFAULT_TUN_DNS_SERVER,
+            direct_dns_fallback: DEFAULT_DIRECT_TUN_DNS_FALLBACK,
             ipv6_enabled: false,
             mtu: tun2proxy::DEFAULT_MTU,
             udp_enabled: false,
@@ -390,8 +395,24 @@ impl TunConfig {
         }
     }
 
-    pub fn with_dns_server(mut self, server: IpAddr) -> Self {
-        self.dns_server = server;
+    pub fn with_dns_server(self, server: IpAddr) -> Self {
+        self.with_dns_server_override(Some(server))
+    }
+
+    /// An explicit resolver also retains its existing role as a last-resort direct fallback.
+    pub fn with_dns_server_override(mut self, server: Option<IpAddr>) -> Self {
+        self.dns_server = server.unwrap_or(DEFAULT_TUN_DNS_SERVER);
+        self.direct_dns_fallback = server.unwrap_or(DEFAULT_DIRECT_TUN_DNS_FALLBACK);
+        self
+    }
+
+    pub fn direct_dns_fallback(&self) -> IpAddr {
+        self.direct_dns_fallback
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn with_direct_dns_fallback(mut self, fallback: IpAddr) -> Self {
+        self.direct_dns_fallback = fallback;
         self
     }
 
@@ -852,7 +873,13 @@ async fn run_with_ready_inner(
         // DNS stays inside the proxy even when ordinary UDP is disabled.
         // tun2proxy handles explicitly bypassed DNS on the physical interface.
         dns: config.dns_mode(),
-        dns_addr: config.dns_server,
+        // Fake-IP retains its old resolver for OS advertisement and destination recovery.
+        dns_addr: if config.fake_ip {
+            config.direct_dns_fallback()
+        } else {
+            config.dns_server
+        },
+        direct_dns_fallback: Some(config.direct_dns_fallback()),
         udp_strategy: tun_udp_strategy(config.udp_enabled, config.udp_direct_fallback),
         ipv6_enabled: config.ipv6_enabled,
         mtu: config.mtu,

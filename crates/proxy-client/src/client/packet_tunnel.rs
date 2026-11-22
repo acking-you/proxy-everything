@@ -426,6 +426,8 @@ mod tests {
         let old: PacketTunnelConfig = serde_json::from_value(value.clone()).unwrap();
         assert!(old.tun_fake_ip);
         value["tunFakeIp"] = false.into();
+        let real_default: PacketTunnelConfig = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(real_default.tun_dns_server.to_string(), "1.1.1.1");
         value["tunDnsServer"] = "10.20.30.53".into();
         let current: PacketTunnelConfig = serde_json::from_value(value).unwrap();
         assert!(!current.tun_fake_ip);

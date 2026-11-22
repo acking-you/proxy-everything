@@ -532,11 +532,7 @@ async fn main() -> Result<()> {
             .with_udp_enabled(enable_udp)
             .with_udp_direct_fallback(tun_udp_direct_fallback)
             .with_fake_ip(cli.tun_fake_ip.or(config.tun_fake_ip).unwrap_or(false))
-            .with_dns_server(
-                cli.tun_dns_server
-                    .or(config.tun_dns_server)
-                    .unwrap_or(proxy_client::client::tun::DEFAULT_TUN_DNS_SERVER),
-            )
+            .with_dns_server_override(cli.tun_dns_server.or(config.tun_dns_server))
             .with_virtual_dns_state(virtual_dns);
         Some(match tun_endpoint {
             Some((host, port)) => config.with_remote_endpoint(host, port),
