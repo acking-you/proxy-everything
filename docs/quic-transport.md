@@ -39,10 +39,19 @@ add `-p 10811:10811/udp` and mount the certificate. TCP clients are unaffected.
 http-proxy-cli -s quic://proxy.example:10811 -c 1080
 # equivalent:
 http-proxy-cli -s proxy.example -p 10811 --transport quic -c 1080
+# with an optional standby UDP ingress on the same server identity:
+http-proxy-cli -s quic://proxy.example:10811 --quic-standby-port 10812 -c 1080
 ```
 
 - TOML: `server_host = "quic://proxy.example"` or `transport = "quic"`, plus an
-  optional `quic_ca = "/path/to/ca.pem"`.
+  optional `quic_ca = "/path/to/ca.pem"`, `quic_standby_port = 10812`, or per-node
+  `quic_standby = { "proxy.example:10811" = 10812 }`.
+- `--quic-standby` or `PROXY_QUIC_STANDBY="proxy.example:10811=10812"` (comma-separated
+  `host:primary=standby` rules; an empty string clears rules) applies per logical
+  node across the CLI, relays and the app's native library without changing
+  node discovery or UI settings. Both UDP ports must converge to the same QUIC
+  service and return datagrams from the port the client dialed (for example via
+  stateful `nftables`/`iptables` `REDIRECT`).
 - `--transport` overrides the address's scheme. A port in the address overrides
   `-p`; otherwise the usual CLI, TOML, `SERVER_PORT`, then 1081 order applies.
 - Certificates are verified against the Mozilla roots. Add a private CA with
@@ -109,16 +118,41 @@ reading, and dropping the stream delivers what was written, then FIN, and stops
 unread input. Sibling streams are unaffected. UDP datagrams keep their
 boundaries inside the stream; QUIC DATAGRAM frames are not used.
 
-**Client pool.** One authenticated connection is shared per runtime, host, port,
-resolved addresses, credential digest and trust generation, with up to 32
-entries. Dialing races addresses the way TCP does: IPv4 and IPv6 interleaved, a
-250 ms stagger, 4 s per attempt and 16 dials at once. If every cached address
-fails, DNS is refreshed once. A session has 10 s to obtain a stream.
-Application bytes are never replayed; only acquisition before handing a stream
-to the caller can retry once on a fresh connection. This includes a connection
-closing between pool checkout and stream opening, even before its monitor runs.
-The retry shares the original acquisition deadline. Pool identity and application
-authentication use the same credential snapshot throughout a handshake.
+**Client pool.** One authenticated connection is shared per runtime, host,
+actual dialed UDP port, resolved addresses, credential digest and trust
+generation, with up to 64 entries. Concurrent callers targeting an unpooled
+endpoint coalesce onto one in-flight dial while keeping their own deadlines: an
+individual caller timing out or cancelling does not abort the dial for other
+waiting callers, and cancelling the last waiter aborts the dial immediately.
+Dialing races addresses the way TCP does: IPv4 and IPv6 interleaved, a 250 ms
+stagger, 4 s per attempt and 16 dials at once. If every cached address fails
+with a retryable transport error, DNS is refreshed once within the same 10 s
+acquisition deadline. Application bytes are never replayed; only acquisition
+before handing a stream to the caller can retry on a fresh connection, including
+a connection closing between pool checkout and stream opening before its monitor
+runs. Pool identity, selector state and application authentication use the same
+credential and trust snapshots throughout a negotiation.
+
+**Primary and standby UDP ingresses.** When a node has a configured standby UDP
+port, a separate node selector tracks ingress preference per runtime, canonical
+host, primary/standby port pair, standby configuration generation, credential
+digest and trust generation; physical pool entries remain keyed by the actual
+dialed port. While the primary ingress is healthy, standby is never dialed or
+probed. Within a caller's single 10 s stream-acquisition deadline, a cold or
+reconnecting dial reserves up to 4 s for the first candidate and gives the
+remaining budget to the alternate ingress. When a pooled primary connection is
+isolated for stalled ACK progress, new sessions stop using it and try standby
+first, with one primary rescue attempt if standby fails and budget remains (covering
+faults limited to the old connection's path). Standby becomes preferred only
+after both TLS certificate/ALPN verification and application HMAC authentication
+succeed, stays preferred while its pooled connection remains healthy (avoiding
+flap when the primary port recovers intermittently), probes primary again after
+idle pool eviction, and reverses immediately if standby itself faults. TLS,
+certificate, hostname, ALPN and application authentication errors return
+immediately without trying standby. When both UDP ingresses fail, subsequent
+rounds for that node are paced with capped jittered backoff (0.5–2 s) without
+affecting other nodes or falling back to TCP. Clearing the standby configuration
+restores single-port behavior for new sessions.
 
 **Keep-alive.** The client pings every 10 s, so idle sessions and NAT bindings
 survive the 30 s idle timeout. A pooled connection with no open or new sessions
@@ -150,7 +184,8 @@ per stream and 8 MiB per connection, the send window is 8 MiB, and the handshake
 buffer is 4 MiB. Unidirectional streams and datagrams are disabled.
 
 **Health probes.** Relay health checks of `quic://` targets dial and
-authenticate a fresh connection, then close it. Opening a stream on a pooled
+authenticate a fresh connection (using configured standby fallback if the
+primary UDP port is unreachable), then close it. Opening a stream on a pooled
 connection would succeed locally and prove nothing.
 
 **Shutdown.** Stopping the client or server closes its connections and waits
@@ -219,15 +254,20 @@ python3 scripts/bench/quic_transport.py \
 ```sh
 cargo test -p proxy-core quic::
 cargo test -p proxy-core --test quic_recovery
+cargo test -p proxy-core --test quic_standby_failover
+cargo test -p proxy-core --test quic_standby_policy
 cargo test -p proxy-server --test quic_transport
+cargo test -p proxy-server --test quic_standby_session
 ```
 
-Both use loopback listeners. They cover TLS, ALPN and credential rejection,
+All use loopback listeners. They cover TLS, ALPN and credential rejection,
 stream close semantics, mixed legacy and v3 streams, concurrent transfers,
 half-close, reuse and reconnect, control requests, UDP boundaries, live
 endpoint switching, health probes, managed SOCKS5, and relays in both carrier
-directions. The recovery test drops the old connection's return UDP path while
-leaving fresh connections reachable, then verifies isolation, replacement,
-recovery of the original stream, and absence of replay. It exhausts the old
-connection's stream credit and verifies that 16 waiting callers wake on
-isolation and reuse one replacement within their original deadlines.
+directions. The recovery and standby suites inject single-connection and
+whole-port UDP black holes through a dual-ingress forwarder, verifying
+isolation, primary-to-standby failover within a single 10 s deadline, primary
+rescue when only the old connection failed, dial coalescing, independent caller
+cancellation, non-masking of TLS/credential errors, per-node failure pacing,
+recovery of existing streams without replay, and clean rollback when standby
+configuration is cleared.

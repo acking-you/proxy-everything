@@ -24,6 +24,10 @@ pub struct Config {
     pub controller_nodes: std::collections::BTreeMap<crate::site_rules::NodeId, Vec<String>>,
     pub transport: Option<String>,
     pub quic_ca: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quic_standby_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub quic_standby: std::collections::BTreeMap<String, u16>,
     pub server_port: Option<u16>,
     pub client_port: Option<u16>,
     /// Address bound by the local client listener. Missing values default to 0.0.0.0.
@@ -391,6 +395,151 @@ impl Drop for SystemProxyGuard {
             tracing::info!("System proxy restored");
             SystemProxyRestorePoint::discard();
         }
+    }
+}
+
+/// Merge and validate per-node QUIC standby rules (`CLI > TOML > PROXY_QUIC_STANDBY`).
+///
+/// An explicit empty `--quic-standby ""` clears lower-priority rules for rollback.
+/// `quic_standby_port` applies to the configured primary `endpoint` and requires QUIC.
+pub fn resolve_quic_standby_rules(
+    endpoint: Option<&proxy_core::upstream::UpstreamAddress>,
+    cli_standby_port: Option<u16>,
+    config_standby_port: Option<u16>,
+    cli_standby: Option<&str>,
+    config_standby: &std::collections::BTreeMap<String, u16>,
+    env_standby: Option<&str>,
+) -> Result<Vec<proxy_core::quic::StandbyRule>> {
+    use anyhow::{bail, ensure};
+    use proxy_core::quic::StandbyRule;
+    use proxy_core::upstream::Carrier;
+
+    let mut merged: std::collections::BTreeMap<(String, u16), StandbyRule> =
+        std::collections::BTreeMap::new();
+
+    if let Some(raw) = env_standby {
+        for rule in StandbyRule::parse_list(raw)
+            .context("invalid PROXY_QUIC_STANDBY environment configuration")?
+        {
+            merged.insert((rule.host().to_owned(), rule.primary_port().get()), rule);
+        }
+    }
+
+    if !config_standby.is_empty() {
+        let mut seen = std::collections::HashSet::with_capacity(config_standby.len());
+        for (target, standby_port) in config_standby {
+            let rule = StandbyRule::parse(&format!("{target}={standby_port}"))
+                .with_context(|| format!("invalid quic_standby entry `{target}`"))?;
+            let key = (rule.host().to_owned(), rule.primary_port().get());
+            ensure!(
+                seen.insert(key.clone()),
+                "duplicate quic_standby entry for {}:{}",
+                key.0,
+                key.1
+            );
+            merged.insert(key, rule);
+        }
+    }
+
+    if let Some(raw) = cli_standby {
+        if raw.trim().is_empty() {
+            merged.clear();
+        } else {
+            for rule in StandbyRule::parse_list(raw).context("invalid --quic-standby")? {
+                merged.insert((rule.host().to_owned(), rule.primary_port().get()), rule);
+            }
+        }
+    }
+
+    if let Some(standby_port) = cli_standby_port.or(config_standby_port) {
+        let Some(endpoint) = endpoint else {
+            bail!("quic_standby_port requires server_host");
+        };
+        ensure!(
+            endpoint.carrier == Carrier::Quic,
+            "quic_standby_port requires the QUIC transport (`quic://` or `--transport quic`)"
+        );
+        let rule = StandbyRule::new(&endpoint.host, endpoint.port, standby_port)
+            .context("invalid quic_standby_port")?;
+        merged.insert((rule.host().to_owned(), rule.primary_port().get()), rule);
+    }
+
+    Ok(merged.into_values().collect())
+}
+
+#[cfg(test)]
+mod quic_standby_config_tests {
+    use std::collections::BTreeMap;
+
+    use proxy_core::upstream::UpstreamAddress;
+
+    use super::*;
+
+    #[test]
+    fn cli_toml_and_env_standby_rules_merge_by_priority_and_support_empty_rollback() {
+        let quic = UpstreamAddress::parse("quic://west.example:10811").unwrap();
+        let mut toml_map = BTreeMap::new();
+        toml_map.insert("west.example:10811".into(), 10813);
+        toml_map.insert("east.example:10811".into(), 20812);
+
+        let rules = resolve_quic_standby_rules(
+            Some(&quic),
+            Some(10814),
+            Some(10815),
+            None,
+            &toml_map,
+            Some("west.example:10811=10812,south.example:10811=30812"),
+        )
+        .unwrap();
+        let by_host: BTreeMap<_, _> = rules
+            .iter()
+            .map(|r| (r.host(), r.standby_port().get()))
+            .collect();
+        assert_eq!(by_host.get("west.example"), Some(&10814));
+        assert_eq!(by_host.get("east.example"), Some(&20812));
+        assert_eq!(by_host.get("south.example"), Some(&30812));
+
+        let cleared = resolve_quic_standby_rules(
+            Some(&quic),
+            None,
+            None,
+            Some(""),
+            &toml_map,
+            Some("west.example:10811=10812"),
+        )
+        .unwrap();
+        assert!(cleared.is_empty());
+    }
+
+    #[test]
+    fn quic_standby_port_rejects_tcp_carrier_zero_port_and_duplicate_toml_targets() {
+        let tcp = UpstreamAddress::parse("127.0.0.1:1081").unwrap();
+        assert!(
+            resolve_quic_standby_rules(Some(&tcp), Some(10812), None, None, &BTreeMap::new(), None)
+                .is_err()
+        );
+
+        let quic = UpstreamAddress::parse("quic://127.0.0.1:10811").unwrap();
+        assert!(
+            resolve_quic_standby_rules(Some(&quic), Some(0), None, None, &BTreeMap::new(), None)
+                .is_err()
+        );
+        assert!(
+            resolve_quic_standby_rules(
+                Some(&quic),
+                Some(10811),
+                None,
+                None,
+                &BTreeMap::new(),
+                None
+            )
+            .is_err()
+        );
+
+        let mut dup = BTreeMap::new();
+        dup.insert("West.Example:10811".into(), 10812);
+        dup.insert("west.example.:10811".into(), 10813);
+        assert!(resolve_quic_standby_rules(Some(&quic), None, None, None, &dup, None).is_err());
     }
 }
 

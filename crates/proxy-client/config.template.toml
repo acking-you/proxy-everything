@@ -11,6 +11,10 @@ server_port = 1081
 # transport = "quic"
 # Additional PEM trust anchor for private QUIC certificates (hostname is verified).
 # quic_ca = "/path/to/ca.pem"
+# Optional standby UDP port on the same QUIC host/certificate for new sessions.
+# quic_standby_port = 10812
+# Per-node QUIC standby ports (also configurable via PROXY_QUIC_STANDBY):
+# quic_standby = { "your-server.com:10811" = 10812 }
 
 # Local client port (default: 7890)
 client_port = 7890

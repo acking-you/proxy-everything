@@ -1,7 +1,7 @@
 //! Connection-level liveness, independent of application response deadlines.
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use parking_lot::Mutex;
@@ -49,6 +49,7 @@ pub(super) struct Health {
     pub id: usize,
     pub isolated: CancellationToken,
     pub released: CancellationToken,
+    pub faulted: AtomicBool,
     side: Side,
     local_addr: Option<SocketAddr>,
     started: Instant,
@@ -106,6 +107,7 @@ impl Health {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             isolated: CancellationToken::new(),
             released: CancellationToken::new(),
+            faulted: AtomicBool::new(false),
             side,
             local_addr,
             started: now,
@@ -125,6 +127,9 @@ impl Health {
                 biased;
                 reason = connection.closed() => {
                     let (cause, code, normal) = close_details(&reason);
+                    if !normal {
+                        self.faulted.store(true, Ordering::Release);
+                    }
                     self.record(&connection, if normal { tracing::Level::INFO } else { tracing::Level::WARN }, "closed", cause, code);
                     self.isolated.cancel();
                     return;
@@ -141,6 +146,8 @@ impl Health {
                         progress.stalled(now, &stats)
                     };
                     if self.side == Side::Client && stalled && !self.isolated.is_cancelled() {
+                        // Publish faulted before waking waiters parked on `isolated`.
+                        self.faulted.store(true, Ordering::Release);
                         self.isolated.cancel();
                         self.record(&connection, tracing::Level::WARN, "isolated", "ack_progress_timeout", None);
                     }
@@ -202,6 +209,10 @@ impl Health {
             _ => record!(tracing::Level::DEBUG),
         }
     }
+}
+
+pub(super) fn is_normal_close(reason: &ConnectionError) -> bool {
+    close_details(reason).2
 }
 
 fn close_details(reason: &ConnectionError) -> (&'static str, Option<u64>, bool) {
