@@ -439,14 +439,16 @@ pub async fn run_client_with_listener_runtime_config(
             tun_config.as_ref().map(|c| ProcessBypassConfig {
                 processes: c.bypass.user_process_bypass(),
                 virtual_dns: c.virtual_dns_state.clone(),
-                dns_fallback: Some(c.dns_server),
+                dns_fallback: Some(c.direct_dns_fallback()),
             })
         })
         .map(|config| {
             Arc::new(process_bypass::LocalPolicy {
                 matcher: tun2proxy::LocalProcessMatcher::new(config.processes),
                 virtual_dns: config.virtual_dns,
-                dns_fallback: config.dns_fallback.unwrap_or(tun::DEFAULT_TUN_DNS_SERVER),
+                dns_fallback: config
+                    .dns_fallback
+                    .unwrap_or(tun::DEFAULT_DIRECT_TUN_DNS_FALLBACK),
             })
         });
     let force_proxy_controller = config.as_ref().and_then(|c| c.force_proxy.clone());

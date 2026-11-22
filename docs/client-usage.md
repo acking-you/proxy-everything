@@ -24,7 +24,7 @@ Without `--set-system-proxy`, manually configure system proxy to `127.0.0.1:<loc
 | `--udp <true\|false>` | Enable SOCKS5 UDP ASSOCIATE (default: `false`) |
 | `--tun` | Capture device traffic with a local TUN interface |
 | `--tun-fake-ip true` | Opt into virtual DNS; defaults to real answers resolved through the proxy |
-| `--tun-dns-server <IP>` | Resolver reached through the proxy for the TUN DNS portal (default: `223.5.5.5`) |
+| `--tun-dns-server <IP>` | Resolver reached through the proxy for the TUN DNS portal (default: Cloudflare `1.1.1.1`) |
 | `--tun-udp-direct-fallback <true\|false>` | Send UDP directly when proxy UDP is off; `false` blocks it (default: `true`) |
 | `--tun-bypass-process <name>` | Bypass TUN for an executable name (repeatable) |
 | `--tun-list-processes` | List running Windows executable names and exit |
@@ -134,11 +134,14 @@ its DNS portal at `172.19.0.2`, outside the
 `198.18.0.0/15` fake-IP pool, so its opportunistic private-DNS probe cannot
 collide with an allocated application hostname.
 
-**TUN DNS resolver IP** / `--tun-dns-server` defaults to `223.5.5.5`; saved values
-are preserved. It is the resolver behind the private TUN DNS portal, reached
-through the proxy. For explicitly bypassed DNS on desktop it is an additional
-fallback, not an override of the ordered physical resolvers; split-horizon
-enterprise DNS is not provided by that policy. Restart the proxy connection after
+When Fake-IP is off, the TUN DNS portal reaches Cloudflare `1.1.1.1` through
+the proxy by default. To override it, set **TUN DNS resolver IP** in the app or
+pass `--tun-dns-server` in the CLI. Leave the field blank (or omit the flag)
+to use the default. Existing saved IP addresses, including `223.5.5.5`, are
+preserved. On desktop an explicit setting remains a last-resort fallback for
+bypassed DNS, not an override of the ordered physical resolvers. With no
+explicit setting, physical and process-bypass DNS keep their existing resolvers.
+This policy does not provide split-horizon enterprise DNS. Restart the proxy connection after
 changing it. IPv4-only TUN sessions remove AAAA records from UDP and TCP replies.
 The physical DNS relay for excluded processes sets DNS truncation when an
 upstream answer exceeds the client's UDP limit, allowing a retry over TCP.
@@ -150,7 +153,11 @@ shared connection.
 Native embedders can call the additive `proxy_set_tun_dns_server` before startup;
 it accepts a literal IPv4/IPv6 address (null resets the default), rejects invalid
 input and refuses changes while the listener runs. Existing configuration
-struct layouts are unchanged. New UI settings default Fake-IP off, while old
+struct layouts are unchanged. The updated app and native library are both
+needed to apply the new automatic resolver; older native libraries keep
+their previous DNS default. On macOS always use the helper packaged together
+with the app so the physical fallback is handled separately. New UI settings
+default Fake-IP off, while old
 macOS helper/packet-provider messages without a DNS-policy field retain their
 historical Fake-IP behavior; current callers send the choice explicitly.
 

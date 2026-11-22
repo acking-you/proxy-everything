@@ -113,6 +113,24 @@ async fn udp_dns_retries_and_id_collisions_survive_one_tcp_relay() {
     .expect("DNS retry/collision regression timed out");
 }
 
+#[test]
+fn real_tun_uses_cloudflare_without_changing_direct_fallback() {
+    let config = TunConfig::new(Vec::<String>::new()).unwrap();
+    assert_eq!(config.dns_server.to_string(), "1.1.1.1");
+    assert_eq!(config.direct_dns_fallback().to_string(), "223.5.5.5");
+    assert_eq!(config.dns_mode(), tun2proxy::ArgDns::OverTcp);
+
+    for resolver in ["223.5.5.5", "1.1.1.1", "2001:db8::53"] {
+        let resolver = resolver.parse().unwrap();
+        let configured = config.clone().with_dns_server(resolver);
+        assert_eq!(configured.dns_server, resolver);
+        assert_eq!(configured.direct_dns_fallback(), resolver);
+        let reset = configured.with_dns_server_override(None);
+        assert_eq!(reset.dns_server, config.dns_server);
+        assert_eq!(reset.direct_dns_fallback(), config.direct_dns_fallback());
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_listener_forces_dns_through_remote_without_forcing_other_traffic() {
     use proxy_client::client::auto_proxy::PROXY_CACHE;
@@ -150,9 +168,13 @@ async fn real_listener_forces_dns_through_remote_without_forcing_other_traffic()
             }),
         ));
 
-        for resolver in ["127.0.0.2", "::1"] {
-            // Model an auto-proxy direct decision. Every real socket remains
-            // loopback; the remote endpoint only decodes and answers the query.
+        let default_dns = TunConfig::new(Vec::<String>::new())
+            .unwrap()
+            .dns_server
+            .to_string();
+        for resolver in [default_dns.as_str(), "127.0.0.2", "::1"] {
+            // Model an auto-proxy direct decision, including for Cloudflare.
+            // The listener connects only to the mock remote, which decodes and answers DNS.
             PROXY_CACHE.insert(resolver.to_owned(), false);
             let peer = async {
                 for _ in 0..2 {

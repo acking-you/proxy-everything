@@ -55,8 +55,10 @@ pub struct HelperConfig {
     pub udp_direct_fallback: bool,
     #[serde(default = "legacy_fake_ip")]
     pub fake_ip: bool,
-    #[serde(default = "super::tun::default_dns_server")]
+    #[serde(default = "legacy_dns_server")]
     pub dns_server: std::net::IpAddr,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_dns_fallback: Option<std::net::IpAddr>,
     /// Directory for the helper's own virtual-DNS persistence.
     pub cache_dir: Option<String>,
     /// Process names whose traffic bypasses the proxy, already normalized and
@@ -66,6 +68,10 @@ pub struct HelperConfig {
     /// that omits it, and vice versa.
     #[serde(default)]
     pub bypass_processes: Vec<String>,
+}
+
+fn legacy_dns_server() -> std::net::IpAddr {
+    super::tun::DEFAULT_DIRECT_TUN_DNS_FALLBACK
 }
 
 fn legacy_fake_ip() -> bool {
@@ -397,6 +403,7 @@ async fn drive_helper_session(
         udp_direct_fallback: config.udp_direct_fallback,
         fake_ip: config.fake_ip,
         dns_server: config.dns_server,
+        direct_dns_fallback: Some(config.direct_dns_fallback()),
         cache_dir: config
             .cache_dir
             .as_ref()
@@ -579,17 +586,20 @@ mod tests {
         });
         let config: HelperConfig = serde_json::from_value(legacy.clone()).unwrap();
         assert!(config.fake_ip);
-        assert_eq!(config.dns_server, super::super::tun::DEFAULT_TUN_DNS_SERVER);
+        assert_eq!(config.dns_server, legacy_dns_server());
+        assert_eq!(config.direct_dns_fallback, None);
         for enabled in [false, true] {
             let mut current = legacy.clone();
             current["fake_ip"] = enabled.into();
             current["dns_server"] = "10.20.30.53".into();
+            current["direct_dns_fallback"] = "223.5.5.5".into();
             let config: HelperConfig = serde_json::from_value(current).unwrap();
             assert_eq!(config.fake_ip, enabled);
             assert_eq!(config.dns_server.to_string(), "10.20.30.53");
             let round_trip: HelperConfig =
                 serde_json::from_value(serde_json::to_value(config).unwrap()).unwrap();
             assert_eq!(round_trip.fake_ip, enabled);
+            assert_eq!(round_trip.direct_dns_fallback, Some(legacy_dns_server()));
         }
     }
 

@@ -110,7 +110,9 @@ struct StartConfig {
     udp_direct_fallback: bool,
     tun_enabled: bool,
     tun_fake_ip: bool,
-    tun_dns_server: String,
+    tun_dns_server: Option<String>,
+    #[serde(default)]
+    tun_dns_automatic: bool,
     tun_bypass_processes: Vec<String>,
     reverse_geo: bool,
     secure_transport: bool,
@@ -254,6 +256,10 @@ fn string(value: String) -> Result<CString, String> {
 fn optional(value: Option<String>) -> Result<Option<CString>, String> {
     value.map(string).transpose()
 }
+fn tun_dns_override(automatic: bool, server: Option<String>) -> Option<String> {
+    if automatic { None } else { server }
+}
+
 fn pointer(value: &Option<CString>) -> *const c_char {
     value
         .as_ref()
@@ -280,8 +286,11 @@ fn execute(handle: *mut ProxyHandle, request: Request) -> Result<Value, String> 
                 let directory = string(config.cache_directory)?;
                 let processes =
                     string(serde_json::to_string(&config.tun_bypass_processes).unwrap())?;
-                let dns = string(config.tun_dns_server)?;
-                let result = crate::proxy_set_tun_dns_server(handle, dns.as_ptr());
+                let dns = optional(tun_dns_override(
+                    config.tun_dns_automatic,
+                    config.tun_dns_server,
+                ))?;
+                let result = crate::proxy_set_tun_dns_server(handle, pointer(&dns));
                 if result != crate::ProxyResult::Ok {
                     return Ok(json!({"code": result as i32}));
                 }
@@ -691,6 +700,39 @@ mod tests {
                 "action": "delete_everything",
             }))
             .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod dns_start_config_tests {
+    use super::*;
+
+    #[test]
+    fn native_start_accepts_automatic_and_keeps_legacy_dns_override() {
+        let mut value = json!({
+            "server_host": "localhost", "server_port": 1081, "local_port": 1080,
+            "cache_directory": "/", "auto_proxy": true, "udp_enabled": false,
+            "udp_direct_fallback": false, "tun_enabled": true, "tun_fake_ip": false,
+            "tun_bypass_processes": [], "reverse_geo": false, "secure_transport": false,
+            "set_system_proxy": false, "allow_lan": false
+        });
+        let automatic: StartConfig = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            tun_dns_override(automatic.tun_dns_automatic, automatic.tun_dns_server),
+            None
+        );
+        value["tun_dns_server"] = "223.5.5.5".into();
+        let saved: StartConfig = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            tun_dns_override(saved.tun_dns_automatic, saved.tun_dns_server).as_deref(),
+            Some("223.5.5.5"),
+        );
+        value["tun_dns_automatic"] = true.into();
+        let compatible: StartConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            tun_dns_override(compatible.tun_dns_automatic, compatible.tun_dns_server),
+            None
         );
     }
 }
