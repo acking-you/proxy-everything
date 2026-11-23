@@ -14,7 +14,7 @@ use proxy_client::client::tun::{TunConfig, TunVirtualDnsState, running_process_n
 use proxy_client::client::{ClientConfig, ClientRuntimeConfig, serve_client_until_shutdown};
 use proxy_client::site_rules::SiteRules;
 use proxy_core::config::{CLIENT_PORT, SERVER_PORT, init_tracing};
-use proxy_core::dns::EndpointDnsPolicy;
+use proxy_core::dns::{EndpointDnsPolicy, ParsePolicyError};
 use proxy_core::relay::ExternalProxyTarget;
 use tokio::net::TcpListener;
 
@@ -33,7 +33,7 @@ struct Cli {
     /// [optional] Resolvers for node and upstream-proxy hostnames, comma-separated:
     /// system, encrypted, https:// DoH URLs or udp://IP; a trailing system allows a
     /// plaintext fallback (default: system)
-    #[arg(long, value_name = "POLICY")]
+    #[arg(long, value_name = "POLICY", value_parser = endpoint_dns_spec)]
     endpoint_dns: Option<String>,
     /// [optional] Path to TOML config file
     #[arg(short = 'f', long, value_name = "CONFIG_FILE")]
@@ -181,6 +181,13 @@ impl Cli {
             || !self.tun_bypass_processes.is_empty()
             || self.set_system_proxy
     }
+}
+
+/// Validates `--endpoint-dns` while arguments are parsed, so an invalid policy
+/// is never written to a new config file. The spec itself is kept, because the
+/// policy's display form redacts URL paths and queries.
+fn endpoint_dns_spec(spec: &str) -> Result<String, ParsePolicyError> {
+    spec.parse::<EndpointDnsPolicy>().map(|_| spec.to_owned())
 }
 
 /// The endpoint DNS policy from the CLI, the config file or `ENDPOINT_DNS`,
@@ -711,10 +718,27 @@ mod tests {
     }
 
     #[test]
-    fn invalid_endpoint_dns_is_rejected_instead_of_ignored() {
-        let cli =
-            Cli::try_parse_from(["http-proxy-cli", "--endpoint-dns", "http://1.1.1.1"]).unwrap();
-        let error = endpoint_dns_policy(&cli, &Config::default()).unwrap_err();
+    fn invalid_endpoint_dns_option_is_rejected_before_it_can_be_saved() {
+        for spec in ["http://1.1.1.1", "system,encrypted"] {
+            let error = Cli::try_parse_from(["http-proxy-cli", "--endpoint-dns", spec])
+                .err()
+                .unwrap_or_else(|| panic!("{spec} was accepted"));
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_endpoint_dns_in_config_is_rejected_instead_of_ignored() {
+        let config = Config {
+            endpoint_dns: Some(vec!["system".to_string(), "encrypted".to_string()]),
+            ..Config::default()
+        };
+        let cli = Cli::try_parse_from(["http-proxy-cli"]).unwrap();
+        let error = endpoint_dns_policy(&cli, &config).unwrap_err();
         assert!(
             error.to_string().starts_with("invalid endpoint_dns:"),
             "{error}"
