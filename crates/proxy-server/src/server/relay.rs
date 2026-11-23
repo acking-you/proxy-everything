@@ -11,7 +11,6 @@ use proxy_core::relay::{
     ExternalProxyTarget, LoadBalanceAlgo, LoadBalancer, RelayConfig, RelayRoute, RelayStatus,
     ResolvedTarget, UpstreamTarget, create_balancer,
 };
-use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 
 const HEALTHY_PING_INTERVAL: Duration = Duration::from_secs(60 * 3);
@@ -324,7 +323,7 @@ async fn ping_target(target: &proxy_core::relay::TargetStatus) -> bool {
     };
     let result = tokio::time::timeout(
         PING_TIMEOUT,
-        TcpStream::connect((proxy.host.as_str(), proxy.port)),
+        proxy_core::transport::connect_tcp_endpoint(&proxy.host, proxy.port),
     )
     .await;
     match result {

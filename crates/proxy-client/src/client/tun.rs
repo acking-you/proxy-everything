@@ -231,7 +231,7 @@ impl TunBypassController {
             "preparing live TUN upstream switch"
         );
         let endpoint = proxy_core::upstream::UpstreamAddress::from_host(host, port)?;
-        let addresses = proxy_core::transport::resolve_host_addresses(&endpoint.host).await?;
+        let addresses = proxy_core::transport::resolve_endpoint_addresses(&endpoint.host).await?;
         tracing::info!(
             host,
             port,
@@ -1026,13 +1026,27 @@ async fn validate_local_socks5_udp(local_port: u16) -> io::Result<()> {
 }
 
 async fn resolve_remote_addresses(endpoint: Option<&(String, u16)>) -> io::Result<Vec<IpAddr>> {
+    // tun2proxy answers a bypassed process's port-53 traffic with its own
+    // physical DNS relay, whatever server the query was addressed to.
+    if let Ok(policy) = proxy_core::transport::endpoint_dns()
+        && policy.has_plaintext_resolvers()
+    {
+        tracing::warn!(
+            %policy,
+            "udp:// endpoint resolvers are answered by the TUN's physical DNS relay while TUN \
+             is active; use https:// resolvers with TUN"
+        );
+    }
     let Some((host, port)) = endpoint else {
         return Ok(Vec::new());
     };
     let endpoint = proxy_core::upstream::UpstreamAddress::from_host(host, *port)?;
-    let addresses = tokio::net::lookup_host((endpoint.host.as_str(), endpoint.port))
+    // The bypass routes must cover the addresses the carriers dial, which
+    // come from the same endpoint cache.
+    let addresses = proxy_core::transport::resolve_endpoint_addresses(&endpoint.host)
         .await?
-        .map(|address| address.ip())
+        .iter()
+        .copied()
         .filter(|address| !address.is_loopback() && !address.is_unspecified())
         .collect::<IpSet<_>>()
         .into_iter()

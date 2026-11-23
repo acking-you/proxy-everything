@@ -11,7 +11,8 @@ use tokio::io::AsyncWriteExt;
 
 use super::{
     ForwardContext, ForwarderProvider, HeaderContext, HttpProxySnafu, ProxyContext,
-    ServerConnection, TcpForwardImpl, connect_native, get_tcp_stream, split_and_wrap,
+    ServerConnection, TcpForwardImpl, connect_native, get_endpoint_stream, get_tcp_stream,
+    split_and_wrap,
 };
 
 #[derive(Debug, Snafu)]
@@ -311,7 +312,7 @@ impl HttpProxierProvider {
                 );
                 let mut server_stream = match upstream_proxy.kind {
                     ExternalProxyKind::Http => {
-                        get_tcp_stream(
+                        get_endpoint_stream(
                             upstream_proxy.host.as_str(),
                             upstream_proxy.port,
                             "[UPSTREAM-PROXY] connect to http proxy",
