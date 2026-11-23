@@ -141,7 +141,7 @@ impl UpstreamAddress {
 
     pub async fn connect(&self) -> io::Result<CarrierStream> {
         match self.carrier {
-            Carrier::Tcp => crate::transport::connect_tcp_host(&self.host, self.port)
+            Carrier::Tcp => crate::transport::connect_tcp_endpoint(&self.host, self.port)
                 .await
                 .map(Into::into),
             Carrier::Quic => crate::quic::connect(&self.host, self.port)
@@ -153,7 +153,7 @@ impl UpstreamAddress {
     /// Confirm the carrier reaches its peer without opening a proxy session.
     pub async fn probe(&self) -> io::Result<()> {
         match self.carrier {
-            Carrier::Tcp => crate::transport::connect_tcp_host(&self.host, self.port)
+            Carrier::Tcp => crate::transport::connect_tcp_endpoint(&self.host, self.port)
                 .await
                 .map(drop),
             Carrier::Quic => crate::quic::probe(&self.host, self.port).await,
@@ -168,7 +168,7 @@ pub async fn connect_host(host: &str, port: u16) -> io::Result<CarrierStream> {
     if host.contains("://") {
         return UpstreamAddress::from_host(host, port)?.connect().await;
     }
-    crate::transport::connect_tcp_host(bare_host(host)?, port)
+    crate::transport::connect_tcp_endpoint(bare_host(host)?, port)
         .await
         .map(Into::into)
 }

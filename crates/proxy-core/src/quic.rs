@@ -432,13 +432,13 @@ impl Credential {
 /// stream or payload is never retried; a failed dial sends no application byte,
 /// so it is retried once against refreshed DNS, as TCP connections are.
 pub async fn connect(host: &str, port: u16) -> io::Result<QuicStream> {
-    let addresses = crate::transport::resolve_host_addresses(host).await?;
+    let addresses = crate::transport::resolve_endpoint_addresses(host).await?;
     match connect_addresses(host, port, &addresses).await {
         Err(error)
             if error.kind() != io::ErrorKind::PermissionDenied
                 && host.parse::<IpAddr>().is_err() =>
         {
-            let refreshed = crate::transport::refresh_host_addresses(host).await?;
+            let refreshed = crate::transport::refresh_endpoint_addresses(host).await?;
             if refreshed == addresses {
                 return Err(error);
             }
@@ -541,7 +541,7 @@ fn unavailable() -> io::Error {
 /// Confirm that an authenticated peer answers, without opening a session.
 /// A pooled connection cannot prove this: opening a stream on it is local.
 pub async fn probe(host: &str, port: u16) -> io::Result<()> {
-    let addresses = crate::transport::resolve_host_addresses(host).await?;
+    let addresses = crate::transport::resolve_endpoint_addresses(host).await?;
     let trust = trust()?;
     let credential = Credential::snapshot();
     let shared = tokio::time::timeout(

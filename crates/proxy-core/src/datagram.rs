@@ -408,7 +408,7 @@ async fn create_socks5_datagram_relay_inner(
         "starting upstream SOCKS5 UDP ASSOCIATE handshake"
     );
 
-    let mut control = crate::transport::get_tcp_stream(
+    let mut control = crate::transport::get_tcp_endpoint_stream(
         proxy.host.as_str(),
         proxy.port,
         "connect SOCKS5 UDP upstream",

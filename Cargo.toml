@@ -84,6 +84,10 @@ reqwest = { version = "0.13", default-features = false, features = [
     "stream",
 ] }
 rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false }
+# DNS wire format for endpoint resolution; the same release tun2proxy and
+# uni-stream already link.
+hickory-proto = { version = "0.26.3", default-features = false, features = ["std"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 tokio-socks = "0.5.3"
 ipnet = { version = "2.12", features = ["serde"] }

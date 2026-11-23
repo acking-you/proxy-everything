@@ -44,6 +44,7 @@ futures = { workspace = true }
 # Network
 reqwest = { workspace = true }
 rustls = { workspace = true }
+hickory-proto = { workspace = true }
 quinn = { workspace = true }
 webpki-roots = "1"
 tokio-socks = { workspace = true }
@@ -77,6 +78,11 @@ tokio = { workspace = true, features = [
     "macros",
     "test-util",
 ] }
+# Loopback DNS-over-HTTPS server for the endpoint resolver tests.
+tokio-rustls = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
 
 # Descriptor-limit policy (see src/rlimit.rs)
 [target.'cfg(unix)'.dependencies]
