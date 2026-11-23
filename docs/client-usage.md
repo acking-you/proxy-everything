@@ -17,6 +17,7 @@ Without `--set-system-proxy`, manually configure system proxy to `127.0.0.1:<loc
 | `-p, --server-port` | Server port (default: 1081) |
 | `--transport <tcp\|quic>` | Native upstream carrier; a bare server host defaults to TCP |
 | `--quic-ca <PEM>` | Additional QUIC trust anchor; hostname verification remains required |
+| `--endpoint-dns <POLICY>` | Resolvers for the server and upstream-proxy hostnames, such as `encrypted` (DNS-over-HTTPS) or `encrypted,system`; default `system`. See [Endpoint DNS](endpoint-dns.md) |
 | `-k, --key` | 32-byte encryption key |
 | `--set-system-proxy` | Auto-set OS proxy (Linux/macOS/Windows) |
 | `--reverse-geo` | Reverse geo logic: proxy CN, direct others |

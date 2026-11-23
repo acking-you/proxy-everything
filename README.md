@@ -60,6 +60,7 @@ Download `http-proxy-cli` from the [releases](https://github.com/acking-you/prox
 ./http-proxy-cli -s YOUR_SERVER -c 7890 --set-system-proxy   # TCP
 ./http-proxy-cli -s quic://YOUR_SERVER:10811 -c 7890         # QUIC
 ./http-proxy-cli -s YOUR_SERVER -c 7890 --tun                # capture all traffic (administrator)
+./http-proxy-cli -s YOUR_SERVER -c 7890 --endpoint-dns encrypted   # resolve the server over DoH
 ```
 
 Without `--set-system-proxy`, point applications at `127.0.0.1:7890` (HTTP or
@@ -72,8 +73,9 @@ SOCKS5). Options, TOML configuration, SOCKS5 UDP and TUN are covered in
 | --- | --- | --- | --- |
 | Wire protocol | legacy | v3: `PROXY_WIRE_PROTOCOL=v3` or the app toggle | Upgrade every relay and server; `PROXY_REQUIRE_V3=1` then rejects legacy ([v3](docs/secure-transport-v3.md)) |
 | Carrier | TCP: a bare `host` | QUIC: `quic://host:port` | Deploy a QUIC listener with a certificate ([QUIC](docs/quic-transport.md)) |
+| Endpoint DNS | system resolver | DNS-over-HTTPS: `--endpoint-dns encrypted` or `ENDPOINT_DNS` | Needs a reachable DoH server; without a trailing `system`, lookups fail instead of using plaintext DNS ([endpoint DNS](docs/endpoint-dns.md)) |
 
-The two combine freely, and neither changes what a session carries.
+They combine freely, and none changes what a session carries.
 Compatibility and recovery behaviour: [network resilience](docs/network-resilience.md).
 
 ## Management
@@ -111,7 +113,8 @@ and [managed SOCKS5](docs/managed-socks5.md).
   [Android VPN](docs/android-vpn.md) · [iOS](docs/ios-development.md) ·
   [Mac App Store edition](docs/mac-app-store.md)
 - **Protocols and design**: [v3 wire protocol](docs/secure-transport-v3.md) ·
-  [network resilience](docs/network-resilience.md) · [TUN ICMP echo](docs/tun-icmp-echo.md) ·
+  [network resilience](docs/network-resilience.md) · [endpoint DNS](docs/endpoint-dns.md) ·
+  [TUN ICMP echo](docs/tun-icmp-echo.md) ·
   [node probe batching](docs/node-probe-batch.md) · [Rust UI runtime](docs/rust-ui-runtime.md) ·
   [galaxy geometry](docs/galaxy-geometry.md)
 - **Operations and records**: [releasing](docs/releasing.md) ·

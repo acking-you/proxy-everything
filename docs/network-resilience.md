@@ -162,6 +162,9 @@ new tag or release upload.
 - DNS: 4,096 cached hostnames, five-minute TTL, three-second lookup budget,
   eight OS lookups at once, same-host coalescing and a two-second refresh floor.
   A timed-out OS call may continue, but it continues to occupy its slot.
+  Proxy endpoints follow the [endpoint DNS policy](endpoint-dns.md): network
+  resolvers get a five-second budget and eight slots of their own, and their
+  answers are cached for the record TTL within 30 seconds to five minutes.
 - TCP address selection: OS TCP retries, 250 ms initial stagger, at most two
   live attempts. Immediate failure advances immediately; caller cancellation
   drops all attempts. External SOCKS5/HTTP negotiation has a 15-second budget
