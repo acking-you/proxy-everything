@@ -14,6 +14,7 @@ use proxy_client::client::tun::{TunConfig, TunVirtualDnsState, running_process_n
 use proxy_client::client::{ClientConfig, ClientRuntimeConfig, serve_client_until_shutdown};
 use proxy_client::site_rules::SiteRules;
 use proxy_core::config::{CLIENT_PORT, SERVER_PORT, init_tracing};
+use proxy_core::dns::EndpointDnsPolicy;
 use proxy_core::relay::ExternalProxyTarget;
 use tokio::net::TcpListener;
 
@@ -29,6 +30,11 @@ struct Cli {
     /// Additional PEM CA for QUIC; default trust is the Mozilla root store.
     #[arg(long, env = "PROXY_QUIC_CA")]
     quic_ca: Option<PathBuf>,
+    /// [optional] Resolvers for node and upstream-proxy hostnames, comma-separated:
+    /// system, encrypted, https:// DoH URLs or udp://IP; a trailing system allows a
+    /// plaintext fallback (default: system)
+    #[arg(long, value_name = "POLICY")]
+    endpoint_dns: Option<String>,
     /// [optional] Path to TOML config file
     #[arg(short = 'f', long, value_name = "CONFIG_FILE")]
     config: Option<PathBuf>,
@@ -108,6 +114,13 @@ impl Cli {
             server_host: self.server_host.clone(),
             transport: self.transport.clone(),
             quic_ca: self.quic_ca.clone(),
+            endpoint_dns: self.endpoint_dns.as_ref().map(|spec| {
+                spec.split(',')
+                    .map(str::trim)
+                    .filter(|entry| !entry.is_empty())
+                    .map(String::from)
+                    .collect()
+            }),
             server_port: self.server_port,
             client_port: self.client_port,
             listen_host: self.listen_host.clone(),
@@ -150,6 +163,7 @@ impl Cli {
         self.controller_port.is_some()
             || self.transport.is_some()
             || self.quic_ca.is_some()
+            || self.endpoint_dns.is_some()
             || self.server_host.is_some()
             || self.server_port.is_some()
             || self.client_port.is_some()
@@ -167,6 +181,21 @@ impl Cli {
             || !self.tun_bypass_processes.is_empty()
             || self.set_system_proxy
     }
+}
+
+/// The endpoint DNS policy from the CLI, the config file or `ENDPOINT_DNS`,
+/// in that order. An invalid value is an error rather than a silent fallback
+/// to the system resolver.
+fn endpoint_dns_policy(cli: &Cli, config: &Config) -> Result<EndpointDnsPolicy> {
+    let policy = match (&cli.endpoint_dns, &config.endpoint_dns) {
+        (Some(spec), _) => spec.parse(),
+        (None, Some(entries)) => EndpointDnsPolicy::from_entries(entries),
+        (None, None) => match std::env::var("ENDPOINT_DNS") {
+            Ok(spec) if !spec.trim().is_empty() => spec.parse(),
+            _ => Ok(EndpointDnsPolicy::system()),
+        },
+    };
+    policy.map_err(|error| anyhow!("invalid endpoint_dns: {error}"))
 }
 
 fn parse_bool_env(value: &str) -> Option<bool> {
@@ -243,6 +272,7 @@ async fn main() -> Result<()> {
         None => None,
     };
     let upstream_mode = upstream_proxy.is_some();
+    let endpoint_dns = endpoint_dns_policy(&cli, &config)?;
 
     // Priority: CLI args > config file > env vars > defaults
     let configured_server_host = cli
@@ -394,6 +424,7 @@ async fn main() -> Result<()> {
         });
 
     init_tracing();
+    proxy_core::transport::set_endpoint_dns(endpoint_dns.clone());
 
     // Force lazy statics to initialize (triggers WARN logs before banner)
     let client_port = *CLIENT_PORT;
@@ -462,6 +493,14 @@ async fn main() -> Result<()> {
             },
         ]);
     }
+    table.add_row(vec![
+        Cell::new("Endpoint DNS"),
+        if endpoint_dns.is_system_only() {
+            Cell::new("system").fg(Color::DarkGrey)
+        } else {
+            Cell::new(endpoint_dns.to_string()).fg(Color::Cyan)
+        },
+    ]);
     table.add_row(vec![Cell::new("Reverse Geo"), status_cell(reverse_geo)]);
     table.add_row(vec![
         Cell::new("Auto Proxy"),
@@ -643,6 +682,43 @@ mod tests {
             Some(vec!["browser.exe".to_string(), "downloader".to_string()])
         );
         assert!(cli.has_args());
+    }
+
+    #[test]
+    fn endpoint_dns_cli_option_is_written_to_config() {
+        let cli = Cli::try_parse_from([
+            "http-proxy-cli",
+            "--endpoint-dns",
+            " encrypted, https://doh.example/dns-query ,system",
+        ])
+        .unwrap();
+
+        let config = cli.to_config();
+        assert_eq!(
+            config.endpoint_dns,
+            Some(vec![
+                "encrypted".to_string(),
+                "https://doh.example/dns-query".to_string(),
+                "system".to_string(),
+            ])
+        );
+        assert!(cli.has_args());
+        let policy = endpoint_dns_policy(&cli, &config).unwrap();
+        assert!(policy.has_system_fallback());
+        let saved = endpoint_dns_policy(&Cli::try_parse_from(["http-proxy-cli"]).unwrap(), &config)
+            .unwrap();
+        assert_eq!(saved, policy);
+    }
+
+    #[test]
+    fn invalid_endpoint_dns_is_rejected_instead_of_ignored() {
+        let cli =
+            Cli::try_parse_from(["http-proxy-cli", "--endpoint-dns", "http://1.1.1.1"]).unwrap();
+        let error = endpoint_dns_policy(&cli, &Config::default()).unwrap_err();
+        assert!(
+            error.to_string().starts_with("invalid endpoint_dns:"),
+            "{error}"
+        );
     }
 
     #[test]

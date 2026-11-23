@@ -1,5 +1,6 @@
 use clap::Parser;
 use proxy_core::config::{SERVER_PORT, init_tracing};
+use proxy_core::dns::EndpointDnsPolicy;
 use proxy_server::server::{QuicListenConfig, start_server_with_quic};
 
 #[derive(Parser)]
@@ -41,12 +42,20 @@ struct Cli {
         env = "TURELY_PROXY_SERVER"
     )]
     turely_proxy_server: Option<String>,
+    /// [optional] Resolvers for relay-target hostnames, comma-separated: system,
+    /// encrypted, https:// DoH URLs or udp://IP; a trailing system allows a
+    /// plaintext fallback (default: system)
+    #[arg(long, value_name = "POLICY", env = "ENDPOINT_DNS")]
+    endpoint_dns: Option<EndpointDnsPolicy>,
 }
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let cli = Cli::parse();
     init_tracing();
+    if let Some(policy) = cli.endpoint_dns.clone() {
+        proxy_core::transport::set_endpoint_dns(policy);
+    }
     unsafe {
         std::env::set_var("SERVER_PORT", cli.port.to_string());
         if let Some(key) = &cli.turely_proxy_server {
@@ -64,4 +73,20 @@ async fn main() -> std::io::Result<()> {
         private_key: cli.quic_key.expect("required by clap"),
     });
     start_server_with_quic(cli.host, *SERVER_PORT, quic).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn endpoint_dns_is_validated_with_the_other_arguments() {
+        let cli = Cli::try_parse_from(["http-proxy-server", "--endpoint-dns", "encrypted,system"])
+            .unwrap();
+        assert!(cli.endpoint_dns.unwrap().has_system_fallback());
+        assert!(
+            Cli::try_parse_from(["http-proxy-server", "--endpoint-dns", "system,encrypted"])
+                .is_err()
+        );
+    }
 }
