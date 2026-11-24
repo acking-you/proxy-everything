@@ -22,6 +22,7 @@ use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use proxy_core::dns::EndpointDnsSpec;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
@@ -66,6 +67,12 @@ pub struct HelperConfig {
     /// that omits it, and vice versa.
     #[serde(default)]
     pub bypass_processes: Vec<String>,
+    /// The application's endpoint DNS policy. The helper is another process
+    /// and resolves `remote_host` for the route bypass itself; without this
+    /// it would do so under its own default, as it does for an older
+    /// application that sends none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_dns: Option<EndpointDnsSpec>,
 }
 
 fn legacy_fake_ip() -> bool {
@@ -358,6 +365,23 @@ async fn run_helper_session(
     drive_helper_session(stream, local_port, config, shutdown_token, ready).await
 }
 
+/// This process's endpoint DNS policy, for the helper to resolve the remote
+/// endpoint under.
+///
+/// An invalid `ENDPOINT_DNS` fails every endpoint lookup here instead of
+/// falling back to another policy. A helper resolving under its own default
+/// would be that fallback, so the session is refused.
+fn endpoint_dns_handoff() -> io::Result<EndpointDnsSpec> {
+    proxy_core::transport::endpoint_dns()
+        .map(|policy| policy.to_spec())
+        .map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid ENDPOINT_DNS: {error}"),
+            )
+        })
+}
+
 /// Exchange configuration, readiness, and teardown with a connected helper.
 async fn drive_helper_session(
     stream: tokio::net::UnixStream,
@@ -368,6 +392,14 @@ async fn drive_helper_session(
 ) -> io::Result<usize> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
+
+    // Before anything is sent: closing the socket without a configuration
+    // makes the helper exit with the network untouched.
+    let endpoint_dns = endpoint_dns_handoff()?;
+    // The helper's tunnel captures this process as well, and its physical DNS
+    // relay answers this process's port-53 traffic until the routes are
+    // restored, whatever server a query names.
+    let _dns_capture = proxy_core::dns::PlaintextDnsCapture::begin();
 
     // Runtime policy updates originate on whichever thread calls the FFI, while
     // the write half is owned by the loop below. An unbounded channel bridges
@@ -402,6 +434,7 @@ async fn drive_helper_session(
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned()),
         bypass_processes: config.bypass.effective_processes(),
+        endpoint_dns: Some(endpoint_dns),
     };
     let mut encoded = serde_json::to_vec(&helper_config).map_err(io::Error::other)?;
     encoded.push(b'\n');
@@ -594,6 +627,26 @@ mod tests {
     }
 
     #[test]
+    fn the_endpoint_dns_policy_is_optional_in_both_directions() {
+        let legacy = serde_json::json!({
+            "local_port": 1080, "mtu": 1500, "ipv6_enabled": false,
+            "udp_enabled": false, "udp_direct_fallback": false
+        });
+        let config: HelperConfig = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(config.endpoint_dns, None);
+        // What an older helper would be sent keeps the shape it knows.
+        let resent = serde_json::to_value(&config).unwrap();
+        assert!(resent.get("endpoint_dns").is_none(), "{resent}");
+
+        let mut current = legacy;
+        current["endpoint_dns"] = serde_json::json!(["https://doh.example/q?token=a,b", "system"]);
+        let config: HelperConfig = serde_json::from_value(current).unwrap();
+        let policy = config.endpoint_dns.as_ref().unwrap().parse().unwrap();
+        assert!(policy.has_system_fallback());
+        assert_eq!(policy.to_spec(), config.endpoint_dns.unwrap());
+    }
+
+    #[test]
     fn shell_quoting_survives_paths_with_quotes_and_spaces() {
         assert_eq!(shell_quote("/Users/a b/app"), "'/Users/a b/app'");
         assert_eq!(shell_quote("/tmp/it's"), r"'/tmp/it'\''s'");
@@ -664,6 +717,11 @@ mod tests {
         assert_eq!(config.remote_host.as_deref(), Some("203.0.113.10"));
         assert_eq!(config.remote_port, Some(1081));
         assert_eq!(config.mtu, 1400);
+        // The helper resolves the remote endpoint under this process's policy.
+        assert_eq!(
+            config.endpoint_dns,
+            Some(proxy_core::transport::endpoint_dns().unwrap().to_spec())
+        );
         // Readiness must reach the caller, not just be logged.
         assert!(matches!(ready_receiver.await, Ok(Ok(()))));
     }

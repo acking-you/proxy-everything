@@ -42,9 +42,10 @@ struct Cli {
         env = "TURELY_PROXY_SERVER"
     )]
     turely_proxy_server: Option<String>,
-    /// [optional] Resolvers for relay-target hostnames, comma-separated: system,
-    /// encrypted, https:// DoH URLs or udp://IP; a trailing system allows a
-    /// plaintext fallback (default: system)
+    /// [optional] How relay-target hostnames are resolved: auto (the default:
+    /// built-in DNS-over-HTTPS, then the system resolver unless forged answers
+    /// are seen), system, or a comma-separated list of encrypted, https:// DoH
+    /// URLs and udp://IP, which fails closed unless it ends in system
     #[arg(long, value_name = "POLICY", env = "ENDPOINT_DNS")]
     endpoint_dns: Option<EndpointDnsPolicy>,
 }
@@ -87,6 +88,18 @@ mod tests {
         assert!(
             Cli::try_parse_from(["http-proxy-server", "--endpoint-dns", "system,encrypted"])
                 .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["http-proxy-server", "--endpoint-dns", "auto,system"]).is_err()
+        );
+        let auto = Cli::try_parse_from(["http-proxy-server", "--endpoint-dns", "auto"]).unwrap();
+        assert!(auto.endpoint_dns.unwrap().is_automatic());
+        // Without the flag the process keeps EndpointDnsPolicy::default().
+        assert!(
+            Cli::try_parse_from(["http-proxy-server"])
+                .unwrap()
+                .endpoint_dns
+                .is_none()
         );
     }
 }

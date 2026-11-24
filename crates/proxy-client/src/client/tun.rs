@@ -877,6 +877,11 @@ async fn run_with_ready_inner(
     } else {
         resolve_remote_addresses(config.remote_endpoint.as_ref()).await?
     };
+    // From here to the end of the session tun2proxy answers this process's
+    // own port-53 traffic through its physical DNS relay, whatever server a
+    // query names. A platform VPN keeps this process's sockets off the tunnel
+    // instead, so nothing of the kind happens there.
+    let _dns_capture = (!platform_owned_tun).then(proxy_core::dns::PlaintextDnsCapture::begin);
     for address in &route_bypass {
         args.bypass.push(
             address

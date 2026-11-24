@@ -30,9 +30,10 @@ struct Cli {
     /// Additional PEM CA for QUIC; default trust is the Mozilla root store.
     #[arg(long, env = "PROXY_QUIC_CA")]
     quic_ca: Option<PathBuf>,
-    /// [optional] Resolvers for node and upstream-proxy hostnames, comma-separated:
-    /// system, encrypted, https:// DoH URLs or udp://IP; a trailing system allows a
-    /// plaintext fallback (default: system)
+    /// [optional] How node and upstream-proxy hostnames are resolved: auto (the
+    /// default: built-in DNS-over-HTTPS, then the system resolver unless forged
+    /// answers are seen), system, or a comma-separated list of encrypted,
+    /// https:// DoH URLs and udp://IP, which fails closed unless it ends in system
     #[arg(long, value_name = "POLICY", value_parser = endpoint_dns_spec)]
     endpoint_dns: Option<String>,
     /// [optional] Path to TOML config file
@@ -191,16 +192,27 @@ fn endpoint_dns_spec(spec: &str) -> Result<String, ParsePolicyError> {
 }
 
 /// The endpoint DNS policy from the CLI, the config file or `ENDPOINT_DNS`,
-/// in that order. An invalid value is an error rather than a silent fallback
-/// to the system resolver.
+/// in that order, and the default when none names one. An invalid value is an
+/// error rather than a silent fallback to another policy.
 fn endpoint_dns_policy(cli: &Cli, config: &Config) -> Result<EndpointDnsPolicy> {
-    let policy = match (&cli.endpoint_dns, &config.endpoint_dns) {
-        (Some(spec), _) => spec.parse(),
-        (None, Some(entries)) => EndpointDnsPolicy::from_entries(entries),
-        (None, None) => match std::env::var("ENDPOINT_DNS") {
-            Ok(spec) if !spec.trim().is_empty() => spec.parse(),
-            _ => Ok(EndpointDnsPolicy::system()),
-        },
+    let from_env = std::env::var("ENDPOINT_DNS").ok();
+    choose_endpoint_dns(
+        cli.endpoint_dns.as_deref(),
+        config.endpoint_dns.as_deref(),
+        from_env.as_deref(),
+    )
+}
+
+fn choose_endpoint_dns(
+    cli: Option<&str>,
+    config: Option<&[String]>,
+    env: Option<&str>,
+) -> Result<EndpointDnsPolicy> {
+    let policy = match (cli, config, env) {
+        (Some(spec), ..) => spec.parse(),
+        (None, Some(entries), _) => EndpointDnsPolicy::from_entries(entries),
+        (None, None, Some(spec)) if !spec.trim().is_empty() => spec.parse(),
+        (None, None, Some(_) | None) => Ok(EndpointDnsPolicy::default()),
     };
     policy.map_err(|error| anyhow!("invalid endpoint_dns: {error}"))
 }
@@ -718,8 +730,33 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_dns_follows_cli_then_config_then_environment_then_the_default() {
+        let saved = ["encrypted".to_string()];
+        let choose = |cli, config, env| choose_endpoint_dns(cli, config, env).unwrap();
+        assert_eq!(choose(None, None, None), EndpointDnsPolicy::default());
+        assert_eq!(choose(None, None, Some("  ")), EndpointDnsPolicy::default());
+        assert_eq!(
+            choose(None, None, Some("system")),
+            EndpointDnsPolicy::system()
+        );
+        assert_eq!(
+            choose(None, Some(&saved), Some("system")),
+            EndpointDnsPolicy::encrypted()
+        );
+        assert_eq!(
+            choose(Some("auto"), Some(&saved), Some("system")),
+            EndpointDnsPolicy::auto()
+        );
+        let error = choose_endpoint_dns(None, None, Some("auto,system")).unwrap_err();
+        assert!(
+            error.to_string().starts_with("invalid endpoint_dns:"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn invalid_endpoint_dns_option_is_rejected_before_it_can_be_saved() {
-        for spec in ["http://1.1.1.1", "system,encrypted"] {
+        for spec in ["http://1.1.1.1", "system,encrypted", "auto,system"] {
             let error = Cli::try_parse_from(["http-proxy-cli", "--endpoint-dns", spec])
                 .err()
                 .unwrap_or_else(|| panic!("{spec} was accepted"));
