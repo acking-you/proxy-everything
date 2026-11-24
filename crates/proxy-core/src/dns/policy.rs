@@ -111,22 +111,11 @@ impl ParsePolicyError {
 }
 
 /// Carries a [`ParsePolicyError`] across an `io::Result` boundary.
-#[derive(Debug)]
+#[derive(Debug, Snafu)]
+#[snafu(display("{what}"))]
 struct PolicyIoError {
     what: &'static str,
     source: ParsePolicyError,
-}
-
-impl fmt::Display for PolicyIoError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.what)
-    }
-}
-
-impl std::error::Error for PolicyIoError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.source)
-    }
 }
 
 impl EndpointDnsPolicy {
