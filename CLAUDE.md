@@ -85,6 +85,7 @@ Application → Client(local:1080) → [AES-256-GCM] → Server(remote:1081) →
 | **Metrics** | `crates/proxy-core/src/metrics/mod.rs` | DashMap sharded storage, connection stats |
 | **Control** | `crates/proxy-core/src/control/` | Node discovery, metrics query API |
 | **Relay** | `crates/proxy-core/src/relay/` | Load balancing algorithms, relay configuration |
+| **Endpoint DNS** | `crates/proxy-core/src/dns/` | Pollution-resistant resolution of node and upstream-proxy hostnames |
 | **Protocol** | `crates/proxy-core/src/protocol/mod.rs` | Data frame format definitions |
 | **TUI** | `crates/proxy-tui/src/tui/` | Terminal UI for monitoring |
 | **App proxies** | `crates/proxy-ui-services/src/app_proxies/` | Per-app proxies without TUN (macOS/Windows desktop only) |
@@ -107,6 +108,7 @@ proxy-everything/
 │   │       ├── config/           # Configuration and runtime state
 │   │       ├── control/          # Control plane protocol
 │   │       ├── crypto/           # Configured crypto facade
+│   │       ├── dns/              # Endpoint DNS policy (DoH, injection detection)
 │   │       ├── geo/              # GeoIP lookup
 │   │       ├── metrics/          # Connection metrics
 │   │       ├── nodes/            # Node management
@@ -273,6 +275,7 @@ job actually takes.
 | `NONPROXY_KEYWORDS` | Domain keywords for direct connection | bilibili,baidu,taobao... |
 | `REVERSE_GEO_PROXY` | Reverse geo logic (CN=proxy, overseas=direct) | false |
 | `TURELY_PROXY_SERVER` | Transparent proxy chain target (ip:port) | - |
+| `ENDPOINT_DNS` | How node, relay-target and external-proxy hostnames are resolved: `auto` (DoH first), `system`, `encrypted`, `https://…`, `udp://IP`; a trailing `system` on a list allows a plaintext fallback. See `docs/endpoint-dns.md` | auto (`system` in `no-external-geo` builds) |
 
 Native client TCP, UDP, ICMP, control and probes always encrypt payloads.
 `NEED_CODEC_IP` and the old encryption switches no longer select a plaintext

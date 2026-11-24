@@ -20,6 +20,7 @@ pub mod control;
 pub mod crypto;
 pub mod datagram;
 pub mod diagnostics;
+pub mod dns;
 pub mod error;
 pub mod geo;
 pub mod metrics;

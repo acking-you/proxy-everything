@@ -231,7 +231,7 @@ impl TunBypassController {
             "preparing live TUN upstream switch"
         );
         let endpoint = proxy_core::upstream::UpstreamAddress::from_host(host, port)?;
-        let addresses = proxy_core::transport::resolve_host_addresses(&endpoint.host).await?;
+        let addresses = proxy_core::transport::resolve_endpoint_addresses(&endpoint.host).await?;
         tracing::info!(
             host,
             port,
@@ -877,6 +877,11 @@ async fn run_with_ready_inner(
     } else {
         resolve_remote_addresses(config.remote_endpoint.as_ref()).await?
     };
+    // From here to the end of the session tun2proxy answers this process's
+    // own port-53 traffic through its physical DNS relay, whatever server a
+    // query names. A platform VPN keeps this process's sockets off the tunnel
+    // instead, so nothing of the kind happens there.
+    let _dns_capture = (!platform_owned_tun).then(proxy_core::dns::PlaintextDnsCapture::begin);
     for address in &route_bypass {
         args.bypass.push(
             address
@@ -1026,13 +1031,27 @@ async fn validate_local_socks5_udp(local_port: u16) -> io::Result<()> {
 }
 
 async fn resolve_remote_addresses(endpoint: Option<&(String, u16)>) -> io::Result<Vec<IpAddr>> {
+    // tun2proxy answers a bypassed process's port-53 traffic with its own
+    // physical DNS relay, whatever server the query was addressed to.
+    if let Ok(policy) = proxy_core::transport::endpoint_dns()
+        && policy.has_plaintext_resolvers()
+    {
+        tracing::warn!(
+            %policy,
+            "udp:// endpoint resolvers are answered by the TUN's physical DNS relay while TUN \
+             is active; use https:// resolvers with TUN"
+        );
+    }
     let Some((host, port)) = endpoint else {
         return Ok(Vec::new());
     };
     let endpoint = proxy_core::upstream::UpstreamAddress::from_host(host, *port)?;
-    let addresses = tokio::net::lookup_host((endpoint.host.as_str(), endpoint.port))
+    // The bypass routes must cover the addresses the carriers dial, which
+    // come from the same endpoint cache.
+    let addresses = proxy_core::transport::resolve_endpoint_addresses(&endpoint.host)
         .await?
-        .map(|address| address.ip())
+        .iter()
+        .copied()
         .filter(|address| !address.is_loopback() && !address.is_unspecified())
         .collect::<IpSet<_>>()
         .into_iter()

@@ -12,6 +12,15 @@ server_port = 1081
 # Additional PEM trust anchor for private QUIC certificates (hostname is verified).
 # quic_ca = "/path/to/ca.pem"
 
+# [Optional] How server_host and upstream_proxy hostnames are resolved.
+# Defaults to ["auto"]: built-in DNS-over-HTTPS servers first, then the system
+# resolver unless forged answers are seen on the network path.
+# ["system"] uses the system resolver alone. A list is tried in order and
+# fails instead of falling back to system DNS unless it ends in "system":
+# "encrypted" is the built-in global DNS-over-HTTPS list, "https://..." your
+# own DoH server, "udp://IP" a plaintext resolver. See docs/endpoint-dns.md.
+# endpoint_dns = ["encrypted"]
+
 # Local client port (default: 7890)
 client_port = 7890
 

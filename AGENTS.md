@@ -17,7 +17,7 @@ to the [upstream revision](https://github.com/acking-you/agent-kit/blob/03de8037
 | Path | Contents |
 | --- | --- |
 | `crates/proxy-crypto` | Configuration-free crypto and generic v3 records |
-| `crates/proxy-core` | Wire format, sessions, TCP/QUIC carriers, codecs, config, relay, metrics, nodes, allocator |
+| `crates/proxy-core` | Wire format, sessions, TCP/QUIC carriers, codecs, config, relay, metrics, nodes, endpoint DNS, allocator |
 | `crates/proxy-client` | Local HTTP/HTTPS/SOCKS5 proxy, TUN integration, `http-proxy-cli` |
 | `crates/proxy-server` | Server, control plane, relay routing, managed SOCKS5, `http-proxy-admin` |
 | `crates/proxy-tui` | Terminal control-plane UI, `proxy-tui` |

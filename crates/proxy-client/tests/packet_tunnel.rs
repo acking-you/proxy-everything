@@ -181,6 +181,7 @@ fn packet_round_trips(with_echo: bool, auto_proxy: bool) {
                 tun_fake_ip: true,
                 tun_dns_server: proxy_client::client::tun::DEFAULT_TUN_DNS_SERVER,
                 reverse_geo: false,
+                endpoint_dns: None,
             },
             dir.0.join(format!("{protocol:?}-{}", endpoint.port())),
             tokio::runtime::Builder::new_multi_thread()
@@ -466,6 +467,7 @@ fn packet_round_trips(with_echo: bool, auto_proxy: bool) {
             tun_fake_ip: true,
             tun_dns_server: proxy_client::client::tun::DEFAULT_TUN_DNS_SERVER,
             reverse_geo: false,
+            endpoint_dns: None,
         },
         dir.0.join("rejected"),
         Runtime::new().unwrap(),

@@ -194,6 +194,14 @@ mod macos {
             )
         })?;
 
+        // Before anything resolves the remote endpoint: this process shares
+        // no state with the application, so it would use its own default.
+        if let Err(error) = apply_endpoint_dns(&config) {
+            let message = error.to_string();
+            send_event(&writer, HelperEvent::Failed { message }).await;
+            return Err(error);
+        }
+
         let shutdown_token = CancellationToken::new();
         install_signal_handlers(shutdown_token.clone());
 
@@ -340,6 +348,17 @@ mod macos {
                 None
             }
         }
+    }
+
+    /// Adopt the application's endpoint DNS policy. One that does not parse
+    /// ends the session rather than leaving the default in its place.
+    fn apply_endpoint_dns(config: &HelperConfig) -> io::Result<()> {
+        proxy_core::transport::apply_endpoint_dns(config.endpoint_dns.as_ref()).map_err(|error| {
+            error.into_io(
+                io::ErrorKind::InvalidData,
+                "the TUN configuration has an invalid endpoint DNS policy",
+            )
+        })
     }
 
     async fn build_tun_config(config: &HelperConfig) -> io::Result<TunConfig> {

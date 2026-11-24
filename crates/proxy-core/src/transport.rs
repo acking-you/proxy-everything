@@ -6,10 +6,13 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use arc_swap::ArcSwapOption;
 use base64::Engine;
+use futures::future::BoxFuture;
 use moka::sync::Cache;
 use snafu::{ResultExt, Snafu};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -21,33 +24,218 @@ use tokio_socks::tcp::Socks5Stream;
 const DNS_CACHE_CAPACITY: u64 = 4096;
 const DNS_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const DNS_TIMEOUT: Duration = Duration::from_secs(3);
+/// Budget for an endpoint policy's network resolvers. A listed policy's
+/// system fallback gets [`DNS_TIMEOUT`] on top; `auto` runs the system
+/// resolver alongside them, inside this budget.
+const ENDPOINT_DNS_TIMEOUT: Duration = Duration::from_secs(5);
+/// How much of its budget an `auto` lookup leaves unused, so that it reports
+/// why it failed before the budget's own timer cuts it off.
+const AUTO_DNS_MARGIN: Duration = Duration::from_millis(250);
+/// Lower bound on reusing a network resolver's endpoint answer, so a zero TTL
+/// does not cost a lookup per connection. [`DNS_CACHE_TTL`] is the upper one.
+const ENDPOINT_TTL_FLOOR: Duration = Duration::from_secs(30);
+const NEGATIVE_TTL_FLOOR: Duration = Duration::from_secs(5);
+const NEGATIVE_TTL_CEILING: Duration = Duration::from_secs(60);
 const DNS_REFRESH_FLOOR: Duration = Duration::from_secs(2);
 const EXTERNAL_PROXY_TIMEOUT: Duration = Duration::from_secs(15);
 const ADDRESS_STAGGER: Duration = Duration::from_millis(250);
 static DNS_SLOTS: Semaphore = Semaphore::const_new(8);
+/// Endpoint lookups through network resolvers, separate from [`DNS_SLOTS`]
+/// so stalled OS lookups cannot hold them.
+static ENDPOINT_DNS_SLOTS: Semaphore = Semaphore::const_new(8);
 
-struct DnsEntry {
-    addresses: Arc<[IpAddr]>,
-    refreshed: Instant,
+/// Which resolver policy a lookup follows. The two never share cache
+/// entries: a system answer for a destination must not satisfy an endpoint
+/// lookup whose policy demands an encrypted one.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum Purpose {
+    /// A host the client connects to itself, such as a direct-route site.
+    Destination,
+    /// A proxy node, relay target or external proxy; see [`crate::dns`].
+    Endpoint,
 }
 
-static DNS_LOOKUPS: LazyLock<Cache<String, Arc<Mutex<()>>>> =
+type DnsKey = (Purpose, String);
+
+struct DnsEntry {
+    /// Empty for a negative answer.
+    addresses: Arc<[IpAddr]>,
+    refreshed: Instant,
+    expires: Instant,
+    /// Generation of the endpoint policy that produced the entry; zero for
+    /// destinations.
+    generation: u64,
+}
+
+impl DnsEntry {
+    fn new(addresses: Vec<IpAddr>, ttl: Duration, generation: u64) -> Self {
+        let refreshed = Instant::now();
+        Self {
+            addresses: addresses.into(),
+            refreshed,
+            expires: refreshed + ttl,
+            generation,
+        }
+    }
+
+    fn serves(&self, generation: u64, refresh: bool) -> bool {
+        self.generation == generation
+            && Instant::now() < self.expires
+            && (!refresh || self.refreshed.elapsed() < DNS_REFRESH_FLOOR)
+    }
+
+    fn addresses(&self) -> std::io::Result<Arc<[IpAddr]>> {
+        if self.addresses.is_empty() {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no A or AAAA record",
+            ))
+        } else {
+            Ok(Arc::clone(&self.addresses))
+        }
+    }
+}
+
+static DNS_LOOKUPS: LazyLock<Cache<DnsKey, Arc<Mutex<()>>>> =
     LazyLock::new(|| Cache::builder().max_capacity(DNS_CACHE_CAPACITY).build());
 
-/// Bounded, expiring cache for system DNS results.
+/// Bounded, expiring cache for DNS results.
 ///
 /// Proxy endpoints can move during failover and users can change networks while
 /// the process remains alive. A permanent single-address cache made both cases
 /// fail until restart and allowed arbitrary destination names to grow memory
-/// without a limit.
-static DNS_CACHE: LazyLock<Cache<String, Arc<DnsEntry>>> = LazyLock::new(|| {
+/// without a limit. Entries also expire individually, by record TTL for
+/// endpoint answers from network resolvers.
+static DNS_CACHE: LazyLock<Cache<DnsKey, Arc<DnsEntry>>> = LazyLock::new(|| {
     Cache::builder()
         .max_capacity(DNS_CACHE_CAPACITY)
         .time_to_live(DNS_CACHE_TTL)
         .build()
 });
 
+/// The endpoint DNS policy in effect. The generation tells its cache entries
+/// apart from those an earlier policy produced.
+struct ActiveEndpointDns {
+    generation: u64,
+    policy: std::result::Result<EndpointDnsPolicy, ParsePolicyError>,
+}
+
+impl ActiveEndpointDns {
+    fn new(policy: std::result::Result<EndpointDnsPolicy, ParsePolicyError>) -> Self {
+        static GENERATION: AtomicU64 = AtomicU64::new(1);
+        Self {
+            generation: GENERATION.fetch_add(1, Ordering::Relaxed),
+            policy,
+        }
+    }
+}
+
+/// The policy from [`set_endpoint_dns`]. Until one is set, lookups use the
+/// `ENDPOINT_DNS` environment variable, read once on first use.
+static ENDPOINT_DNS: ArcSwapOption<ActiveEndpointDns> = ArcSwapOption::const_empty();
+
+fn active_endpoint_dns() -> Arc<ActiveEndpointDns> {
+    static FROM_ENV: LazyLock<Arc<ActiveEndpointDns>> = LazyLock::new(|| {
+        let policy = match endpoint_dns_from_env() {
+            Ok(Some(policy)) => {
+                announce_endpoint_dns(&policy, "ENDPOINT_DNS");
+                Ok(policy)
+            }
+            Ok(None) => {
+                let policy = EndpointDnsPolicy::default();
+                announce_endpoint_dns(&policy, "default");
+                Ok(policy)
+            }
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    "ENDPOINT_DNS is invalid; endpoint lookups fail until a valid policy is set"
+                );
+                Err(error)
+            }
+        };
+        Arc::new(ActiveEndpointDns::new(policy))
+    });
+    ENDPOINT_DNS
+        .load_full()
+        .unwrap_or_else(|| Arc::clone(&FROM_ENV))
+}
+
+/// The policy `ENDPOINT_DNS` names; `None` when it is unset or blank.
+fn endpoint_dns_from_env() -> std::result::Result<Option<EndpointDnsPolicy>, ParsePolicyError> {
+    match std::env::var("ENDPOINT_DNS") {
+        Ok(spec) if !spec.trim().is_empty() => spec.parse().map(Some),
+        Ok(_) | Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(ParsePolicyError::UnknownEntry {
+            entry: "<non-UTF-8 ENDPOINT_DNS>".to_owned(),
+        }),
+    }
+}
+
+/// What endpoint lookups consult besides the policy. Fixed for the life of
+/// the process; tests substitute loopback resolvers and their own hosts file.
+struct EndpointSources {
+    automatic: dns::Automatic,
+    hosts: std::path::PathBuf,
+}
+
+static ENDPOINT_SOURCES: LazyLock<EndpointSources> = LazyLock::new(|| EndpointSources {
+    automatic: dns::Automatic::builtin(|host| Box::pin(async move { system_lookup(&host).await })),
+    hosts: dns::hosts_path(),
+});
+
+fn announce_endpoint_dns(policy: &EndpointDnsPolicy, source: &'static str) {
+    if policy.has_experimental_queries() {
+        tracing::warn!(
+            %policy,
+            source,
+            "endpoint DNS uses the experimental two-question query shape; it is non-standard, \
+             easy to fingerprint and answered by few resolvers"
+        );
+    } else {
+        tracing::info!(%policy, source, "endpoint DNS policy in effect");
+    }
+}
+
+/// Sets how remote proxy endpoints are resolved from now on; see
+/// [`crate::dns`]. Answers cached under a different policy are not reused.
+pub fn set_endpoint_dns(policy: EndpointDnsPolicy) {
+    // A caller that sets its policy on every start keeps the cache while the
+    // policy stays the same.
+    let unchanged = ENDPOINT_DNS
+        .load()
+        .as_ref()
+        .is_some_and(|active| matches!(&active.policy, Ok(current) if *current == policy));
+    if unchanged {
+        return;
+    }
+    announce_endpoint_dns(&policy, "configuration");
+    ENDPOINT_DNS.store(Some(Arc::new(ActiveEndpointDns::new(Ok(policy)))));
+}
+
+/// Applies the policy a configuration carries. Without one, lookups go back
+/// to the `ENDPOINT_DNS` environment variable, else to
+/// [`EndpointDnsPolicy::default`]. A spec that does not parse changes nothing.
+pub fn apply_endpoint_dns(
+    spec: Option<&EndpointDnsSpec>,
+) -> std::result::Result<(), ParsePolicyError> {
+    match spec {
+        Some(spec) => set_endpoint_dns(spec.parse()?),
+        None => ENDPOINT_DNS.store(None),
+    }
+    Ok(())
+}
+
+/// The endpoint DNS policy in effect: the last [`set_endpoint_dns`], else the
+/// `ENDPOINT_DNS` environment variable, else [`EndpointDnsPolicy::default`].
+/// An invalid `ENDPOINT_DNS` is returned as the error, and endpoint lookups
+/// fail rather than fall back to another policy until a valid one is set.
+pub fn endpoint_dns() -> std::result::Result<EndpointDnsPolicy, ParsePolicyError> {
+    active_endpoint_dns().policy.clone()
+}
+
 use crate::config::runtime;
+use crate::dns::{self, EndpointDnsPolicy, EndpointDnsSpec, ParsePolicyError};
 use crate::relay::{ExternalProxyKind, ExternalProxyTarget};
 use crate::secure_transport::{ProxyStream, WireProtocol, connect_v3};
 use crate::{Aes256GcmCryption, ProxyHeader, ProxyTransport};
@@ -91,21 +279,37 @@ fn get_uri(host: &str, port: u16) -> String {
 }
 
 fn dns_cache_key(host: &str) -> String {
-    host.trim_end_matches('.').to_ascii_lowercase()
+    let host = host.trim_end_matches('.');
+    // Most hosts arrive already lowercase and without a trailing root.
+    if !host.is_empty() && host.bytes().all(|byte| !byte.is_ascii_uppercase()) {
+        host.to_owned()
+    } else {
+        host.to_ascii_lowercase()
+    }
 }
 
 /// Resolve all addresses for a host through the bounded process cache.
 pub async fn resolve_host_addresses(host: &str) -> std::io::Result<Arc<[IpAddr]>> {
-    resolve_addresses(host, false).await
+    resolve_addresses(host, false, Purpose::Destination).await
 }
 
-/// Re-resolve a host after every cached address failed, bypassing the cache
-/// unless it was refreshed moments ago.
-pub(crate) async fn refresh_host_addresses(host: &str) -> std::io::Result<Arc<[IpAddr]>> {
-    resolve_addresses(host, true).await
+/// Resolve a remote proxy endpoint, such as a node, relay target or external
+/// proxy, under the endpoint DNS policy and through the same bounded cache.
+pub async fn resolve_endpoint_addresses(host: &str) -> std::io::Result<Arc<[IpAddr]>> {
+    resolve_addresses(host, false, Purpose::Endpoint).await
 }
 
-async fn resolve_addresses(host: &str, refresh: bool) -> std::io::Result<Arc<[IpAddr]>> {
+/// Re-resolve an endpoint after every cached address failed, bypassing the
+/// cache unless it was refreshed moments ago.
+pub(crate) async fn refresh_endpoint_addresses(host: &str) -> std::io::Result<Arc<[IpAddr]>> {
+    resolve_addresses(host, true, Purpose::Endpoint).await
+}
+
+async fn resolve_addresses(
+    host: &str,
+    refresh: bool,
+    purpose: Purpose,
+) -> std::io::Result<Arc<[IpAddr]>> {
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(Arc::from([ip]));
     }
@@ -117,62 +321,209 @@ async fn resolve_addresses(host: &str, refresh: bool) -> std::io::Result<Arc<[Ip
             "DNS host is empty",
         ));
     }
-    let lookup = async {
-        let gate = DNS_LOOKUPS.get_with(cache_key.clone(), || Arc::new(Mutex::new(())));
-        let _guard = gate.lock().await;
-        if let Some(cached) = DNS_CACHE.get(&cache_key)
-            && (!refresh || cached.refreshed.elapsed() < DNS_REFRESH_FLOOR)
-        {
-            return Ok(Arc::clone(&cached.addresses));
+    match purpose {
+        Purpose::Destination => {
+            let key = (purpose, cache_key);
+            cached_lookup(key, 0, refresh, DNS_TIMEOUT, host, |_| {
+                Box::pin(async { Ok(DnsEntry::new(system_lookup(host).await?, DNS_CACHE_TTL, 0)) })
+            })
+            .await
         }
+        Purpose::Endpoint => {
+            let active = active_endpoint_dns();
+            resolve_endpoint(&active, &ENDPOINT_SOURCES, host, cache_key, refresh).await
+        }
+    }
+}
 
-        // The permit stays with the OS call even if the async waiter times out.
-        // Cancelling lookup_host itself otherwise leaves an unbounded blocking job.
-        let permit = DNS_SLOTS.acquire().await.map_err(std::io::Error::other)?;
-        let owned_host = host.to_owned();
-        let result = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            (owned_host.as_str(), 0)
-                .to_socket_addrs()
-                .map(|it| it.collect::<Vec<_>>())
-        })
-        .await
-        .map_err(std::io::Error::other)?;
-        let mut addresses = match result {
-            Ok(addresses) => addresses.into_iter().map(|address| address.ip()).collect(),
-            Err(error) => {
-                tracing::warn!(host, %error, "system DNS failed, falling back to secondary resolvers");
-                Vec::new()
-            }
-        };
-        if addresses.is_empty() {
-            addresses = uni_stream::addr::get_ip_addrs(host).await?;
-        }
-        let mut seen = HashSet::with_capacity(addresses.len());
-        addresses.retain(|address| seen.insert(*address));
-        if addresses.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "Empty DNS record",
-            ));
-        }
-
-        let addresses: Arc<[IpAddr]> = addresses.into();
-        DNS_CACHE.insert(
-            cache_key,
-            Arc::new(DnsEntry {
-                addresses: Arc::clone(&addresses),
-                refreshed: Instant::now(),
-            }),
-        );
-        tracing::debug!(host, ?addresses, "DNS resolved and cached");
-        Ok(addresses)
+async fn resolve_endpoint(
+    active: &ActiveEndpointDns,
+    sources: &EndpointSources,
+    host: &str,
+    cache_key: String,
+    refresh: bool,
+) -> std::io::Result<Arc<[IpAddr]>> {
+    let policy = active.policy.as_ref().map_err(|error| {
+        error
+            .clone()
+            .into_io(std::io::ErrorKind::InvalidInput, "invalid ENDPOINT_DNS")
+    })?;
+    let budget = if policy.is_system_only() {
+        DNS_TIMEOUT
+    } else if policy.has_system_fallback() && !policy.is_automatic() {
+        ENDPOINT_DNS_TIMEOUT + DNS_TIMEOUT
+    } else {
+        ENDPOINT_DNS_TIMEOUT
     };
-    tokio::time::timeout(DNS_TIMEOUT, lookup)
-        .await
-        .map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::TimedOut, "DNS lookup budget exhausted")
-        })?
+    let key = (Purpose::Endpoint, cache_key);
+    let generation = active.generation;
+    cached_lookup(key, generation, refresh, budget, host, |deadline| {
+        Box::pin(endpoint_entry(
+            policy, sources, generation, host, refresh, deadline,
+        ))
+    })
+    .await
+}
+
+/// Serves `key` from the cache, or runs `lookup` once for every concurrent
+/// caller and caches what it returns. The whole call is bounded by `budget`.
+///
+/// `lookup` is type-erased because connection futures embed this call:
+/// proving them `Send` through the resolver stack beneath it would exceed the
+/// compiler's auto-trait recursion limit.
+async fn cached_lookup<'a>(
+    key: DnsKey,
+    generation: u64,
+    refresh: bool,
+    budget: Duration,
+    host: &str,
+    lookup: impl FnOnce(Instant) -> BoxFuture<'a, std::io::Result<DnsEntry>>,
+) -> std::io::Result<Arc<[IpAddr]>> {
+    let deadline = Instant::now() + budget;
+    let work = async {
+        let gate = DNS_LOOKUPS.get_with(key.clone(), || Arc::new(Mutex::new(())));
+        let _guard = gate.lock().await;
+        if let Some(cached) = DNS_CACHE.get(&key)
+            && cached.serves(generation, refresh)
+        {
+            return cached.addresses();
+        }
+        let entry = Arc::new(lookup(deadline).await?);
+        tracing::debug!(host, purpose = ?key.0, addresses = ?entry.addresses, "DNS resolved and cached");
+        DNS_CACHE.insert(key, Arc::clone(&entry));
+        entry.addresses()
+    };
+    tokio::time::timeout_at(deadline, work).await.map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::TimedOut, "DNS lookup budget exhausted")
+    })?
+}
+
+/// Resolves an endpoint under `policy`. Listed network resolvers fail closed
+/// unless the policy ends in `system`; `auto` decides for itself when the
+/// system resolver's answer can be used. Every answer drops addresses no
+/// remote host can have, which sinkholes and some injectors use.
+async fn endpoint_entry(
+    policy: &EndpointDnsPolicy,
+    sources: &EndpointSources,
+    generation: u64,
+    host: &str,
+    refresh: bool,
+    deadline: Instant,
+) -> std::io::Result<DnsEntry> {
+    if policy.is_system_only() {
+        return system_entry(host, generation).await;
+    }
+    // A hosts entry is the user's own answer. It outranks the policy's
+    // resolvers as it outranks the platform's, and no network can forge it.
+    if let Some(addresses) = dns::hosts_addresses(&sources.hosts, &dns_cache_key(host)).await {
+        tracing::debug!(host, ?addresses, "endpoint pinned by the hosts file");
+        return Ok(DnsEntry::new(addresses, ENDPOINT_TTL_FLOOR, generation));
+    }
+    if policy.is_automatic() {
+        let _permit = ENDPOINT_DNS_SLOTS
+            .acquire()
+            .await
+            .map_err(std::io::Error::other)?;
+        let deadline = deadline.checked_sub(AUTO_DNS_MARGIN).unwrap_or(deadline);
+        return match sources.automatic.resolve(host, refresh, deadline).await {
+            Ok((addresses, ttl)) => {
+                let ttl = ttl.map_or(DNS_CACHE_TTL, |ttl| {
+                    ttl.clamp(ENDPOINT_TTL_FLOOR, DNS_CACHE_TTL)
+                });
+                Ok(DnsEntry::new(addresses, ttl, generation))
+            }
+            // Every caller that queued behind this lookup would only repeat
+            // it, against resolvers that are not this project's to load.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(DnsEntry::new(Vec::new(), NEGATIVE_TTL_FLOOR, generation))
+            }
+            Err(error) => Err(error),
+        };
+    }
+    let network_deadline = if policy.has_system_fallback() {
+        deadline.checked_sub(DNS_TIMEOUT).unwrap_or(deadline)
+    } else {
+        deadline
+    };
+    let resolved = {
+        let _permit = ENDPOINT_DNS_SLOTS
+            .acquire()
+            .await
+            .map_err(std::io::Error::other)?;
+        dns::resolve(policy, host, network_deadline).await
+    };
+    let error = match resolved {
+        Ok(dns::Resolution::Addresses { addresses, ttl }) => {
+            let ttl = ttl.clamp(ENDPOINT_TTL_FLOOR, DNS_CACHE_TTL);
+            return Ok(DnsEntry::new(addresses, ttl, generation));
+        }
+        Ok(dns::Resolution::Missing { ttl }) if !policy.has_system_fallback() => {
+            let ttl = ttl
+                .unwrap_or(NEGATIVE_TTL_CEILING)
+                .clamp(NEGATIVE_TTL_FLOOR, NEGATIVE_TTL_CEILING);
+            return Ok(DnsEntry::new(Vec::new(), ttl, generation));
+        }
+        Ok(dns::Resolution::Missing { .. }) => {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "no A or AAAA record")
+        }
+        Err(error) => error.into(),
+    };
+    if !policy.has_system_fallback() {
+        return Err(error);
+    }
+    tracing::warn!(
+        host,
+        %error,
+        "endpoint DNS resolvers failed; using the system resolver as the policy allows"
+    );
+    system_entry(host, generation).await
+}
+
+async fn system_entry(host: &str, generation: u64) -> std::io::Result<DnsEntry> {
+    let mut addresses = system_lookup(host).await?;
+    addresses.retain(|address| dns::is_routable_endpoint(*address));
+    if addresses.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            "the system resolver returned only addresses no remote endpoint can have",
+        ));
+    }
+    Ok(DnsEntry::new(addresses, DNS_CACHE_TTL, generation))
+}
+
+/// The platform resolver, then the secondary resolvers when it fails.
+async fn system_lookup(host: &str) -> std::io::Result<Vec<IpAddr>> {
+    // The permit stays with the OS call even if the async waiter times out.
+    // Cancelling lookup_host itself otherwise leaves an unbounded blocking job.
+    let permit = DNS_SLOTS.acquire().await.map_err(std::io::Error::other)?;
+    let owned_host = host.to_owned();
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        (owned_host.as_str(), 0)
+            .to_socket_addrs()
+            .map(|it| it.collect::<Vec<_>>())
+    })
+    .await
+    .map_err(std::io::Error::other)?;
+    let mut addresses = match result {
+        Ok(addresses) => addresses.into_iter().map(|address| address.ip()).collect(),
+        Err(error) => {
+            tracing::warn!(host, %error, "system DNS failed, falling back to secondary resolvers");
+            Vec::new()
+        }
+    };
+    if addresses.is_empty() {
+        addresses = uni_stream::addr::get_ip_addrs(host).await?;
+    }
+    let mut seen = HashSet::with_capacity(addresses.len());
+    addresses.retain(|address| seen.insert(*address));
+    if addresses.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Empty DNS record",
+        ));
+    }
+    Ok(addresses)
 }
 
 /// Resolves a hostname to the first currently preferred IP address.
@@ -189,14 +540,28 @@ pub async fn resolve_host(host: &str) -> std::io::Result<IpAddr> {
 /// fail. Dropping this future cancels all outstanding sockets. A caller's
 /// protocol handshake deadline must not truncate TCP's SYN retransmissions.
 pub async fn connect_tcp_host(host: &str, port: u16) -> std::io::Result<TcpStream> {
+    connect_tcp_resolved(host, port, Purpose::Destination).await
+}
+
+/// [`connect_tcp_host`] for a remote proxy endpoint, whose name is resolved
+/// under the endpoint DNS policy.
+pub async fn connect_tcp_endpoint(host: &str, port: u16) -> std::io::Result<TcpStream> {
+    connect_tcp_resolved(host, port, Purpose::Endpoint).await
+}
+
+async fn connect_tcp_resolved(
+    host: &str,
+    port: u16,
+    purpose: Purpose,
+) -> std::io::Result<TcpStream> {
     crate::diagnostics::phase("resolve");
-    let addresses = resolve_host_addresses(host).await?;
+    let addresses = resolve_addresses(host, false, purpose).await?;
     crate::diagnostics::phase("tcp_connect");
     match connect_tcp_addresses(&addresses, port).await {
         Ok(stream) => Ok(stream),
         Err(error) if host.parse::<IpAddr>().is_err() => {
             crate::diagnostics::phase("resolve_refresh");
-            let refreshed = refresh_host_addresses(host).await?;
+            let refreshed = resolve_addresses(host, true, purpose).await?;
             if refreshed == addresses {
                 return Err(error);
             }
@@ -293,6 +658,21 @@ where
 #[inline]
 pub async fn get_tcp_stream(host: &str, port: u16, detail: &'static str) -> Result<TcpStream> {
     connect_tcp_host(host, port)
+        .await
+        .with_context(|_| IoSnafu {
+            uri: Some(format!("TcpStream({}:{})", host, port)),
+            detail,
+        })
+}
+
+/// [`get_tcp_stream`] for a remote proxy endpoint, such as an external
+/// upstream proxy, whose name is resolved under the endpoint DNS policy.
+pub async fn get_tcp_endpoint_stream(
+    host: &str,
+    port: u16,
+    detail: &'static str,
+) -> Result<TcpStream> {
+    connect_tcp_endpoint(host, port)
         .await
         .with_context(|_| IoSnafu {
             uri: Some(format!("TcpStream({}:{})", host, port)),
@@ -474,7 +854,7 @@ pub async fn get_tcp_external_proxy_stream(
     port: u16,
     detail: &'static str,
 ) -> Result<TcpStream> {
-    let stream = get_tcp_stream(proxy.host.as_str(), proxy.port, detail).await?;
+    let stream = get_tcp_endpoint_stream(proxy.host.as_str(), proxy.port, detail).await?;
     tokio::time::timeout(
         EXTERNAL_PROXY_TIMEOUT,
         negotiate_external_proxy(stream, proxy, host, port, detail),
@@ -639,18 +1019,357 @@ pub async fn get_upstream_stream(
 
 #[cfg(test)]
 mod tests {
+    use std::io::ErrorKind;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
+    use hickory_proto::op::{Message, ResponseCode};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::Mutex;
 
     use super::*;
+    use crate::dns::testing::{
+        Scope, addresses_reply_to, fake_https_resolver, fake_udp_resolver, loopback_automatic,
+        response_to_request,
+    };
     use crate::relay::ExternalProxyTarget;
 
     #[test]
     fn dns_cache_keys_are_case_and_root_dot_insensitive() {
         assert_eq!(dns_cache_key("Example.COM."), "example.com");
+    }
+
+    fn ip(address: &str) -> IpAddr {
+        address.parse().unwrap()
+    }
+
+    fn no_platform_answer(_host: String) -> BoxFuture<'static, std::io::Result<Vec<IpAddr>>> {
+        Box::pin(async { Err(std::io::ErrorKind::NotFound.into()) })
+    }
+
+    /// A platform resolver that places every name inside the mainland.
+    fn domestic_platform_answer(_host: String) -> BoxFuture<'static, std::io::Result<Vec<IpAddr>>> {
+        Box::pin(async { Ok(vec![IpAddr::from([119, 29, 29, 29])]) })
+    }
+
+    /// A hosts file that is removed when the test ends, however it ends.
+    struct HostsFile(std::path::PathBuf);
+
+    impl HostsFile {
+        fn with(test: &str, content: &str) -> Self {
+            let name = format!("proxy-core-{}-{test}.hosts", std::process::id());
+            let path = std::env::temp_dir().join(name);
+            std::fs::write(&path, content).unwrap();
+            Self(path)
+        }
+
+        fn missing() -> std::path::PathBuf {
+            std::env::temp_dir().join("proxy-core-tests-have-no-such-hosts-file")
+        }
+    }
+
+    impl Drop for HostsFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// The `auto` policy over the given loopback resolvers and platform
+    /// resolver, with no witnesses and no hosts file.
+    fn automatic_sources(
+        resolvers: &[(SocketAddr, Scope)],
+        system: dns::SystemResolver,
+    ) -> EndpointSources {
+        EndpointSources {
+            automatic: loopback_automatic(resolvers, &[], system),
+            hosts: HostsFile::missing(),
+        }
+    }
+
+    fn automatic() -> ActiveEndpointDns {
+        ActiveEndpointDns::new(Ok(EndpointDnsPolicy::auto()))
+    }
+
+    /// How long the cached endpoint entry for `host` is good for.
+    fn cached_for(host: &str) -> Duration {
+        let entry = DNS_CACHE
+            .get(&(Purpose::Endpoint, dns_cache_key(host)))
+            .unwrap();
+        entry.expires - entry.refreshed
+    }
+
+    /// A policy of one loopback resolver, held locally so tests never change
+    /// the process-wide policy.
+    fn udp_policy(server: SocketAddr, system_fallback: bool) -> ActiveEndpointDns {
+        let mut entries = vec![format!("udp://{server}")];
+        if system_fallback {
+            entries.push("system".to_owned());
+        }
+        ActiveEndpointDns::new(Ok(EndpointDnsPolicy::from_entries(entries).unwrap()))
+    }
+
+    /// A loopback resolver answering every query with `reply`, and the number
+    /// of queries it has received.
+    async fn counting_resolver(
+        reply: impl Fn(&[u8]) -> Vec<u8> + Send + 'static,
+    ) -> (SocketAddr, Arc<AtomicUsize>) {
+        let queries = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&queries);
+        let server = fake_udp_resolver(move |_, request| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            vec![reply(request)]
+        })
+        .await;
+        (server, queries)
+    }
+
+    fn rcode_reply(code: ResponseCode) -> impl Fn(&[u8]) -> Vec<u8> {
+        move |request| {
+            response_to_request(request, code, Vec::new())
+                .to_vec()
+                .unwrap()
+        }
+    }
+
+    async fn resolve_from(
+        active: &ActiveEndpointDns,
+        sources: &EndpointSources,
+        host: &str,
+    ) -> std::io::Result<Arc<[IpAddr]>> {
+        resolve_endpoint(active, sources, host, dns_cache_key(host), false).await
+    }
+
+    /// Resolves under a policy that names its own resolvers, with nothing
+    /// else to consult.
+    async fn resolve_under(
+        active: &ActiveEndpointDns,
+        host: &str,
+    ) -> std::io::Result<Arc<[IpAddr]>> {
+        let sources = automatic_sources(&[], no_platform_answer);
+        resolve_from(active, &sources, host).await
+    }
+
+    #[tokio::test]
+    async fn the_automatic_policy_caches_an_authenticated_answer_for_its_record_ttl() {
+        const HOST: &str = "automatic.endpoint-dns.example.net";
+        let address = ip("203.0.113.51");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&requests);
+        let resolver = fake_https_resolver(move |request| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            let mut reply = Message::from_vec(&addresses_reply_to(request, &[address])).unwrap();
+            for record in &mut reply.answers {
+                record.ttl = 90;
+            }
+            reply.to_vec().unwrap()
+        })
+        .await;
+        let sources = automatic_sources(&[(resolver, Scope::Global)], no_platform_answer);
+        let active = automatic();
+
+        assert_eq!(
+            *resolve_from(&active, &sources, HOST).await.unwrap(),
+            [address]
+        );
+        assert_eq!(cached_for(HOST), Duration::from_secs(90));
+        assert_eq!(
+            *resolve_from(&active, &sources, HOST).await.unwrap(),
+            [address]
+        );
+        // One A and one AAAA query; the cache served the second lookup.
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn the_automatic_policy_falls_back_to_the_platform_resolver_without_a_record_ttl() {
+        const HOST: &str = "fallback.endpoint-dns.example.net";
+        let resolver = fake_https_resolver(rcode_reply(ResponseCode::ServFail)).await;
+        let sources = automatic_sources(&[(resolver, Scope::Global)], domestic_platform_answer);
+        assert_eq!(
+            *resolve_from(&automatic(), &sources, HOST).await.unwrap(),
+            [ip("119.29.29.29")]
+        );
+        assert_eq!(cached_for(HOST), DNS_CACHE_TTL);
+    }
+
+    #[tokio::test]
+    async fn the_automatic_policy_remembers_briefly_that_a_name_has_no_address() {
+        const HOST: &str = "absent.endpoint-dns.example.net";
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&requests);
+        let nxdomain = rcode_reply(ResponseCode::NXDomain);
+        let resolver = fake_https_resolver(move |request| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            nxdomain(request)
+        })
+        .await;
+        let sources = automatic_sources(&[(resolver, Scope::Global)], no_platform_answer);
+        let active = automatic();
+
+        for _ in 0..2 {
+            let error = resolve_from(&active, &sources, HOST).await.unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::NotFound);
+        }
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert_eq!(cached_for(HOST), NEGATIVE_TTL_FLOOR);
+    }
+
+    #[tokio::test]
+    async fn a_hosts_entry_outranks_the_resolvers_of_every_policy_but_system() {
+        const HOST: &str = "Pinned.Endpoint-DNS.example.net.";
+        let pinned = ip("203.0.113.60");
+        let hosts = HostsFile::with(
+            "pinned",
+            "# the node\n203.0.113.60 pinned.endpoint-dns.example.net node\n",
+        );
+        let elsewhere = ip("203.0.113.61");
+        let (udp, udp_queries) =
+            counting_resolver(move |request| addresses_reply_to(request, &[elsewhere])).await;
+        let https_requests = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&https_requests);
+        let https = fake_https_resolver(move |request| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            addresses_reply_to(request, &[elsewhere])
+        })
+        .await;
+        let sources = EndpointSources {
+            automatic: loopback_automatic(&[(https, Scope::Global)], &[], no_platform_answer),
+            hosts: hosts.0.clone(),
+        };
+
+        for active in [automatic(), udp_policy(udp, false), udp_policy(udp, true)] {
+            assert_eq!(
+                *resolve_from(&active, &sources, HOST).await.unwrap(),
+                [pinned]
+            );
+            assert_eq!(cached_for(HOST), ENDPOINT_TTL_FLOOR);
+        }
+        assert_eq!(udp_queries.load(Ordering::SeqCst), 0);
+        assert_eq!(https_requests.load(Ordering::SeqCst), 0);
+
+        // A name the file does not pin is resolved as the policy says.
+        assert_eq!(
+            *resolve_from(&automatic(), &sources, "other.endpoint-dns.example.net")
+                .await
+                .unwrap(),
+            [elsewhere]
+        );
+    }
+
+    #[tokio::test]
+    async fn endpoint_answers_are_cached_per_policy_generation() {
+        const HOST: &str = "generation.endpoint-dns.test";
+        let (first_address, second_address) = (ip("203.0.113.41"), ip("203.0.113.42"));
+        let (first, first_queries) =
+            counting_resolver(move |request| addresses_reply_to(request, &[first_address])).await;
+        let (second, _) =
+            counting_resolver(move |request| addresses_reply_to(request, &[second_address])).await;
+        let (first, second) = (udp_policy(first, false), udp_policy(second, false));
+
+        assert_eq!(*resolve_under(&first, HOST).await.unwrap(), [first_address]);
+        let asked = first_queries.load(Ordering::SeqCst);
+        assert_eq!(*resolve_under(&first, HOST).await.unwrap(), [first_address]);
+        assert_eq!(first_queries.load(Ordering::SeqCst), asked);
+        assert_eq!(
+            *resolve_under(&second, HOST).await.unwrap(),
+            [second_address]
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_endpoint_lookups_share_one_resolution() {
+        const HOST: &str = "concurrent.endpoint-dns.test";
+        let address = ip("203.0.113.44");
+        let (server, queries) =
+            counting_resolver(move |request| addresses_reply_to(request, &[address])).await;
+        let active = udp_policy(server, false);
+        let lookups = futures::future::join_all((0..4).map(|_| resolve_under(&active, HOST))).await;
+        for addresses in lookups {
+            assert_eq!(*addresses.unwrap(), [address]);
+        }
+        // One A and one AAAA query, however many callers waited.
+        assert_eq!(queries.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn endpoint_resolvers_fail_closed_unless_the_policy_ends_in_system() {
+        let (servfail, _) = counting_resolver(rcode_reply(ResponseCode::ServFail)).await;
+
+        let error = resolve_under(&udp_policy(servfail, false), "localhost")
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Other);
+        assert!(
+            error.to_string().contains(&format!("udp://{servfail}")),
+            "{error}"
+        );
+
+        let addresses = resolve_under(&udp_policy(servfail, true), "localhost")
+            .await
+            .unwrap();
+        assert!(!addresses.is_empty());
+        assert!(addresses.iter().all(IpAddr::is_loopback), "{addresses:?}");
+    }
+
+    #[tokio::test]
+    async fn missing_endpoints_are_cached_briefly_without_a_fallback() {
+        const HOST: &str = "missing.endpoint-dns.test";
+        let (server, queries) = counting_resolver(rcode_reply(ResponseCode::NXDomain)).await;
+        let active = udp_policy(server, false);
+
+        let error = resolve_under(&active, HOST).await.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::NotFound);
+        let asked = queries.load(Ordering::SeqCst);
+        let error = resolve_under(&active, HOST).await.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::NotFound);
+        assert_eq!(queries.load(Ordering::SeqCst), asked);
+    }
+
+    #[tokio::test]
+    async fn sinkhole_only_endpoint_answers_fail_closed() {
+        let (server, _) = counting_resolver(|request| {
+            addresses_reply_to(request, &[IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)])
+        })
+        .await;
+        let error = resolve_under(&udp_policy(server, false), "sinkhole.endpoint-dns.test")
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("only addresses no remote endpoint can have"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn destination_lookups_never_serve_endpoint_answers() {
+        let system = resolve_host_addresses("localhost").await.unwrap();
+        let address = ip("203.0.113.43");
+        let (server, _) =
+            counting_resolver(move |request| addresses_reply_to(request, &[address])).await;
+
+        let endpoint = resolve_under(&udp_policy(server, false), "localhost")
+            .await
+            .unwrap();
+        assert_eq!(*endpoint, [address]);
+        assert_eq!(resolve_host_addresses("localhost").await.unwrap(), system);
+    }
+
+    #[tokio::test]
+    async fn an_invalid_policy_fails_endpoint_lookups_instead_of_using_the_system_resolver() {
+        let active = ActiveEndpointDns::new(Err(ParsePolicyError::Empty));
+        let error = resolve_under(&active, "localhost").await.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert_eq!(error.to_string(), "invalid ENDPOINT_DNS");
+        assert!(
+            error
+                .get_ref()
+                .and_then(std::error::Error::source)
+                .is_some_and(|source| source.is::<ParsePolicyError>()),
+            "{error:?}"
+        );
     }
 
     #[tokio::test]

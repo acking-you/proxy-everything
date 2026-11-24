@@ -287,6 +287,22 @@ pub async fn get_tcp_stream(host: &str, port: u16, detail: &'static str) -> Resu
         })
 }
 
+/// [`get_tcp_stream`] for an external upstream proxy, whose name is resolved
+/// under the endpoint DNS policy like a native node's.
+pub async fn get_endpoint_stream(
+    host: &str,
+    port: u16,
+    detail: &'static str,
+) -> Result<ProxyStream> {
+    proxy_core::transport::connect_tcp_endpoint(host, port)
+        .await
+        .map(Into::into)
+        .with_context(|_| IoSnafu {
+            uri: Some(format!("TcpStream({}:{})", host, port)),
+            detail,
+        })
+}
+
 pub(super) async fn connect_native(
     host: &str,
     port: u16,

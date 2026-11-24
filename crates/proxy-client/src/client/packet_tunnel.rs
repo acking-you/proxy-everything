@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use proxy_core::dns::EndpointDnsSpec;
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpListener;
@@ -45,6 +46,11 @@ pub struct PacketTunnelConfig {
     pub tun_dns_server: std::net::IpAddr,
     #[serde(default)]
     pub reverse_geo: bool,
+    /// How this process resolves the server's hostname. Without one, as in
+    /// every configuration saved before the field existed, the build's
+    /// default policy applies.
+    #[serde(default)]
+    pub endpoint_dns: Option<EndpointDnsSpec>,
 }
 
 fn default_true() -> bool {
@@ -183,6 +189,11 @@ impl PacketTunnelRuntime {
         runtime: Runtime,
     ) -> io::Result<Self> {
         config.validate()?;
+        // Before the first lookup of the server's name, which the readiness
+        // check below can be.
+        proxy_core::transport::apply_endpoint_dns(config.endpoint_dns.as_ref()).map_err(
+            |error| error.into_io(io::ErrorKind::InvalidInput, "invalid endpoint DNS policy"),
+        )?;
         super::tun::install_tun_log_bridge();
         let listener = runtime.block_on(TcpListener::bind(("127.0.0.1", config.local_port)))?;
         let local_port = listener.local_addr()?.port();
@@ -430,6 +441,52 @@ mod tests {
         let current: PacketTunnelConfig = serde_json::from_value(value).unwrap();
         assert!(!current.tun_fake_ip);
         assert_eq!(current.tun_dns_server.to_string(), "10.20.30.53");
+    }
+
+    #[test]
+    fn the_endpoint_dns_policy_is_optional_and_given_as_text_or_entries() {
+        let mut value =
+            serde_json::json!({"serverHost": "proxy.test", "serverPort": 1081, "localPort": 0});
+        let old: PacketTunnelConfig = serde_json::from_value(value.clone()).unwrap();
+        assert!(old.endpoint_dns.is_none());
+
+        for policy in [
+            serde_json::json!("encrypted,system"),
+            serde_json::json!(["encrypted", "system"]),
+        ] {
+            value["endpointDns"] = policy;
+            let config: PacketTunnelConfig = serde_json::from_value(value.clone()).unwrap();
+            let policy = config.endpoint_dns.unwrap().parse().unwrap();
+            assert!(policy.has_system_fallback());
+            assert!(!policy.is_automatic());
+        }
+    }
+
+    #[test]
+    fn an_invalid_endpoint_dns_policy_stops_the_tunnel_before_it_starts() {
+        let config: PacketTunnelConfig = serde_json::from_value(serde_json::json!({
+            "serverHost": "proxy.test", "serverPort": 1081, "localPort": 0,
+            "endpointDns": "system,encrypted",
+        }))
+        .unwrap();
+        let before = proxy_core::transport::endpoint_dns();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let error = PacketTunnelRuntime::start(config, std::env::temp_dir(), runtime)
+            .err()
+            .expect("the tunnel started");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(error.to_string(), "invalid endpoint DNS policy");
+        assert!(
+            error
+                .get_ref()
+                .and_then(std::error::Error::source)
+                .is_some_and(|source| source.is::<proxy_core::dns::ParsePolicyError>()),
+            "{error:?}"
+        );
+        assert_eq!(proxy_core::transport::endpoint_dns(), before);
     }
 
     fn ipv4(marker: u8) -> Vec<u8> {

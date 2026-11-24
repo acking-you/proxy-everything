@@ -5,6 +5,7 @@ use std::ffi::{CStr, CString, c_char};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use proxy_core::dns::{EndpointDnsPolicy, EndpointDnsSpec, ParsePolicyError};
 use proxy_core::util::error_report;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -85,6 +86,7 @@ enum Request {
         id: u64,
     },
     Processes,
+    EndpointDns(EndpointDnsRequest),
     #[cfg(all(
         any(target_os = "macos", target_os = "windows"),
         not(feature = "mac-app-store")
@@ -116,6 +118,53 @@ struct StartConfig {
     secure_transport: bool,
     set_system_proxy: bool,
     allow_lan: bool,
+    /// How node hostnames are resolved: the text form, or its entries. A UI
+    /// that sends none leaves the choice to `ENDPOINT_DNS`, else the default.
+    #[serde(default)]
+    endpoint_dns: Option<EndpointDnsSpec>,
+}
+
+/// Reads or changes how node hostnames are resolved, as `{"action": ...}`.
+/// The policy is the process's, not a handle's: node lists, latency tests and
+/// probes resolve under it too, before any proxy is started.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+enum EndpointDnsRequest {
+    Get,
+    /// Reports what `policy` would be, without applying it.
+    Check {
+        policy: EndpointDnsSpec,
+    },
+    /// Without a policy, goes back to `ENDPOINT_DNS`, else the default.
+    Set {
+        #[serde(default)]
+        policy: Option<EndpointDnsSpec>,
+    },
+}
+
+/// `{"policy", "automatic", "systemOnly", "systemFallback"}`. `policy` is
+/// the display form, which leaves out resolver URL paths and query strings:
+/// what the UI stored is the only copy of a token in them.
+fn describe_endpoint_dns(policy: &EndpointDnsPolicy) -> Value {
+    json!({
+        "policy": policy.to_string(),
+        "automatic": policy.is_automatic(),
+        "systemOnly": policy.is_system_only(),
+        "systemFallback": policy.has_system_fallback(),
+    })
+}
+
+fn endpoint_dns(request: EndpointDnsRequest) -> Result<Value, String> {
+    let invalid = |error: ParsePolicyError| format!("Invalid endpoint DNS policy: {error}");
+    let policy = match request {
+        EndpointDnsRequest::Check { policy } => policy.parse().map_err(invalid)?,
+        EndpointDnsRequest::Set { policy } => {
+            proxy_core::transport::apply_endpoint_dns(policy.as_ref()).map_err(invalid)?;
+            proxy_core::transport::endpoint_dns().map_err(invalid)?
+        }
+        EndpointDnsRequest::Get => proxy_core::transport::endpoint_dns().map_err(invalid)?,
+    };
+    Ok(describe_endpoint_dns(&policy))
 }
 
 impl Request {
@@ -141,6 +190,7 @@ impl Request {
                 | Self::StartSubscription { .. }
                 | Self::StopSubscription { .. }
                 | Self::Processes
+                | Self::EndpointDns(_)
         )
     }
 }
@@ -275,6 +325,10 @@ fn execute(handle: *mut ProxyHandle, request: Request) -> Result<Value, String> 
     let code = unsafe {
         match request {
             Request::Start { config } => {
+                // Before the proxy can dial the node. An invalid policy fails
+                // the start instead of leaving another one in effect.
+                proxy_core::transport::apply_endpoint_dns(config.endpoint_dns.as_ref())
+                    .map_err(|error| format!("Invalid endpoint DNS policy: {error}"))?;
                 let host = string(config.server_host)?;
                 let key = optional(config.session_key)?;
                 let directory = string(config.cache_directory)?;
@@ -511,6 +565,7 @@ fn execute(handle: *mut ProxyHandle, request: Request) -> Result<Value, String> 
                 not(feature = "mac-app-store")
             ))]
             Request::AppProxies(request) => return crate::app_proxies::execute(request),
+            Request::EndpointDns(request) => return endpoint_dns(request),
             Request::Processes => {
                 if cfg!(feature = "network-extension") {
                     return Ok(json!({"processes": []}));
@@ -691,6 +746,151 @@ mod tests {
                 "action": "delete_everything",
             }))
             .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod endpoint_dns_tests {
+    use super::*;
+
+    #[test]
+    fn the_endpoint_dns_operation_parses_and_does_not_borrow_a_handle() {
+        let get: Request =
+            serde_json::from_value(json!({"operation": "endpoint_dns", "action": "get"})).unwrap();
+        assert!(!get.borrows_handle());
+        assert!(matches!(get, Request::EndpointDns(EndpointDnsRequest::Get)));
+
+        let check: Request = serde_json::from_value(json!({
+            "operation": "endpoint_dns",
+            "action": "check",
+            "policy": "encrypted,system",
+        }))
+        .unwrap();
+        let Request::EndpointDns(EndpointDnsRequest::Check { policy }) = check else {
+            panic!("expected check");
+        };
+        assert_eq!(policy.parse().unwrap(), "encrypted,system".parse().unwrap());
+
+        let set: Request = serde_json::from_value(json!({
+            "operation": "endpoint_dns",
+            "action": "set",
+            "policy": ["auto"],
+        }))
+        .unwrap();
+        let Request::EndpointDns(EndpointDnsRequest::Set {
+            policy: Some(policy),
+        }) = set
+        else {
+            panic!("expected set with a policy");
+        };
+        assert_eq!(policy.parse().unwrap(), EndpointDnsPolicy::auto());
+
+        let clear: Request =
+            serde_json::from_value(json!({"operation": "endpoint_dns", "action": "set"})).unwrap();
+        assert!(matches!(
+            clear,
+            Request::EndpointDns(EndpointDnsRequest::Set { policy: None })
+        ));
+
+        assert!(
+            serde_json::from_value::<Request>(json!({
+                "operation": "endpoint_dns",
+                "action": "rotate",
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn start_keeps_endpoint_dns_optional_and_accepts_text_or_entries() {
+        let mut body = json!({
+            "operation": "start",
+            "config": {
+                "server_host": "proxy.test",
+                "server_port": 1081,
+                "local_port": 1080,
+                "cache_directory": "/tmp",
+                "auto_proxy": false,
+                "udp_enabled": true,
+                "udp_direct_fallback": true,
+                "tun_enabled": false,
+                "tun_fake_ip": false,
+                "tun_dns_server": "223.5.5.5",
+                "tun_bypass_processes": [],
+                "reverse_geo": false,
+                "secure_transport": false,
+                "set_system_proxy": false,
+                "allow_lan": false,
+            },
+        });
+        let Request::Start { config } = serde_json::from_value(body.clone()).unwrap() else {
+            panic!("not a start request");
+        };
+        assert!(config.endpoint_dns.is_none());
+
+        body["config"]["endpoint_dns"] = json!("encrypted");
+        let Request::Start { config } = serde_json::from_value(body.clone()).unwrap() else {
+            panic!("not a start request");
+        };
+        assert_eq!(
+            config.endpoint_dns.unwrap().parse().unwrap(),
+            EndpointDnsPolicy::encrypted()
+        );
+
+        body["config"]["endpoint_dns"] = json!(["https://doh.example/q?token=a,b", "system"]);
+        let Request::Start { config } = serde_json::from_value(body).unwrap() else {
+            panic!("not a start request");
+        };
+        let policy = config.endpoint_dns.unwrap().parse().unwrap();
+        assert!(policy.has_system_fallback());
+        assert!(!policy.has_plaintext_resolvers());
+        assert!(!policy.is_automatic());
+    }
+
+    #[test]
+    fn check_reports_a_policy_without_applying_it_and_set_replaces_it() {
+        let before = proxy_core::transport::endpoint_dns().unwrap();
+        struct Restore(EndpointDnsPolicy);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                proxy_core::transport::set_endpoint_dns(self.0.clone());
+            }
+        }
+        let _restore = Restore(before.clone());
+
+        let checked = endpoint_dns(EndpointDnsRequest::Check {
+            policy: EndpointDnsSpec::Text("encrypted,system".into()),
+        })
+        .unwrap();
+        assert_eq!(checked["automatic"], false);
+        assert_eq!(checked["systemOnly"], false);
+        assert_eq!(checked["systemFallback"], true);
+        assert!(checked["policy"].as_str().unwrap().ends_with(",system"));
+        assert_eq!(proxy_core::transport::endpoint_dns().unwrap(), before);
+
+        let set = endpoint_dns(EndpointDnsRequest::Set {
+            policy: Some(EndpointDnsSpec::Entries(vec!["auto".into()])),
+        })
+        .unwrap();
+        assert_eq!(set["automatic"], true);
+        assert_eq!(
+            proxy_core::transport::endpoint_dns().unwrap(),
+            EndpointDnsPolicy::auto()
+        );
+        assert_eq!(
+            endpoint_dns(EndpointDnsRequest::Get).unwrap()["policy"],
+            "auto"
+        );
+
+        let error = endpoint_dns(EndpointDnsRequest::Set {
+            policy: Some(EndpointDnsSpec::Text("system,encrypted".into())),
+        })
+        .unwrap_err();
+        assert!(error.starts_with("Invalid endpoint DNS policy:"), "{error}");
+        assert_eq!(
+            proxy_core::transport::endpoint_dns().unwrap(),
+            EndpointDnsPolicy::auto()
         );
     }
 }

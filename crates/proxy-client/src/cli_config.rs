@@ -24,6 +24,11 @@ pub struct Config {
     pub controller_nodes: std::collections::BTreeMap<crate::site_rules::NodeId, Vec<String>>,
     pub transport: Option<String>,
     pub quic_ca: Option<PathBuf>,
+    /// How node and upstream-proxy hostnames are resolved: `auto` or `system`
+    /// alone, or a list of `encrypted`, `https://` DoH URLs and `udp://`
+    /// resolver addresses with an optional trailing `system` fallback. Missing
+    /// values use `ENDPOINT_DNS`, then the build's default policy.
+    pub endpoint_dns: Option<Vec<String>>,
     pub server_port: Option<u16>,
     pub client_port: Option<u16>,
     /// Address bound by the local client listener. Missing values default to 0.0.0.0.
