@@ -11,10 +11,14 @@
 //! [`EndpointDnsPolicy`] chooses the resolvers for exactly those lookups.
 //! DNS-over-HTTPS authenticates the answer. Plaintext UDP resolvers get a
 //! check that discards racing forged responses, and may opt into the paper's
-//! two-question query shape. Destination lookups are unaffected. See
-//! `docs/endpoint-dns.md` for the threat model and its limits.
+//! two-question query shape. The default, `auto`, combines them: built-in
+//! DNS-over-HTTPS servers first, and the platform resolver only while no
+//! forged answer is seen on the path. Destination lookups are unaffected.
+//! See `docs/endpoint-dns.md` for the threat model and its limits.
 
+mod auto;
 mod doh;
+mod local;
 mod policy;
 mod udp;
 mod wire;
@@ -22,13 +26,16 @@ mod wire;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+pub(crate) use auto::SystemResolver;
 use futures::StreamExt;
 use futures::future::Either;
 use futures::stream::FuturesUnordered;
 use hickory_proto::op::ResponseCode;
-pub use policy::{EndpointDnsPolicy, ParsePolicyError};
+pub(crate) use local::{hosts_addresses, hosts_path};
+pub use policy::{EndpointDnsPolicy, EndpointDnsSpec, ParsePolicyError};
 use policy::{QueryShape, Resolver};
 use snafu::Snafu;
 use tokio::time::Instant;
@@ -71,6 +78,34 @@ pub(crate) enum ExchangeError {
     Conflicting,
     #[snafu(display("only addresses no remote endpoint can have"))]
     Unroutable,
+    #[snafu(display("answered with addresses outside the mainland that no other source confirms"))]
+    Unconfirmed,
+    #[snafu(display("the platform resolver failed"))]
+    System { source: std::io::Error },
+}
+
+impl ExchangeError {
+    /// Whether the failure says the resolver does not work from here, rather
+    /// than something about the name that was asked.
+    fn blames_resolver(&self) -> bool {
+        match self {
+            Self::HttpsClient { .. }
+            | Self::Https { .. }
+            | Self::HttpStatus { .. }
+            | Self::ContentType
+            | Self::Oversized
+            | Self::Socket { .. }
+            | Self::TimedOut
+            | Self::Malformed
+            | Self::Mismatched => true,
+            Self::Rcode { .. }
+            | Self::BrokenAliases
+            | Self::Conflicting
+            | Self::Unroutable
+            | Self::Unconfirmed
+            | Self::System { .. } => false,
+        }
+    }
 }
 
 impl From<wire::Rejection> for ExchangeError {
@@ -109,12 +144,7 @@ impl ResolveError {
     pub(crate) fn kind(&self) -> std::io::ErrorKind {
         match self {
             Self::InvalidName { .. } => std::io::ErrorKind::InvalidInput,
-            Self::Unanswered { failures }
-                if failures
-                    .0
-                    .iter()
-                    .all(|(_, error)| matches!(error, ExchangeError::TimedOut)) =>
-            {
+            Self::Unanswered { failures } if failures.all_timed_out() => {
                 std::io::ErrorKind::TimedOut
             }
             Self::Unanswered { .. } => std::io::ErrorKind::Other,
@@ -132,6 +162,14 @@ impl From<ResolveError> for std::io::Error {
 #[derive(Debug)]
 pub(crate) struct Failures(Vec<(String, ExchangeError)>);
 
+impl Failures {
+    fn all_timed_out(&self) -> bool {
+        self.0
+            .iter()
+            .all(|(_, error)| matches!(error, ExchangeError::TimedOut))
+    }
+}
+
 impl fmt::Display for Failures {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.0.is_empty() {
@@ -147,15 +185,92 @@ impl fmt::Display for Failures {
     }
 }
 
-/// Resolves `host` through the policy's network resolvers. The caller owns
-/// the system resolver, both alone and as a fallback.
+static PLAINTEXT_CAPTURES: AtomicUsize = AtomicUsize::new(0);
+
+/// Held while this machine answers the process's plaintext DNS itself instead
+/// of delivering it, as a desktop TUN session does through its physical DNS
+/// relay. The `auto` policy then skips its check for forged answers on the
+/// path, which would only observe that relay.
+#[derive(Debug)]
+#[must_use = "the capture is over when this is dropped"]
+pub struct PlaintextDnsCapture(());
+
+impl PlaintextDnsCapture {
+    pub fn begin() -> Self {
+        PLAINTEXT_CAPTURES.fetch_add(1, Ordering::Relaxed);
+        Self(())
+    }
+}
+
+impl Drop for PlaintextDnsCapture {
+    fn drop(&mut self) {
+        PLAINTEXT_CAPTURES.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+fn plaintext_is_captured() -> bool {
+    PLAINTEXT_CAPTURES.load(Ordering::Relaxed) > 0
+}
+
+/// The `auto` policy over one network, with what it has learned about it.
+pub(crate) struct Automatic<B = auto::Network> {
+    backend: B,
+    memory: auto::Memory,
+}
+
+impl Automatic {
+    /// The built-in resolvers, with `system` as the platform resolver.
+    pub(crate) fn builtin(system: SystemResolver) -> Self {
+        Self::over(auto::Network::builtin(system))
+    }
+}
+
+impl<B: auto::Backend> Automatic<B> {
+    fn over(backend: B) -> Self {
+        Self {
+            backend,
+            memory: auto::Memory::new(),
+        }
+    }
+
+    /// Resolves `host`, which is not an IP literal. `refresh` says that a
+    /// connection to the previous answer failed. The record TTL is `None`
+    /// when the answer's source reports none.
+    pub(crate) async fn resolve(
+        &self,
+        host: &str,
+        refresh: bool,
+        deadline: Instant,
+    ) -> std::io::Result<(Vec<IpAddr>, Option<Duration>)> {
+        let public = QueryName::parse(host).filter(|name| !local::is_local_name(name.as_str()));
+        let Some(name) = public else {
+            // Nothing the public DNS can hold, so nothing a public resolver
+            // should be told: only the platform resolver knows such names.
+            let mut addresses = auto::Backend::system(&self.backend, host).await?;
+            addresses.retain(|address| is_routable_endpoint(*address));
+            return if addresses.is_empty() {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::AddrNotAvailable,
+                    ExchangeError::Unroutable,
+                ))
+            } else {
+                Ok((addresses, None))
+            };
+        };
+        let accepted = auto::resolve(&self.backend, &self.memory, &name, refresh, deadline).await?;
+        Ok((accepted.addresses, accepted.ttl))
+    }
+}
+
+/// Resolves `host` through the policy's listed network resolvers. The caller
+/// owns the system resolver, both alone and as a fallback.
 pub(crate) async fn resolve(
     policy: &EndpointDnsPolicy,
     host: &str,
     deadline: Instant,
 ) -> Result<Resolution, ResolveError> {
     resolve_with(
-        policy.resolvers(),
+        policy.listed(),
         host,
         deadline,
         udp::Timing::DEFAULT,
@@ -405,8 +520,43 @@ fn combine(
 /// Loopback resolvers and response builders for tests outside this module.
 #[cfg(test)]
 pub(crate) mod testing {
+    pub(crate) use super::auto::Scope;
     pub(crate) use super::udp::tests::fake_server as fake_udp_resolver;
     pub(crate) use super::wire::tests::{addresses_reply_to, response_to_request};
+    use super::*;
+
+    /// A DNS-over-HTTPS server on loopback that answers each query with the
+    /// message `reply` builds from it.
+    pub(crate) async fn fake_https_resolver(
+        reply: impl Fn(&[u8]) -> Vec<u8> + Send + Sync + 'static,
+    ) -> SocketAddr {
+        doh::tests::fake_server(Arc::new(move |request: &[u8]| {
+            doh::tests::dns_response(reply(request))
+        }))
+        .await
+    }
+
+    /// The `auto` policy over loopback: servers from [`fake_https_resolver`]
+    /// as its authenticated resolvers, servers from [`fake_udp_resolver`] as
+    /// its witnesses, and `system` as the platform resolver.
+    pub(crate) fn loopback_automatic(
+        resolvers: &[(SocketAddr, Scope)],
+        witnesses: &[SocketAddr],
+        system: SystemResolver,
+    ) -> Automatic {
+        let resolvers = resolvers
+            .iter()
+            .map(|(server, scope)| (Resolver::Https(doh::tests::url(*server)), *scope))
+            .collect();
+        Automatic::over(auto::Network::new(
+            resolvers,
+            witnesses.to_vec(),
+            udp::tests::brief(),
+            || Ok(doh::tests::trusting_client()),
+            system,
+            || false,
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -720,5 +870,59 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, ResolveError::InvalidName { .. }));
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn names_only_this_network_knows_go_to_the_platform_resolver_alone() {
+        use auto::tests::{Reply, Script};
+
+        let local = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20));
+        let resolvers = [(auto::Scope::Global, vec![Reply::Addresses(10, vec![V4])])];
+        let automatic = Automatic::over(Script::new(resolvers).system(5, &[local]));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        for host in [
+            "nas",
+            "proxy.lan",
+            "node.internal",
+            "Printer.Local.",
+            "bad host",
+        ] {
+            let answer = automatic.resolve(host, false, deadline).await.unwrap();
+            assert_eq!(answer, (vec![local], None), "{host}");
+        }
+        assert!(automatic.backend.asked().is_empty());
+        assert_eq!(automatic.backend.system_asked().len(), 5);
+
+        // A public name is the authenticated resolvers' to answer.
+        let answer = automatic
+            .resolve("Node.Example.COM.", false, deadline)
+            .await
+            .unwrap();
+        assert_eq!(answer, (vec![V4], Some(Duration::from_secs(120))));
+        assert_eq!(automatic.backend.asked().len(), 1);
+        assert!(automatic.backend.system_asked().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_local_name_with_only_unroutable_addresses_has_no_endpoint() {
+        use auto::tests::{Reply, Script};
+
+        let sinkhole = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        let script = Script::new([(auto::Scope::Global, vec![Reply::Silent])]);
+        let automatic = Automatic::over(script.system(5, &[sinkhole]));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let error = automatic.resolve("nas", false, deadline).await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AddrNotAvailable);
+    }
+
+    #[test]
+    fn plaintext_capture_lasts_as_long_as_any_guard() {
+        assert!(!plaintext_is_captured());
+        let first = PlaintextDnsCapture::begin();
+        let second = PlaintextDnsCapture::begin();
+        drop(first);
+        assert!(plaintext_is_captured());
+        drop(second);
+        assert!(!plaintext_is_captured());
     }
 }

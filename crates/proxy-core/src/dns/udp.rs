@@ -2,15 +2,18 @@
 //!
 //! The GFW's injectors answer a matching query with forged responses but let
 //! the query continue, so the real response arrives after them (CircumVolve
-//! §2; Duan et al., "Hold-On", 2012). An exchange therefore keeps listening
+//! §4.2; Duan et al., "Hold-On", 2012). An exchange therefore keeps listening
 //! for [`INJECTION_WINDOW`] after the first response that matches its query,
 //! and discards everything if the responses disagree. This detects a race; it
 //! authenticates nothing. A forgery that arrives alone, because the real
 //! response is dropped or slower than the window, is accepted, and so is any
 //! response from an attacker that can also drop packets. The source port, ID
 //! and question checks only stop off-path guessing.
+//!
+//! [`sight`] reports the same race without resolving anything, for callers
+//! that only need to know whether a name is being forged on this path.
 
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use hickory_proto::op::ResponseCode;
 use snafu::ResultExt;
@@ -23,8 +26,10 @@ use super::{ExchangeError, SocketSnafu};
 
 /// How long an exchange waits for disagreeing responses after the first one.
 /// Injected responses come from the path and real ones from the resolver, so
-/// the gap is at least the round trip beyond the injector.
-const INJECTION_WINDOW: Duration = Duration::from_millis(300);
+/// the gap is at least the round trip beyond the injector. Hoang et al.
+/// (USENIX Security 2021, §7.2) measured 99% of the real responses within
+/// 364 ms of the first forged one, from one vantage point in the mainland.
+const INJECTION_WINDOW: Duration = Duration::from_millis(400);
 const RETRANSMIT_AFTER: Duration = Duration::from_secs(1);
 /// Larger than the EDNS payload queries advertise.
 const MAX_DATAGRAM: usize = 4096;
@@ -40,6 +45,36 @@ impl Timing {
         window: INJECTION_WINDOW,
         retransmit_after: RETRANSMIT_AFTER,
     };
+}
+
+/// How long [`sight`] listens.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Watch {
+    /// For the first response. A resolver that takes longer is treated as
+    /// unreachable rather than waited for.
+    pub(crate) wait: Duration,
+    /// For disagreeing responses after the first.
+    pub(crate) window: Duration,
+}
+
+impl Watch {
+    pub(crate) const DEFAULT: Self = Self {
+        wait: Duration::from_millis(500),
+        window: INJECTION_WINDOW,
+    };
+}
+
+/// What one plaintext query drew from the path and the resolver.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Sighting {
+    /// No response in time, or the socket failed.
+    Silent,
+    /// Every response said the same thing; these are its addresses, if any.
+    Consistent(Vec<IpAddr>),
+    /// Responses disagreed. `last` holds the addresses of the latest one
+    /// that contradicts the first: injectors answer from the path, so the
+    /// resolver's own response is the one that trails.
+    Contested { last: Vec<IpAddr> },
 }
 
 /// What a matching response asserts, for comparing responses to one query.
@@ -58,6 +93,16 @@ impl Outcome {
             _ => self == other,
         }
     }
+
+    fn into_addresses(self) -> Vec<IpAddr> {
+        match self {
+            Self::Answer(Answer::Addresses { addresses, .. }) => addresses,
+            Self::Answer(Answer::Missing { .. })
+            | Self::Truncated
+            | Self::Failed(_)
+            | Self::BrokenAliases => Vec::new(),
+        }
+    }
 }
 
 /// What an observation window settled on.
@@ -72,7 +117,8 @@ pub(crate) enum Settled {
 pub(crate) struct Observer {
     window: Duration,
     first: Option<(Instant, Outcome)>,
-    conflicting: bool,
+    /// The latest response that contradicts the first.
+    dissent: Option<Outcome>,
 }
 
 impl Observer {
@@ -80,7 +126,7 @@ impl Observer {
         Self {
             window,
             first: None,
-            conflicting: false,
+            dissent: None,
         }
     }
 
@@ -96,7 +142,8 @@ impl Observer {
         };
         match &self.first {
             None => self.first = Some((now, outcome)),
-            Some((_, first)) => self.conflicting |= !first.agrees_with(&outcome),
+            Some((_, first)) if first.agrees_with(&outcome) => {}
+            Some(_) => self.dissent = Some(outcome),
         }
     }
 
@@ -111,7 +158,7 @@ impl Observer {
 
     /// The decision, once one can be made.
     pub(crate) fn verdict(&self, now: Instant) -> Option<Result<Settled, ExchangeError>> {
-        if self.conflicting {
+        if self.dissent.is_some() {
             return Some(Err(ExchangeError::Conflicting));
         }
         let (at, outcome) = self.first.as_ref()?;
@@ -124,6 +171,55 @@ impl Observer {
             Outcome::Failed(code) => Err(ExchangeError::Rcode { code: *code }),
             Outcome::BrokenAliases => Err(ExchangeError::BrokenAliases),
         })
+    }
+
+    fn into_sighting(self) -> Sighting {
+        match (self.first, self.dissent) {
+            (None, _) => Sighting::Silent,
+            (Some((_, first)), None) => Sighting::Consistent(first.into_addresses()),
+            (Some(_), Some(last)) => Sighting::Contested {
+                last: last.into_addresses(),
+            },
+        }
+    }
+}
+
+/// A socket that only `server` can answer. A fresh one per query gives each a
+/// random ephemeral port, and connecting it makes the kernel drop datagrams
+/// from other sources.
+async fn open(server: SocketAddr) -> std::io::Result<UdpSocket> {
+    let local: SocketAddr = match server {
+        SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
+        SocketAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
+    };
+    let socket = UdpSocket::bind(local).await?;
+    socket.connect(server).await?;
+    Ok(socket)
+}
+
+/// Sends `query` to `server` once and reports what answered: nothing, one
+/// story, or several. Unlike [`exchange`] it keeps listening after responses
+/// disagree, because the caller wants the one that trails, and it neither
+/// retransmits nor follows truncation.
+pub(crate) async fn sight(server: SocketAddr, query: &Query, watch: Watch) -> Sighting {
+    let give_up = Instant::now() + watch.wait;
+    let mut observer = Observer::new(watch.window);
+    let Ok(socket) = open(server).await else {
+        return Sighting::Silent;
+    };
+    if socket.send(query.bytes()).await.is_err() {
+        return Sighting::Silent;
+    }
+    let mut buffer = vec![0; MAX_DATAGRAM];
+    loop {
+        // Fixed points in time: unrelated datagrams cannot extend the wait.
+        let until = observer.settles_at().unwrap_or(give_up);
+        match tokio::time::timeout_at(until, socket.recv(&mut buffer)).await {
+            Ok(Ok(length)) => observer.observe(query, &buffer[..length], Instant::now()),
+            // A connected socket reports ICMP errors here; either way nothing
+            // more is coming.
+            Ok(Err(_)) | Err(_) => return observer.into_sighting(),
+        }
     }
 }
 
@@ -148,14 +244,7 @@ async fn exchange_datagram(
     timing: Timing,
     deadline: Instant,
 ) -> Result<Settled, ExchangeError> {
-    let local: SocketAddr = match server {
-        SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
-        SocketAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
-    };
-    // A fresh socket per query gives each one a random ephemeral port, and
-    // connecting it makes the kernel drop datagrams from other sources.
-    let socket = UdpSocket::bind(local).await.context(SocketSnafu)?;
-    socket.connect(server).await.context(SocketSnafu)?;
+    let socket = open(server).await.context(SocketSnafu)?;
     socket.send(query.bytes()).await.context(SocketSnafu)?;
 
     let mut observer = Observer::new(timing.window);
@@ -223,8 +312,6 @@ async fn exchange_stream(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::net::IpAddr;
-
     use hickory_proto::op::Message;
     use tokio::net::TcpListener;
 
@@ -242,6 +329,13 @@ pub(crate) mod tests {
         Timing {
             window: Duration::from_millis(50),
             retransmit_after: Duration::from_millis(200),
+        }
+    }
+
+    pub(crate) fn brief() -> Watch {
+        Watch {
+            wait: Duration::from_millis(300),
+            window: Duration::from_millis(50),
         }
     }
 
@@ -524,5 +618,131 @@ pub(crate) mod tests {
             .unwrap_err();
         assert!(matches!(error, ExchangeError::Socket { .. }), "{error}");
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn the_latest_contradiction_is_what_a_contested_sighting_holds() {
+        let query = query(QueryShape::Standard);
+        let start = Instant::now();
+        let mut observer = Observer::new(Duration::from_millis(300));
+        for (octets, delay) in [
+            (FORGED, 0),
+            ([198, 51, 100, 67], 5),
+            (REAL, 40),
+            (FORGED, 45),
+        ] {
+            observer.observe(
+                &query,
+                &addresses_reply(&query, &[ip(octets)]),
+                start + Duration::from_millis(delay),
+            );
+        }
+        // The duplicate of the first forgery says nothing new, so the real
+        // response stays the one on record.
+        assert_eq!(
+            observer.into_sighting(),
+            Sighting::Contested {
+                last: vec![ip(REAL)]
+            }
+        );
+    }
+
+    #[test]
+    fn a_trailing_failure_contests_without_addresses() {
+        let query = query(QueryShape::Standard);
+        let start = Instant::now();
+        let nxdomain = response_to(&query, ResponseCode::NXDomain, Vec::new())
+            .to_vec()
+            .unwrap();
+        let mut observer = Observer::new(Duration::from_millis(300));
+        observer.observe(&query, &addresses_reply(&query, &[ip(FORGED)]), start);
+        observer.observe(&query, &nxdomain, start);
+        assert_eq!(
+            observer.into_sighting(),
+            Sighting::Contested { last: Vec::new() }
+        );
+    }
+
+    #[tokio::test]
+    async fn sight_reports_one_story_with_its_addresses() {
+        let server = fake_server(|_, request| {
+            vec![
+                b"not dns".to_vec(),
+                addresses_reply_to(request, &[ip(REAL)]),
+                addresses_reply_to(request, &[ip(REAL)]),
+            ]
+        })
+        .await;
+        assert_eq!(
+            sight(server, &query(QueryShape::Standard), brief()).await,
+            Sighting::Consistent(vec![ip(REAL)])
+        );
+
+        let empty = fake_server(|_, request| {
+            vec![
+                response_to_request(request, ResponseCode::NXDomain, Vec::new())
+                    .to_vec()
+                    .unwrap(),
+            ]
+        })
+        .await;
+        assert_eq!(
+            sight(empty, &query(QueryShape::Standard), brief()).await,
+            Sighting::Consistent(Vec::new())
+        );
+    }
+
+    #[tokio::test]
+    async fn sight_keeps_listening_after_a_forgery_for_the_response_that_trails() {
+        let server = fake_server(|_, request| {
+            vec![
+                addresses_reply_to(request, &[ip(FORGED)]),
+                addresses_reply_to(request, &[ip([198, 51, 100, 67])]),
+                addresses_reply_to(request, &[ip(REAL)]),
+            ]
+        })
+        .await;
+        assert_eq!(
+            sight(server, &query(QueryShape::Standard), brief()).await,
+            Sighting::Contested {
+                last: vec![ip(REAL)]
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn sight_sends_once_and_gives_up_on_silence() {
+        let queries = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&queries);
+        let server = fake_server(move |_, _| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Vec::new()
+        })
+        .await;
+        let watch = Watch {
+            wait: Duration::from_millis(120),
+            window: Duration::from_millis(50),
+        };
+        let started = std::time::Instant::now();
+        assert_eq!(
+            sight(server, &query(QueryShape::Standard), watch).await,
+            Sighting::Silent
+        );
+        assert!(started.elapsed() >= watch.wait);
+        assert_eq!(queries.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn sight_treats_an_unreachable_server_as_silence() {
+        let closed = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server = closed.local_addr().unwrap();
+        drop(closed);
+        let started = std::time::Instant::now();
+        assert_eq!(
+            sight(server, &query(QueryShape::Standard), brief()).await,
+            Sighting::Silent
+        );
+        assert!(started.elapsed() < brief().wait);
     }
 }

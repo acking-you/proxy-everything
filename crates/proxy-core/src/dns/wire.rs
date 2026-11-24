@@ -308,13 +308,21 @@ fn negative_ttl(authorities: &[Record]) -> Option<u32> {
 /// Whether `address` can be a remote proxy endpoint. Resolvers that sinkhole
 /// a name, and some injectors, answer with addresses no remote host can
 /// have; 0.0.0.0 in particular connects to the local host.
+///
+/// Teredo addresses (RFC 4380) are among them. One encodes a client behind a
+/// NAT and the relay it reaches, so no node is published under one, while
+/// every forged AAAA record of the mainland's border filter that Hoang et
+/// al. (USENIX Security 2021, §5.1) collected lies in that prefix.
 pub(crate) fn is_routable_endpoint(address: IpAddr) -> bool {
     match address.to_canonical() {
         IpAddr::V4(address) => {
             let first = address.octets()[0];
             first != 0 && first < 224
         }
-        IpAddr::V6(address) => !(address.is_unspecified() || address.is_multicast()),
+        IpAddr::V6(address) => {
+            let teredo = address.segments()[..2] == [0x2001, 0];
+            !(address.is_unspecified() || address.is_multicast() || teredo)
+        }
     }
 }
 
@@ -698,6 +706,8 @@ pub(crate) mod tests {
             "::",
             "ff02::1",
             "::ffff:0.0.0.0",
+            "2001::1",
+            "2001:0:53aa:64c:c7f:3b0d:3f57:fef4",
         ] {
             assert!(!is_routable_endpoint(address.parse().unwrap()), "{address}");
         }
@@ -706,6 +716,8 @@ pub(crate) mod tests {
             "10.0.0.1",
             "127.0.0.1",
             "2001:db8::1",
+            "2001:1::1",
+            "2001:4860:4860::8888",
             "::1",
             "::ffff:203.0.113.7",
         ] {

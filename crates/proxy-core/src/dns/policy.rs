@@ -4,6 +4,7 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 
+use serde::{Deserialize, Serialize};
 use snafu::Snafu;
 use url::Url;
 
@@ -16,7 +17,7 @@ const MAX_RESOLVERS: usize = 8;
 /// blocked operator does not occupy both concurrent attempts, and the URLs are
 /// IP literals, so reaching them needs no bootstrap lookup. Both operators
 /// publish certificates for these addresses.
-const ENCRYPTED_PRESET: [&str; 4] = [
+pub(crate) const ENCRYPTED_PRESET: [&str; 4] = [
     "https://1.1.1.1/dns-query",
     "https://8.8.8.8/dns-query",
     "https://[2606:4700:4700::1111]/dns-query",
@@ -26,16 +27,28 @@ const ENCRYPTED_PRESET: [&str; 4] = [
 /// How the client resolves the remote proxy endpoints it dials before any
 /// tunnel exists: native nodes, relay targets and external upstream proxies.
 ///
-/// The text form is a comma-separated list. `https://` entries are
-/// DNS-over-HTTPS servers, `udp://` entries plaintext servers given by IP
-/// address, `encrypted` expands to a built-in DoH list, and `system` is the
-/// platform resolver. Network entries are raced; a trailing `system` is
+/// The text form is `auto`, or a comma-separated list. `auto` asks built-in
+/// DNS-over-HTTPS servers and falls back to the platform resolver, whose
+/// answer it refuses while forged ones are visible on the path; see
+/// `docs/endpoint-dns.md`. In a list, `https://` entries are DNS-over-HTTPS
+/// servers, `udp://` entries plaintext servers given by IP address,
+/// `encrypted` expands to a built-in DoH list, and `system` is the platform
+/// resolver. Listed network entries are raced; a trailing `system` is
 /// consulted only after all of them fail, and without it a failure is
 /// returned instead of a plaintext answer.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct EndpointDnsPolicy {
-    resolvers: Vec<Resolver>,
-    system_fallback: bool,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EndpointDnsPolicy(Strategy);
+
+/// What an [`EndpointDnsPolicy`] asks for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Strategy {
+    Automatic,
+    System,
+    Listed {
+        /// Never empty.
+        resolvers: Vec<Resolver>,
+        system_fallback: bool,
+    },
 }
 
 /// One network resolver of an [`EndpointDnsPolicy`].
@@ -67,9 +80,14 @@ pub enum ParsePolicyError {
     #[snafu(display("the endpoint DNS policy lists no resolver"))]
     Empty,
     #[snafu(display(
-        "unknown endpoint DNS entry `{entry}`; expected system, encrypted, https://… or udp://…"
+        "unknown endpoint DNS entry `{entry}`; expected auto, system, encrypted, https://… or \
+         udp://…"
     ))]
     UnknownEntry { entry: String },
+    #[snafu(display(
+        "`auto` is a complete endpoint DNS policy and cannot be combined with other entries"
+    ))]
+    AutoNotAlone,
     #[snafu(display("invalid DNS-over-HTTPS URL: {reason}"))]
     InvalidHttps { reason: String },
     #[snafu(display("invalid UDP resolver `{entry}`: {reason}"))]
@@ -85,9 +103,15 @@ pub enum ParsePolicyError {
 }
 
 impl EndpointDnsPolicy {
+    /// Built-in DNS-over-HTTPS servers, then the platform resolver, whose
+    /// answer is refused while forged ones are visible on the path.
+    pub fn auto() -> Self {
+        Self(Strategy::Automatic)
+    }
+
     /// The platform resolver alone; the behaviour before endpoint policies.
     pub fn system() -> Self {
-        Self::default()
+        Self(Strategy::System)
     }
 
     /// The built-in DNS-over-HTTPS list without a plaintext fallback.
@@ -104,14 +128,17 @@ impl EndpointDnsPolicy {
     {
         let mut resolvers = Vec::new();
         let mut system = false;
-        let mut any = false;
+        let mut automatic = false;
         for entry in entries {
             let entry = entry.as_ref().trim();
             if entry.is_empty() {
                 continue;
             }
-            any = true;
             let parsed = match entry.to_ascii_lowercase().as_str() {
+                "auto" => {
+                    automatic = true;
+                    continue;
+                }
                 "system" => {
                     system = true;
                     continue;
@@ -136,8 +163,19 @@ impl EndpointDnsPolicy {
                 }
             }
         }
-        if !any {
-            return EmptySnafu.fail();
+        if automatic {
+            return if system || !resolvers.is_empty() {
+                AutoNotAloneSnafu.fail()
+            } else {
+                Ok(Self::auto())
+            };
+        }
+        if resolvers.is_empty() {
+            return if system {
+                Ok(Self::system())
+            } else {
+                EmptySnafu.fail()
+            };
         }
         if resolvers.len() > MAX_RESOLVERS {
             return TooManySnafu {
@@ -145,32 +183,43 @@ impl EndpointDnsPolicy {
             }
             .fail();
         }
-        Ok(Self {
-            system_fallback: system && !resolvers.is_empty(),
+        Ok(Self(Strategy::Listed {
             resolvers,
-        })
+            system_fallback: system,
+        }))
+    }
+
+    /// Whether the policy is `auto`.
+    pub fn is_automatic(&self) -> bool {
+        matches!(self.0, Strategy::Automatic)
     }
 
     /// Whether every lookup goes to the platform resolver.
     pub fn is_system_only(&self) -> bool {
-        self.resolvers.is_empty()
+        matches!(self.0, Strategy::System)
     }
 
     /// Whether the platform resolver answers after the network resolvers fail.
     pub fn has_system_fallback(&self) -> bool {
-        self.system_fallback
+        match &self.0 {
+            Strategy::Automatic => true,
+            Strategy::System => false,
+            Strategy::Listed {
+                system_fallback, ..
+            } => *system_fallback,
+        }
     }
 
-    /// Whether any network resolver is reached over plaintext UDP or TCP.
+    /// Whether any listed resolver is reached over plaintext UDP or TCP.
     pub fn has_plaintext_resolvers(&self) -> bool {
-        self.resolvers
+        self.listed()
             .iter()
             .any(|resolver| matches!(resolver, Resolver::Udp { .. }))
     }
 
-    /// Whether any resolver uses a non-standard query layout.
+    /// Whether any listed resolver uses a non-standard query layout.
     pub fn has_experimental_queries(&self) -> bool {
-        self.resolvers.iter().any(|resolver| {
+        self.listed().iter().any(|resolver| {
             matches!(
                 resolver,
                 Resolver::Udp {
@@ -181,8 +230,52 @@ impl EndpointDnsPolicy {
         })
     }
 
-    pub(crate) fn resolvers(&self) -> &[Resolver] {
-        &self.resolvers
+    /// The policy in a form [`EndpointDnsSpec::parse`] reads back exactly,
+    /// including the URL paths and query strings [`fmt::Display`] hides. It
+    /// is for handing the policy to another process.
+    pub fn to_spec(&self) -> EndpointDnsSpec {
+        // Entries, because a URL may contain the comma that separates them
+        // in the text form.
+        EndpointDnsSpec::Entries(self.entries(|resolver| match resolver {
+            Resolver::Https(url) => url.to_string(),
+            Resolver::Udp { .. } => resolver.to_string(),
+        }))
+    }
+
+    /// The resolvers a list names; none for `auto` and `system`.
+    pub(crate) fn listed(&self) -> &[Resolver] {
+        match &self.0 {
+            Strategy::Automatic | Strategy::System => &[],
+            Strategy::Listed { resolvers, .. } => resolvers,
+        }
+    }
+
+    fn entries(&self, entry: impl Fn(&Resolver) -> String) -> Vec<String> {
+        match &self.0 {
+            Strategy::Automatic => vec!["auto".to_owned()],
+            Strategy::System => vec!["system".to_owned()],
+            Strategy::Listed {
+                resolvers,
+                system_fallback,
+            } => resolvers
+                .iter()
+                .map(entry)
+                .chain(system_fallback.then(|| "system".to_owned()))
+                .collect(),
+        }
+    }
+}
+
+/// `auto`, except in builds that promise to contact only the resolver the
+/// network configures (`no-external-geo`, the Mac App Store edition), where
+/// it is `system`.
+impl Default for EndpointDnsPolicy {
+    fn default() -> Self {
+        if cfg!(feature = "no-external-geo") {
+            Self::system()
+        } else {
+            Self::auto()
+        }
     }
 }
 
@@ -194,23 +287,39 @@ impl FromStr for EndpointDnsPolicy {
     }
 }
 
+/// An endpoint DNS policy as a configuration or another process carries it,
+/// not yet checked: the comma-separated text form, or its entries as a list.
+///
+/// Decoding never fails on the policy itself, so the holder can report what
+/// is wrong with it instead of rejecting the whole message. An entry can
+/// carry a resolver account token, which is why `Debug` shows none of them.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum EndpointDnsSpec {
+    Text(String),
+    Entries(Vec<String>),
+}
+
+impl EndpointDnsSpec {
+    pub fn parse(&self) -> Result<EndpointDnsPolicy, ParsePolicyError> {
+        match self {
+            Self::Text(text) => text.parse(),
+            Self::Entries(entries) => EndpointDnsPolicy::from_entries(entries),
+        }
+    }
+}
+
+impl fmt::Debug for EndpointDnsSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("EndpointDnsSpec(..)")
+    }
+}
+
 /// Lists resolvers without URL paths or query strings, which can carry
 /// account tokens, so the output is safe for logs and banners.
 impl fmt::Display for EndpointDnsPolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (index, resolver) in self.resolvers.iter().enumerate() {
-            if index > 0 {
-                f.write_str(",")?;
-            }
-            write!(f, "{resolver}")?;
-        }
-        if self.resolvers.is_empty() {
-            f.write_str("system")
-        } else if self.system_fallback {
-            f.write_str(",system")
-        } else {
-            Ok(())
-        }
+        f.write_str(&self.entries(Resolver::to_string).join(","))
     }
 }
 
@@ -241,7 +350,7 @@ fn has_scheme(entry: &str, scheme: &str) -> bool {
         .is_some_and(|(prefix, _)| prefix.eq_ignore_ascii_case(scheme))
 }
 
-fn parse_https(entry: &str) -> Result<Resolver, ParsePolicyError> {
+pub(crate) fn parse_https(entry: &str) -> Result<Resolver, ParsePolicyError> {
     let invalid = |reason: &str| InvalidHttpsSnafu { reason }.build();
     // The parser's message may quote the input, which can hold a token.
     let mut url = Url::parse(entry).map_err(|_| invalid("not an absolute URL"))?;
@@ -300,6 +409,8 @@ fn parse_udp(entry: &str) -> Result<Resolver, ParsePolicyError> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     fn policy(spec: &str) -> EndpointDnsPolicy {
@@ -307,12 +418,101 @@ mod tests {
     }
 
     #[test]
-    fn default_policy_is_the_system_resolver() {
+    fn default_policy_is_automatic_except_in_builds_that_promise_the_network_resolver() {
         let default = EndpointDnsPolicy::default();
-        assert!(default.is_system_only());
-        assert!(!default.has_system_fallback());
-        assert_eq!(default, policy("system"));
-        assert_eq!(default.to_string(), "system");
+        if cfg!(feature = "no-external-geo") {
+            assert_eq!(default, EndpointDnsPolicy::system());
+        } else {
+            assert_eq!(default, EndpointDnsPolicy::auto());
+        }
+    }
+
+    #[test]
+    fn auto_stands_alone_and_may_use_the_system_resolver() {
+        let auto = policy(" AUTO ");
+        assert_eq!(auto, EndpointDnsPolicy::auto());
+        assert!(auto.is_automatic());
+        assert!(!auto.is_system_only());
+        assert!(auto.has_system_fallback());
+        assert!(!auto.has_plaintext_resolvers());
+        assert!(!auto.has_experimental_queries());
+        assert_eq!(auto.to_string(), "auto");
+        assert_eq!(policy("auto,auto"), auto);
+        for spec in [
+            "auto,system",
+            "system,auto",
+            "auto,encrypted",
+            "https://1.1.1.1,auto",
+        ] {
+            assert_eq!(
+                spec.parse::<EndpointDnsPolicy>(),
+                Err(ParsePolicyError::AutoNotAlone),
+                "{spec}"
+            );
+        }
+    }
+
+    #[test]
+    fn system_alone_is_the_platform_resolver() {
+        let system = policy("system");
+        assert_eq!(system, EndpointDnsPolicy::system());
+        assert!(system.is_system_only());
+        assert!(!system.is_automatic());
+        assert!(!system.has_system_fallback());
+        assert_eq!(system.to_string(), "system");
+    }
+
+    #[test]
+    fn a_spec_round_trips_what_display_redacts() {
+        for entries in [
+            vec!["auto"],
+            vec!["system"],
+            vec![
+                "https://dns.example:8443/secret-token?id=1",
+                "udp://8.8.8.8:53?shape=dual-question",
+                "system",
+            ],
+            // A comma inside a URL is why the exact form is a list.
+            vec!["https://dns.example/dns-query?token=a,b"],
+        ] {
+            let parsed = EndpointDnsPolicy::from_entries(&entries).unwrap();
+            let spec = parsed.to_spec();
+            assert_eq!(serde_json::to_value(&spec).unwrap(), json!(entries));
+            assert_eq!(spec.parse(), Ok(parsed));
+        }
+        let encrypted = EndpointDnsPolicy::encrypted();
+        assert_eq!(encrypted.to_spec().parse(), Ok(encrypted));
+        assert!(
+            !policy("https://dns.example/secret-token")
+                .to_string()
+                .contains("secret")
+        );
+    }
+
+    #[test]
+    fn a_spec_is_text_or_entries_and_is_checked_only_when_parsed() {
+        let decode = |value| serde_json::from_value::<EndpointDnsSpec>(value).unwrap();
+        assert_eq!(
+            decode(json!("encrypted, system")).parse(),
+            Ok(policy("encrypted,system"))
+        );
+        assert_eq!(
+            decode(json!(["encrypted", "system"])).parse(),
+            Ok(policy("encrypted,system"))
+        );
+        assert_eq!(
+            decode(json!(["auto"])).parse(),
+            Ok(EndpointDnsPolicy::auto())
+        );
+        assert_eq!(
+            decode(json!("system,encrypted")).parse(),
+            Err(ParsePolicyError::SystemNotLast)
+        );
+        assert_eq!(decode(json!([])).parse(), Err(ParsePolicyError::Empty));
+        assert!(serde_json::from_value::<EndpointDnsSpec>(json!(53)).is_err());
+
+        let secret = decode(json!(["https://dns.example/secret-token"]));
+        assert!(!format!("{secret:?}").contains("secret"));
     }
 
     #[test]
@@ -332,7 +532,7 @@ mod tests {
     fn trailing_system_is_an_explicit_fallback() {
         let fallback = policy(" encrypted , system ");
         assert!(fallback.has_system_fallback());
-        assert_eq!(fallback.resolvers().len(), ENCRYPTED_PRESET.len());
+        assert_eq!(fallback.listed().len(), ENCRYPTED_PRESET.len());
         assert!(fallback.to_string().ends_with(",system"));
     }
 
@@ -347,12 +547,12 @@ mod tests {
     #[test]
     fn https_entries_keep_their_path_and_hide_it_when_displayed() {
         let custom = policy("HTTPS://dns.example:8443/secret-token?id=1,https://1.1.1.1");
-        let Resolver::Https(url) = &custom.resolvers()[0] else {
+        let Resolver::Https(url) = &custom.listed()[0] else {
             panic!("expected DoH");
         };
         assert_eq!(url.as_str(), "https://dns.example:8443/secret-token?id=1");
         assert_eq!(
-            &custom.resolvers()[1],
+            &custom.listed()[1],
             &parse_https("https://1.1.1.1/dns-query").unwrap()
         );
         let shown = custom.to_string();
@@ -381,7 +581,7 @@ mod tests {
     fn udp_entries_need_ip_addresses() {
         let plain = policy("udp://8.8.8.8,udp://[2001:4860:4860::8888]:5353/,udp://9.9.9.9:53");
         assert_eq!(
-            plain.resolvers(),
+            plain.listed(),
             [
                 Resolver::Udp {
                     server: "8.8.8.8:53".parse().unwrap(),
