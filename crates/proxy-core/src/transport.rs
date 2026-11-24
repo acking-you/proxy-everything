@@ -279,7 +279,13 @@ fn get_uri(host: &str, port: u16) -> String {
 }
 
 fn dns_cache_key(host: &str) -> String {
-    host.trim_end_matches('.').to_ascii_lowercase()
+    let host = host.trim_end_matches('.');
+    // Most hosts arrive already lowercase and without a trailing root.
+    if !host.is_empty() && host.bytes().all(|byte| !byte.is_ascii_uppercase()) {
+        host.to_owned()
+    } else {
+        host.to_ascii_lowercase()
+    }
 }
 
 /// Resolve all addresses for a host through the bounded process cache.
@@ -338,10 +344,9 @@ async fn resolve_endpoint(
     refresh: bool,
 ) -> std::io::Result<Arc<[IpAddr]>> {
     let policy = active.policy.as_ref().map_err(|error| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("invalid ENDPOINT_DNS: {error}"),
-        )
+        error
+            .clone()
+            .into_io(std::io::ErrorKind::InvalidInput, "invalid ENDPOINT_DNS")
     })?;
     let budget = if policy.is_system_only() {
         DNS_TIMEOUT
@@ -1357,9 +1362,13 @@ mod tests {
         let active = ActiveEndpointDns::new(Err(ParsePolicyError::Empty));
         let error = resolve_under(&active, "localhost").await.unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert_eq!(error.to_string(), "invalid ENDPOINT_DNS");
         assert!(
-            error.to_string().starts_with("invalid ENDPOINT_DNS"),
-            "{error}"
+            error
+                .get_ref()
+                .and_then(std::error::Error::source)
+                .is_some_and(|source| source.is::<ParsePolicyError>()),
+            "{error:?}"
         );
     }
 

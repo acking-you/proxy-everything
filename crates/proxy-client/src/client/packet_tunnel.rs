@@ -192,12 +192,7 @@ impl PacketTunnelRuntime {
         // Before the first lookup of the server's name, which the readiness
         // check below can be.
         proxy_core::transport::apply_endpoint_dns(config.endpoint_dns.as_ref()).map_err(
-            |error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("invalid endpoint DNS policy: {error}"),
-                )
-            },
+            |error| error.into_io(io::ErrorKind::InvalidInput, "invalid endpoint DNS policy"),
         )?;
         super::tun::install_tun_log_bridge();
         let listener = runtime.block_on(TcpListener::bind(("127.0.0.1", config.local_port)))?;
@@ -483,11 +478,13 @@ mod tests {
             .err()
             .expect("the tunnel started");
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(error.to_string(), "invalid endpoint DNS policy");
         assert!(
             error
-                .to_string()
-                .starts_with("invalid endpoint DNS policy:"),
-            "{error}"
+                .get_ref()
+                .and_then(std::error::Error::source)
+                .is_some_and(|source| source.is::<proxy_core::dns::ParsePolicyError>()),
+            "{error:?}"
         );
         assert_eq!(proxy_core::transport::endpoint_dns(), before);
     }

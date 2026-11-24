@@ -90,7 +90,12 @@ impl Outcome {
     fn agrees_with(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Answer(left), Self::Answer(right)) => left.same_data(right),
-            _ => self == other,
+            (Self::Truncated, Self::Truncated) | (Self::BrokenAliases, Self::BrokenAliases) => true,
+            (Self::Failed(left), Self::Failed(right)) => left == right,
+            (
+                Self::Answer(_) | Self::Truncated | Self::Failed(_) | Self::BrokenAliases,
+                Self::Answer(_) | Self::Truncated | Self::Failed(_) | Self::BrokenAliases,
+            ) => false,
         }
     }
 
@@ -257,6 +262,9 @@ async fn exchange_datagram(
             .or(retransmit_at)
             .map_or(deadline, |at| at.min(deadline));
         tokio::select! {
+            // A ready datagram beats the timer that would otherwise end the
+            // window on the same tick.
+            biased;
             received = socket.recv(&mut buffer), if receiving => match received {
                 Ok(length) => observer.observe(query, &buffer[..length], Instant::now()),
                 // A connected socket reports ICMP errors here. Before any

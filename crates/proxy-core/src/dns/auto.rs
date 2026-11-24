@@ -35,7 +35,7 @@
 
 use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use futures::future::{BoxFuture, Fuse, FutureExt};
@@ -109,7 +109,7 @@ pub(crate) enum Scope {
 #[derive(Clone, Debug)]
 pub(crate) struct Authenticated {
     /// For logs and errors; never a URL path.
-    pub(crate) label: String,
+    pub(crate) label: Arc<str>,
     pub(crate) scope: Scope,
 }
 
@@ -267,7 +267,9 @@ impl Memory {
         if health.len() <= index {
             health.resize(index + 1, Health::default());
         }
-        let entry = &mut health[index];
+        let entry = health
+            .get_mut(index)
+            .expect("health was resized to cover index");
         entry.strikes = entry.strikes.saturating_add(1);
         let doublings = (entry.strikes - 1).min(16);
         let bench = BENCH_BASE.saturating_mul(1 << doublings).min(BENCH_CAP);
@@ -375,7 +377,7 @@ struct Cascade<'a, B> {
     missing: bool,
     /// A global one did: the public DNS has nothing for this name.
     publicly_absent: bool,
-    failures: Vec<(String, ExchangeError)>,
+    failures: Vec<(Arc<str>, ExchangeError)>,
 }
 
 impl<'a, B: Backend> Cascade<'a, B> {
@@ -548,7 +550,10 @@ impl<'a, B: Backend> Cascade<'a, B> {
         let now = Instant::now();
         self.in_flight.retain(|(launched, _)| *launched != index);
         let backend = self.backend;
-        let resolver = &backend.resolvers()[index];
+        let resolver = backend
+            .resolvers()
+            .get(index)
+            .expect("attempts are only started for resolvers this backend lists");
         match result {
             Ok(Resolution::Addresses { addresses, ttl }) => {
                 self.memory.reward(index);
@@ -608,7 +613,7 @@ impl<'a, B: Backend> Cascade<'a, B> {
             }
             Err(source) => ExchangeError::System { source },
         };
-        self.failures.push(("system".to_owned(), failure));
+        self.failures.push((Arc::from("system"), failure));
         self.system = Stage::Done(None);
     }
 
@@ -758,13 +763,20 @@ impl<'a, B: Backend> Cascade<'a, B> {
     fn failure(&mut self) -> Failure {
         let resolvers = self.backend.resolvers();
         let mut failures = std::mem::take(&mut self.failures);
-        failures.extend(
-            self.in_flight
-                .iter()
-                .map(|(index, _)| (resolvers[*index].label.clone(), ExchangeError::TimedOut)),
-        );
+        failures.extend(self.in_flight.iter().map(|(index, _)| {
+            let label = resolvers
+                .get(*index)
+                .expect("in-flight indices were started from this backend")
+                .label
+                .clone();
+            (label, ExchangeError::TimedOut)
+        }));
         failures.extend(self.unconfirmed.iter().map(|answer| {
-            let label = resolvers[answer.resolver].label.clone();
+            let label = resolvers
+                .get(answer.resolver)
+                .expect("unconfirmed answers name a launched resolver")
+                .label
+                .clone();
             (label, ExchangeError::Unconfirmed)
         }));
         let failures = Failures(failures);
@@ -1022,7 +1034,7 @@ impl Network {
         let described = resolvers
             .iter()
             .map(|(resolver, scope)| Authenticated {
-                label: resolver.to_string(),
+                label: Arc::from(resolver.to_string()),
                 scope: *scope,
             })
             .collect();
@@ -1052,8 +1064,12 @@ impl Backend for Network {
         name: &QueryName,
         deadline: Instant,
     ) -> Result<Resolution, ExchangeError> {
+        let resolver = self
+            .resolvers
+            .get(index)
+            .expect("the cascade only asks indices this network lists");
         super::lookup(
-            &self.resolvers[index],
+            resolver,
             name,
             udp::Timing::DEFAULT,
             &self.https_client,
@@ -1157,7 +1173,7 @@ pub(crate) mod tests {
                     .into_iter()
                     .enumerate()
                     .map(|(index, scope)| Authenticated {
-                        label: format!("resolver-{index}"),
+                        label: Arc::from(format!("resolver-{index}")),
                         scope,
                     })
                     .collect(),
@@ -1237,9 +1253,22 @@ pub(crate) mod tests {
         ) -> Result<Resolution, ExchangeError> {
             lock(&self.asked).push((index, self.now()));
             let reply = {
-                let turn = &mut lock(&self.turns)[index];
-                let replies = &self.replies[index];
-                let reply = replies[(*turn).min(replies.len() - 1)].clone();
+                let mut turns = lock(&self.turns);
+                let turn = turns
+                    .get_mut(index)
+                    .expect("each scripted resolver has a turn counter");
+                let replies = self
+                    .replies
+                    .get(index)
+                    .expect("each scripted resolver has a reply sequence");
+                let last = replies
+                    .len()
+                    .checked_sub(1)
+                    .expect("every scripted resolver has at least one reply");
+                let reply = replies
+                    .get((*turn).min(last))
+                    .expect("last is in range")
+                    .clone();
                 *turn += 1;
                 reply
             };
@@ -2145,7 +2174,7 @@ pub(crate) mod tests {
         let labels: Vec<_> = network
             .resolvers()
             .iter()
-            .map(|resolver| resolver.label.as_str())
+            .map(|resolver| resolver.label.as_ref())
             .collect();
         assert_eq!(
             labels,
@@ -2210,7 +2239,10 @@ pub(crate) mod tests {
             || false,
         );
         let name = name("node.example.com");
-        assert_eq!(network.resolvers()[0].label, format!("https://{resolver}"));
+        assert_eq!(
+            network.resolvers()[0].label.as_ref(),
+            format!("https://{resolver}")
+        );
         assert!(network.can_witness());
         let deadline = Instant::now() + Duration::from_secs(5);
         assert!(matches!(

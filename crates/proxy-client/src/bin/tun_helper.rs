@@ -354,9 +354,9 @@ mod macos {
     /// ends the session rather than leaving the default in its place.
     fn apply_endpoint_dns(config: &HelperConfig) -> io::Result<()> {
         proxy_core::transport::apply_endpoint_dns(config.endpoint_dns.as_ref()).map_err(|error| {
-            io::Error::new(
+            error.into_io(
                 io::ErrorKind::InvalidData,
-                format!("the TUN configuration has an invalid endpoint DNS policy: {error}"),
+                "the TUN configuration has an invalid endpoint DNS policy",
             )
         })
     }

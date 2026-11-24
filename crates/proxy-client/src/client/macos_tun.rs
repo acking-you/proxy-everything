@@ -374,12 +374,7 @@ async fn run_helper_session(
 fn endpoint_dns_handoff() -> io::Result<EndpointDnsSpec> {
     proxy_core::transport::endpoint_dns()
         .map(|policy| policy.to_spec())
-        .map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("invalid ENDPOINT_DNS: {error}"),
-            )
-        })
+        .map_err(|error| error.into_io(io::ErrorKind::InvalidInput, "invalid ENDPOINT_DNS"))
 }
 
 /// Exchange configuration, readiness, and teardown with a connected helper.
@@ -578,7 +573,9 @@ async fn await_helper_teardown(
                         target,
                         message,
                     }) => forward_helper_log(level, &target, &message),
-                    _ => {}
+                    // Setup already finished; only Stopped ends the drain.
+                    Ok(HelperEvent::Ready | HelperEvent::Failed { .. }) => {}
+                    Err(_) => {}
                 },
                 Err(error) => {
                     tracing::debug!(%error, "the TUN helper socket ended during teardown");

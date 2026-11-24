@@ -214,7 +214,8 @@ fn choose_endpoint_dns(
         (None, None, Some(spec)) if !spec.trim().is_empty() => spec.parse(),
         (None, None, Some(_) | None) => Ok(EndpointDnsPolicy::default()),
     };
-    policy.map_err(|error| anyhow!("invalid endpoint_dns: {error}"))
+    // Keep the typed parse error as the source; do not embed it in the message.
+    policy.context("invalid endpoint_dns")
 }
 
 fn parse_bool_env(value: &str) -> Option<bool> {
@@ -748,9 +749,12 @@ mod tests {
             EndpointDnsPolicy::auto()
         );
         let error = choose_endpoint_dns(None, None, Some("auto,system")).unwrap_err();
+        assert_eq!(error.to_string(), "invalid endpoint_dns");
         assert!(
-            error.to_string().starts_with("invalid endpoint_dns:"),
-            "{error}"
+            error
+                .chain()
+                .any(|cause| cause.downcast_ref::<ParsePolicyError>().is_some()),
+            "{error:#}"
         );
     }
 
@@ -776,9 +780,12 @@ mod tests {
         };
         let cli = Cli::try_parse_from(["http-proxy-cli"]).unwrap();
         let error = endpoint_dns_policy(&cli, &config).unwrap_err();
+        assert_eq!(error.to_string(), "invalid endpoint_dns");
         assert!(
-            error.to_string().starts_with("invalid endpoint_dns:"),
-            "{error}"
+            error
+                .chain()
+                .any(|cause| cause.downcast_ref::<ParsePolicyError>().is_some()),
+            "{error:#}"
         );
     }
 

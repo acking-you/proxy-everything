@@ -160,7 +160,7 @@ impl From<ResolveError> for std::io::Error {
 
 /// Each resolver's failure, labelled by its redacted form.
 #[derive(Debug)]
-pub(crate) struct Failures(Vec<(String, ExchangeError)>);
+pub(crate) struct Failures(Vec<(Arc<str>, ExchangeError)>);
 
 impl Failures {
     fn all_timed_out(&self) -> bool {
@@ -292,14 +292,26 @@ where
     let Some(name) = QueryName::parse(host) else {
         return InvalidNameSnafu { host }.fail();
     };
-    let attempt = |index: usize| lookup(&resolvers[index], &name, timing, &https_client, deadline);
+    let attempt = |index: usize| {
+        let resolver = resolvers
+            .get(index)
+            .expect("race only starts indices below resolvers.len()");
+        lookup(resolver, &name, timing, &https_client, deadline)
+    };
     race(resolvers.len(), deadline, attempt)
         .await
         .map_err(|failures| ResolveError::Unanswered {
             failures: Failures(
                 failures
                     .into_iter()
-                    .map(|(index, error)| (resolvers[index].to_string(), error))
+                    .map(|(index, error)| {
+                        let label: Arc<str> = resolvers
+                            .get(index)
+                            .expect("race only reports indices it started")
+                            .to_string()
+                            .into();
+                        (label, error)
+                    })
                     .collect(),
             ),
         })
@@ -338,6 +350,8 @@ where
         }
         let hedge = may_start && pending.len() < MAX_IN_FLIGHT;
         tokio::select! {
+            // A finished attempt beats the hedge timer on the same tick.
+            biased;
             finished = pending.next() => match finished {
                 Some((_, Ok(value))) => return Ok(value),
                 Some((index, Err(error))) => {

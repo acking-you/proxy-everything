@@ -187,7 +187,8 @@ impl Answer {
                     nxdomain: right, ..
                 },
             ) => left == right,
-            _ => false,
+            (Self::Addresses { .. }, Self::Missing { .. })
+            | (Self::Missing { .. }, Self::Addresses { .. }) => false,
         }
     }
 }

@@ -1,8 +1,8 @@
 //! Endpoint resolver configuration and its text form.
 
-use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
+use std::{fmt, io};
 
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
@@ -100,6 +100,33 @@ pub enum ParsePolicyError {
         "the endpoint DNS policy lists {count} resolvers; at most {MAX_RESOLVERS} are allowed"
     ))]
     TooMany { count: usize },
+}
+
+impl ParsePolicyError {
+    /// An `io::Error` whose message is `what` and whose `source` is this parse
+    /// failure, so callers can branch on the kind without flattening the cause.
+    pub fn into_io(self, kind: io::ErrorKind, what: &'static str) -> io::Error {
+        io::Error::new(kind, PolicyIoError { what, source: self })
+    }
+}
+
+/// Carries a [`ParsePolicyError`] across an `io::Result` boundary.
+#[derive(Debug)]
+struct PolicyIoError {
+    what: &'static str,
+    source: ParsePolicyError,
+}
+
+impl fmt::Display for PolicyIoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.what)
+    }
+}
+
+impl std::error::Error for PolicyIoError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
 }
 
 impl EndpointDnsPolicy {
