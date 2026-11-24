@@ -73,7 +73,7 @@ SOCKS5). Options, TOML configuration, SOCKS5 UDP and TUN are covered in
 | --- | --- | --- | --- |
 | Wire protocol | legacy | v3: `PROXY_WIRE_PROTOCOL=v3` or the app toggle | Upgrade every relay and server; `PROXY_REQUIRE_V3=1` then rejects legacy ([v3](docs/secure-transport-v3.md)) |
 | Carrier | TCP: a bare `host` | QUIC: `quic://host:port` | Deploy a QUIC listener with a certificate ([QUIC](docs/quic-transport.md)) |
-| Endpoint DNS | system resolver | DNS-over-HTTPS: `--endpoint-dns encrypted` or `ENDPOINT_DNS` | Needs a reachable DoH server; without a trailing `system`, lookups fail instead of using plaintext DNS ([endpoint DNS](docs/endpoint-dns.md)) |
+| Endpoint DNS | `auto` (DoH first) | `encrypted`, custom `https://` / `udp://`, or `system` | `auto` resists pollution opportunistically; strict lists fail closed unless they end in `system` ([endpoint DNS](docs/endpoint-dns.md)) |
 
 They combine freely, and none changes what a session carries.
 Compatibility and recovery behaviour: [network resilience](docs/network-resilience.md).

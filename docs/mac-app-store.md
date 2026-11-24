@@ -137,10 +137,12 @@ UDP 直连回退以及服务器到目标站点的链路，不能统一宣传为�
 
 商店版通过 `proxy-core/no-external-geo` 编译特性拒绝外部地理查询与数据库下载，
 并在配置导入、Dart 通道和 Packet Tunnel 入口禁用自动地理分流及反向地理查询。
-直装版保持原有地理查询能力。首次启动 Store 版会先展示中英文数据说明，确认前
-不创建代理服务；应用内可随时重新查看。公开隐私政策位于
-[privacy-policy.md](../ui/flutter/docs/privacy-policy.md)。连接测试仍可能访问
-`www.gstatic.com/generate_204`，用户指定的服务器、DNS 和目标站点接收实际网络请求。
+同一特性下 endpoint DNS 的默认策略保持为 `system`，不会向 Cloudflare / Google /
+阿里等公共 DoH 发起查询；直装版默认为 `auto`。直装版保持原有地理查询能力。首次
+启动 Store 版会先展示中英文数据说明，确认前不创建代理服务；应用内可随时重新查看。
+公开隐私政策位于 [privacy-policy.md](../ui/flutter/docs/privacy-policy.md)。连接
+测试仍可能访问 `www.gstatic.com/generate_204`，用户指定的服务器、DNS 和目标站点
+接收实际网络请求。
 
 商店版提供明确标注的离线演示：首次隐私页面点击“Explore demo / 体验演示”，
 或进入应用后点击播放图标。可编辑示例主机、增删选取示例节点、模拟连接与断开并

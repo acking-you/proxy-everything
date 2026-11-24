@@ -4,49 +4,58 @@
 environment variable) chooses how a process resolves the hostnames of the
 **proxy endpoints it dials itself**: native nodes, server relay targets and
 external upstream proxies. It does not change how proxied or direct
-destinations are resolved. The default is `system`, which keeps the behaviour
-of earlier releases.
+destinations are resolved.
+
+The default is **`auto`**: built-in DNS-over-HTTPS first, with the platform
+resolver only while nothing on the path is seen forging answers. Builds that
+promise not to contact third-party resolvers (`proxy-core/no-external-geo`,
+including the Mac App Store edition) keep `system` as their default instead.
 
 ```bash
-# Resolve the node through the built-in DNS-over-HTTPS list; fail rather than
-# fall back to plaintext DNS.
+# Default: DoH first; the system resolver only while the path looks clean.
+http-proxy-cli -s node.example.com -p 1081 -c 1080
+
+# Strict DoH only; fail rather than fall back to plaintext DNS.
 http-proxy-cli -s node.example.com -p 1081 -c 1080 --endpoint-dns encrypted
 
 # Your own DoH server first, the built-in list next, and plaintext system DNS
 # only when every encrypted resolver failed.
 http-proxy-cli -s node.example.com --endpoint-dns "https://203.0.113.53/dns-query,encrypted,system"
 
-# A relay server resolving its upstream targets.
-ENDPOINT_DNS=encrypted http-proxy-server -p 1081 -t upstream.example.com:1081
+# A relay server resolving its upstream targets under the same default.
+http-proxy-server -p 1081 -t upstream.example.com:1081
 ```
 
 None of this has been validated against the Great Firewall or any other live
 censor. It is a design based on published measurements, verified with local
-fakes. See [Limitations](#limitations).
+fakes. See [Limitations](#limitations). It does **not** advertise a guaranteed
+bypass: ordinary transaction-ID / source-address / question matching is not
+enough against a real on-path injector, and neither is this policy on every
+network.
 
 ## Where pollution reaches this proxy
 
 | Lookup | Resolved by | Exposed to local DNS injection? |
 | --- | --- | --- |
 | Proxied destination (HTTP/SOCKS5 target, `socks5h://`) | The remote server, or the upstream proxy, inside the encrypted session | No |
-| TUN DNS (captured port-53 queries) | `--tun-dns-server`, reached over TCP through the proxy | No, from the local network |
-| Direct destination (auto-proxy direct, website rule, bypassed process) | The system resolver | Yes, by design: these are hosts the user routes outside the proxy |
-| **Native node, QUIC node, TUN route bypass, Windows live switch** | The system resolver | **Yes, governed by this policy now** |
-| **External upstream proxy (`--upstream-proxy`), its SOCKS5 UDP control connection** | The system resolver | **Yes, governed by this policy now** |
-| **Relay target on a server (`-t`, relay config) and its health checks; control-plane connections to nodes** | The server's system resolver | **Yes, governed by this policy now** |
+| TUN DNS (captured app port-53 queries, fake-IP or real-IP mode) | Fake-IP pool, or `--tun-dns-server` reached through the proxy | No, from the local network; the exit node's view of `tun_dns_server` still matters in real-IP mode |
+| Direct destination (auto-proxy direct, website rule, bypassed process) | The system resolver, or tun2proxy's physical DNS relay for bypassed processes under desktop TUN | Yes, by design: these are hosts the user routes outside the proxy |
+| **Native node, QUIC node, TUN route bypass, Windows live switch, macOS helper remote host** | This policy (`auto` by default) | Governed by this policy |
+| **External upstream proxy (`--upstream-proxy`), its SOCKS5 UDP control connection** | This policy | Governed by this policy |
+| **Relay target on a server (`-t`, relay config) and its health checks; control-plane connections to nodes** | This policy on the server | Governed by this policy |
 
-The endpoint lookups happen before any tunnel exists, in plaintext, on the
-network the user is trying to get out of. That has three consequences:
+The endpoint lookups happen before any tunnel exists, on the network the user
+is trying to get out of. That has three consequences:
 
 - **Availability.** One forged answer sends the client to a wrong address, and
-  the five-minute DNS cache keeps it there. The native protocol's pre-shared key
-  (and QUIC's certificate check) mean the wrong host cannot impersonate the
-  node, so the result is a failed connection rather than a decrypted one.
+  the DNS cache keeps it there. The native protocol's pre-shared key (and
+  QUIC's certificate check) mean the wrong host cannot impersonate the node,
+  so the result is a failed connection rather than a decrypted one.
 - **Credentials.** An external HTTP or SOCKS5 upstream proxy authenticates with
   a password. If its hostname is poisoned, that password is sent to whatever
   address the forger chose.
-- **Fingerprinting.** The node's hostname is visible to the network in every
-  plaintext lookup.
+- **Fingerprinting.** The node's hostname is visible to every resolver that is
+  asked, and to the network on every plaintext lookup.
 
 ## What the paper found
 
@@ -75,207 +84,187 @@ injectors:
 | Q2 with another QTYPE | passed | detected | answered | answered | rejected |
 | Decoy domain as Q2 | passed | detected | answered | answered | rejected |
 
-The other compression, EDNS(0), flag and opcode variants passed only some of
-the injectors. A program counted as valid in the paper's first stage when any
-one of the three resolvers answered it.
+Hoang et al., *How Great is the Great Firewall? Measuring China's DNS
+Censorship* (USENIX Security 2021), supplies the forged-address picture this
+policy uses as a heuristic: forged IPv4 answers are public addresses outside
+mainland space (§5), forged IPv6 answers lie in the Teredo prefix `2001::/32`
+(§5.1), and ~99% of poisoned responses arrive within ~364 ms of the first
+forged one from one mainland vantage (§7.2).
 
-## What this change takes from it
+## What this change takes from them
 
-**The censor model, adopted as the default defence.** Because the GFW races
+**Authenticated resolution as the primary defence.** Because the GFW races
 forged answers instead of suppressing the real one, the robust answer is not
-to win the parser race but to stop asking in plaintext. The `encrypted` preset
-and `https://` entries use DNS-over-HTTPS (RFC 8484). TLS authenticates the
-resolver, so an on-path censor can block the exchange but cannot change its
-answer. Encryption also hides the node's name from the network. This covers
-both censor models, including Iran's drop-and-answer behaviour, which no
-plaintext technique in the paper handles reliably.
+to win the parser race but to stop asking in plaintext. DoH (RFC 8484)
+authenticates the resolver: an on-path censor can block the exchange but
+cannot change its answer. Encryption also hides the node's name from passive
+observers of the query. This covers both censor models for the authenticated
+leg, including Iran's drop-and-answer behaviour, which no plaintext technique
+in CircumVolve handles reliably.
 
-**Race detection for plaintext resolvers.** `udp://` resolvers are still useful
-where DoH is blocked or for a resolver on a trusted path. Every exchange uses a
-fresh connected socket with a random ID, and after the first matching response
-it keeps listening for 300 ms. Two responses that disagree mean injection; the
-whole exchange is discarded instead of choosing one, and the lookup moves to
-the next resolver. A truncated (TC) answer is retried over TCP.
+**The `auto` cascade.** Global DoH presets (Cloudflare / Google by IP) are
+taken as-is when they answer. Mainland DoH presets (AliDNS / DNSPod by IP)
+stay reachable on many censored networks, but their own upstream queries cross
+the same filter, so their caches can hold its forgeries. A mainland answer
+whose addresses all lie inside mainland space, RFC 1918 / 6598, ULA, or the
+`198.18.0.0/15` fake-IP stand-in range is accepted; one that points outside
+that space needs a second opinion (plaintext witnesses and/or the platform
+resolver naming one of the same addresses, or silence from every other
+source). Under injection the policy escalates, may send the paper's
+two-question shape to the witnesses, and only uses an address that a trailing
+response of a contested exchange also carries. Otherwise it fails closed
+rather than hand over a forgery.
 
-**The two-question shape, as an explicit experiment.** `udp://IP?shape=dual-question`
-sends the *Q2 points to Q1* layout: QDCOUNT=2, the second question a
-compression pointer (`0xC00C`) to the first, with the same type and class. Of
-the shapes that passed all three injectors, it is the one with the widest
-resolver support in Table 2 (Cloudflare and Google). It is well-formed
-compression (a backward pointer), and it does not send a second, unrelated
-domain. A reply that echoes only the first question is accepted.
+**Race detection for plaintext resolvers and witnesses.** `udp://` resolvers
+and `auto`'s witnesses use a fresh connected socket with a random ID. After
+the first matching response the client keeps listening for 400 ms (sized from
+Hoang et al. §7.2). Two responses that disagree mean injection; the exchange
+is discarded instead of choosing one. A truncated (TC) answer is retried over
+TCP. Teredo `2001:0::/32` answers are treated as unroutable for endpoints.
 
-It is never selected implicitly, and the client logs a warning when it is
-configured, because:
+**The two-question shape, as an explicit experiment (and an `auto` escalation
+tool).** `udp://IP?shape=dual-question` sends the *Q2 points to Q1* layout:
+QDCOUNT=2, the second question a compression pointer (`0xC00C`) to the first.
+Of the shapes that passed all three injectors, it has the widest resolver
+support in Table 2 (Cloudflare and Google). In a listed policy it is never
+selected implicitly, and the client logs a warning when it is configured.
+`auto` may send it only after injection is already observed.
 
-- RFC 9619 requires QDCOUNT=1 for queries. Quad9 rejected the shape, and home
-  routers, ISP resolvers and system stub resolvers were not measured at all.
-- Iran's censor detected it.
-- A two-question query is rare enough to be a fingerprint in itself. Once
-  deployed, a censor can match on it, which the paper's discussion of
-  operational risk anticipates.
-- It is still plaintext: it changes what the injectors parse, not the fact that
-  the answer is unauthenticated and the name is visible.
-- It is one measurement campaign, not a production guarantee.
-
-**Not adopted:**
-
-| Shape | Reason |
-| --- | --- |
-| Deep pointer chain | Only Google answered it. It is also exactly the pattern hardened parsers reject as a pointer loop or a decompression bomb. |
-| Forward pointers, padding plus forward pointer, domain in EDNS(0) | Violate RFC 1035 §4.1.4 (pointers must point backwards); only Google answered; partial injector bypass. |
-| Split labels via pointer | All three resolvers answered it, but it passed only two of the three GFW injectors, so the third still poisons the answer. |
-| Falsified QDCOUNT, ANCOUNT/ARCOUNT/NSCOUNT > 0 | Header deliberately inconsistent with the body; rejected by Google and Quad9. |
-| Decoy domain | Discloses a second name and asks a resolver a question the client does not need. |
-| Q2 with another QTYPE | Requests a record type the client discards, for no advantage over the chosen shape. |
-| TC/Z bits, non-standard opcode | Passed one injector at most; rejected by Quad9, and by Google for the opcode. |
+**Not adopted as a default dependency:** deep pointer chains, forward
+pointers, falsified header counts, decoy domains, and the other Table 2 rows
+that only some injectors missed or that resolvers largely rejected. See the
+earlier PR discussion and CircumVolve Table 2 for the per-row reasons.
 
 ## Configuration
 
-A policy is a comma-separated list, tried in order:
-
 | Entry | Meaning |
 | --- | --- |
-| `system` | The platform resolver, and, if it fails, the secondary resolvers the client already used (AliDNS, DNSPod, Google, all plaintext). Alone it is the default. **As the last entry** it is a plaintext fallback, consulted only after every other entry failed, and it logs a warning when used. Anywhere else it is rejected. |
-| `encrypted` | Cloudflare and Google DoH, by IP address: `https://1.1.1.1`, `https://8.8.8.8`, `https://[2606:4700:4700::1111]`, `https://[2001:4860:4860::8888]` (all `/dns-query`). |
-| `https://host[:port][/path]` | An RFC 8484 server. The path defaults to `/dns-query`; a query string is kept. Certificates are always verified, against the platform trust store (the Mozilla roots on Android). |
-| `udp://IP[:port]` | A plaintext resolver by IP address (default port 53), with race detection. |
+| `auto` | Complete policy on its own. Built-in global and mainland DoH, witnesses, and the platform resolver under the cascade above. Cannot be combined with other entries. **Default**, except in `no-external-geo` builds. |
+| `system` | The platform resolver alone. **As the last entry of a list** it is a plaintext fallback after every other entry failed. Anywhere else in a list it is rejected. |
+| `encrypted` | Cloudflare and Google DoH, by IP: `https://1.1.1.1`, `https://8.8.8.8`, `https://[2606:4700:4700::1111]`, `https://[2001:4860:4860::8888]` (all `/dns-query`). |
+| `https://host[:port][/path]` | An RFC 8484 server. Path defaults to `/dns-query`. Certificates are always verified. |
+| `udp://IP[:port]` | A plaintext resolver by IP (default port 53), with race detection. |
 | `udp://IP[:port]?shape=dual-question` | The same, with the experimental two-question query. |
 
-Rules: at most eight resolvers; duplicates count once; `udp://` takes an IP
-address, not a name. A DoH URL with credentials, a fragment or plain `http://`
+Rules: at most eight listed resolvers; duplicates count once; `udp://` takes
+an IP, not a name. A DoH URL with credentials, a fragment or plain `http://`
 is rejected. An invalid policy stops the CLI and server at startup. An invalid
-`ENDPOINT_DNS` read by an embedder makes every endpoint lookup fail, with the
-error logged once, rather than silently using the system resolver.
+`ENDPOINT_DNS` makes every endpoint lookup fail until a valid policy is set.
 
 Precedence for `http-proxy-cli`: `--endpoint-dns`, then `endpoint_dns` in the
-config file, then `ENDPOINT_DNS`, then `system`. `--endpoint-dns` is saved to
-the config file like other options:
+config file, then `ENDPOINT_DNS`, then the build default:
 
 ```toml
+# endpoint_dns = ["auto"]   # default when omitted
+# endpoint_dns = ["encrypted"]
 endpoint_dns = ["https://203.0.113.53/dns-query", "encrypted"]
 ```
 
-`http-proxy-server` takes `--endpoint-dns` or `ENDPOINT_DNS`. Embedders,
-including the FFI library, read `ENDPOINT_DNS` on the first endpoint lookup.
-Rust embedders can call `proxy_core::transport::set_endpoint_dns`. The startup
-banner and logs show the policy without URL paths or query strings, which can
-carry account tokens.
+`http-proxy-server` takes `--endpoint-dns` or `ENDPOINT_DNS`; omitting both
+keeps the build default. The FFI `start` map accepts optional `endpoint_dns`
+(text or entry list). Handle-free JSON
+`{"operation":"endpoint_dns","action":"get"|"check"|"set",...}` reads, dry-runs
+or replaces the process policy. Packet-tunnel configs accept optional
+`endpointDns`. The macOS privileged TUN helper receives the GUI's policy in
+`HelperConfig.endpoint_dns` so it resolves `remote_host` under the same rules.
 
-**Prefer IP-literal DoH URLs.** The DoH client resolves a hostname in its own
-URL with the system resolver. A poisoned answer there only makes TLS
-verification fail (closed), but the name is visible and the lookup can be
-blocked. The `encrypted` preset uses addresses for that reason.
-
-**The preset is not a promise of reachability.** Public DoH addresses can be
-blocked by address or SNI on exactly the networks this targets. Then
-`encrypted` lookups fail closed. A DoH endpoint you operate, for example on a
-relay server by IP address, or an explicit trailing `system`, are the
-alternatives.
+Hosts-file pins outrank every non-`system` policy. Single-label names and
+names under local suffixes (`.lan`, `.local`, `.home.arpa`, …) go to the
+platform resolver alone under `auto`, so split-horizon and LAN names are not
+sent to public DoH.
 
 ## Behaviour and budgets
 
-- **Scope:** endpoint lookups only. IP literals skip DNS entirely. Destinations
-  keep the system resolver and their own cache entries, so an endpoint answer
-  never serves a destination lookup or the reverse.
-- **Time:** network resolvers share a 5-second budget per lookup; a trailing
-  `system` adds the usual 3-second system budget. `system` alone keeps the
-  3-second budget.
-- **Order:** resolvers start in order. The next one starts when the previous
-  fails or after 500 ms without an answer, with at most two in flight. The
-  first answer wins, and the losers are cancelled.
-- **Families:** A and AAAA are asked concurrently. Once one family has
-  addresses, the other gets 300 ms more. IPv4 addresses are listed first.
-- **Plaintext latency:** every `udp://` lookup waits out the 300 ms detection
-  window after its first response, and retransmits once after 1 s without one.
-- **DoH:** POST, message ID 0, EDNS(0) padding to 128-byte blocks (RFC 8467),
-  HTTP/1.1 keep-alive, no proxy, no redirects, HTTPS only, 3-second connect
-  timeout, at most 64 KiB per response, `application/dns-message` required.
-- **Validation:** responses must match the ID, opcode and question; CNAME
-  chains are followed for up to eight hops, and loops are rejected. Records for
-  other names are ignored. Malformed messages, including compression-pointer
-  loops, are rejected by the decoder.
-- **Unroutable answers** (`0.0.0.0/8`, multicast, `240.0.0.0/4`, broadcast,
-  `::`, IPv6 multicast) are discarded for every endpoint lookup, including
-  `system`. This is a behaviour change: an endpoint name that resolves *only*
-  to such addresses now fails with `AddrNotAvailable` instead of dialling, for
-  example, `0.0.0.0`, which reaches the local host. Private and loopback
-  addresses are kept, because LAN and local nodes are legitimate, so Iran-style
-  private-address injection is caught only by DoH.
-- **Cache:** answers from network resolvers are kept for their TTL, clamped to
-  30 s – 5 min. NXDOMAIN and NODATA are kept for 5–60 s (the negative TTL from
-  the SOA record when present) when the policy has no fallback; with a
-  fallback, the system resolver is asked instead. Changing the policy
-  invalidates its earlier answers. Concurrent lookups of one name share a
-  single resolution.
-- **Concurrency:** at most eight network endpoint lookups at once, separate
-  from the eight system-resolver slots.
-- **Failure:** without a trailing `system`, a lookup that no resolver answered
-  returns an error naming each resolver (redacted) and its failure.
+- **Scope:** endpoint lookups only. IP literals skip DNS. Destinations keep the
+  system resolver and their own cache entries.
+- **Time:** network / `auto` lookups share a 5-second budget (`auto` leaves a
+  250 ms margin so it can report why it failed). A listed policy's trailing
+  `system` adds the usual 3-second system budget. `system` alone keeps 3 s.
+- **Order (listed):** next resolver after failure or 500 ms, at most two in
+  flight. **`auto`:** hedge 200 ms, at most four authenticated attempts,
+  platform resolver may stand alone after 600 ms or when authenticated
+  resolvers are exhausted / missing.
+- **Families:** A and AAAA concurrently; 300 ms grace once one family has
+  addresses. IPv4 listed first.
+- **Plaintext window:** 400 ms after the first matching response for `udp://`
+  and witnesses.
+- **DoH:** POST, message ID 0, EDNS(0) padding to 128-byte blocks, HTTP/1.1
+  keep-alive, no proxy, no redirects, HTTPS only, certificate verification
+  always on.
+- **Unroutable filter:** discards `0.0.0.0/8`, multicast, `240.0.0.0/4`,
+  broadcast, `::`, IPv6 multicast, and Teredo `2001:0::/32` for every endpoint
+  lookup, including `system`.
+- **Cache:** record TTL clamped to 30 s – 5 min; negative answers 5–60 s when
+  there is no fallback; policy generation invalidates earlier answers.
+- **Desktop TUN capture guard:** while an in-process or macOS-helper TUN
+  session runs, `PlaintextDnsCapture` tells `auto` that plaintext queries from
+  this process are answered by tun2proxy's physical DNS relay, so witnesses
+  are skipped (verdict `Unobserved`) rather than treated as a clean path.
 
-## Platform notes
+## Platform notes (TUN DNS audit)
 
-- **Desktop TUN:** tun2proxy answers port-53 traffic from the client's own,
-  bypassed, process with its physical DNS relay (AliDNS, DNSPod, then the
-  adapter's DNS), whatever server the query was addressed to. While desktop TUN
-  is active, a `udp://` resolver is therefore not the server that answers, the
-  injection check sees only the relay's single reply, and the two-question shape
-  is refused by the relay. The client logs a warning when TUN starts with such a
-  policy; use `https://` entries with TUN. DoH works because the client's own
-  sockets bypass the tunnel. Route bypasses are computed from the same endpoint
-  cache the carriers dial from.
-- **macOS GUI TUN helper:** the privileged helper resolves the node for its
-  route bypass with its own default policy. The Flutter UI does not expose this
-  setting yet, so the GUI and helper agree on `system`.
-- **Mobile:** the FFI library honours `ENDPOINT_DNS`, but the mobile UIs do not
-  set it.
+| Path | What actually happens |
+| --- | --- |
+| Windows / Linux desktop TUN | After the route-bypass resolution, this process's port-53 traffic is answered by tun2proxy's physical relay (AliDNS / DNSPod / …). `auto` holds `PlaintextDnsCapture` for the session. App DNS still uses fake-IP or proxied real DNS; bypassed apps' DNS stays plaintext on that relay. |
+| macOS GUI + privileged helper | The helper receives `endpoint_dns` and applies it before resolving `remote_host`. Both sides hold the capture guard for the helper session. |
+| Apple Network Extension / packet tunnel | Provider sockets are exempt in the kernel; optional `endpointDns` applies before the first lookup. No capture guard (nothing rewrites the provider's port 53). |
+| Android | App excluded from VPN; platform resolver is plaintext on the underlying network. `ENDPOINT_DNS` / FFI `endpoint_dns` still govern node lookups. |
+| Store builds (`no-external-geo`) | Default stays `system`; DoH presets are not contacted unless the user configures them explicitly in a non-Store build. |
+
+`udp://` under desktop TUN is still answered by the physical relay; the client
+warns and recommends `https://` / `auto` / `encrypted`. App-level DoH/DoT
+inside bypassed apps is ordinary traffic. Windows SMHNR / IPv6 DNS and Linux
+`nss-resolve` caveats are unchanged. The Flutter UI lives in a separate
+repository; with `auto` as the native default it is protected without a new
+toggle, and can later wire `endpoint_dns` on `start` / `endpoint_dns`
+operations / `endpointDns` on the packet-tunnel config.
 
 ## Limitations
 
 - **No live validation.** Nothing here was tested against the GFW, Iran's
-  censor or real public resolvers. The tests use loopback fakes. The
-  two-question shape's evasion is the paper's observation, not this project's.
-- **Race detection is not authentication.** It catches a forgery only when a
-  different response also arrives within 300 ms of the first. A censor that
-  drops the real answer (Iran), an injector that answers only after the window,
-  loss of the real response, or one consistent forgery all go undetected. ID,
-  port and question matching stop only off-path guessing. Use DoH when the
-  answer matters.
-- **DoH can be blocked.** Encrypted resolution then fails closed, which is an
-  availability cost. A trailing `system` trades that for plaintext answers.
-- **The DoH operator is trusted** and learns the endpoint names it is asked
-  for. DNSSEC is not validated.
-- **TTL floor:** a 30-second minimum reuse time can delay failover for names
-  published with a shorter TTL.
+  censor or real public resolvers. Tests use loopback fakes and a paused clock.
+- **`auto` is opportunistic.** Blocking every DoH server downgrades toward the
+  platform resolver. Strict `encrypted` exists when that is unacceptable.
+- **The “forgeries are outside mainland space” rule is a heuristic** from Hoang
+  et al. (2020 data), not a CircumVolve claim and not a cryptographic property.
+- **A global resolver's answer is taken as-is**, which is wrong for a
+  blocklisted name whose authoritative servers sit inside the mainland (Hoang
+  §6: polluted records in public resolvers).
+- **Race detection is not authentication.** A path that drops the real response
+  (Iran), a lone forged response, forgeries slower than the 400 ms window, or
+  static-group forgeries that always carry one address, all read as clean;
+  `auto` is then as exposed as the platform resolver.
+- **Under desktop TUN, witnesses are unavailable** (`Unobserved`), so
+  blocklisted names answered only by mainland DoH are not detected as forged
+  by the race check.
+- **Privacy:** `auto` discloses endpoint hostnames to Cloudflare/Google and
+  possibly Alibaba/Tencent; it may send plaintext witness queries and ask the
+  platform resolver.
+- **Split-horizon names** need `system` or a hosts pin if they must not go to
+  public DoH.
+- **DoH can be blocked** by address or SNI; then authenticated resolution fails
+  and `auto` falls back under its rules.
 
 ## Verification
 
 Deterministic tests, with no public services:
 
-- `crates/proxy-core/src/dns/`: query encoding (standard, padded, dual-question
-  layouts); hostile messages (pointer self-loops, cycles and forward pointers,
-  overlong labels, truncated records); ID, question and type matching; CNAME
-  loops; negative TTLs; injected races and noise; retransmission; TC-to-TCP
-  retry; DoH certificate failure, content type, status, redirect, size limit,
-  and URL redaction; hedging and deadlines with a paused clock.
-- `crates/proxy-core/src/transport.rs`: fail-closed versus explicit fallback;
-  invalid policy; negative caching; policy-generation cache keys; coalesced
-  concurrent lookups; destination and endpoint cache separation; sinkhole-only
-  answers.
-- `crates/proxy-core/tests/endpoint_dns.rs`: a separate process with a global
-  policy and a loopback resolver. A node is dialled at the address the policy
-  resolves, an injected race fails closed instead of dialling either answer,
-  and an external HTTP proxy is reached through the policy.
-- CLI parsing and config persistence in `http-proxy-cli` and
-  `http-proxy-server`.
+- `crates/proxy-core/src/dns/` including `auto.rs`: cascade, second-opinion and
+  placeholder rules, benches, verdicts, dual-question escalation, capture
+  guard, local names / hosts pins; virtual time.
+- Loopback DoH / UDP fakes; transport cache behaviour; integration
+  `endpoint_dns.rs` and `endpoint_dns_default.rs`.
+- CLI / server / FFI / packet-tunnel / macOS helper config parsing and
+  fail-closed invalid policies.
 
 ## References
 
 - A. Zohaib, J. Sippe, J. Sheffey, M. Wu, E. Wustrow, A. Houmansadr.
   *CircumVolve: Automated Discovery of Censorship Evasion Strategies Using
   Large Language Models.* ACM CCS 2026. §4.2, Table 2.
+- N. P. Hoang, A. A. Niaki, J. Dalek, J. Knockel, P. Lin, B. Marczak,
+  M. Crete-Nishihata, P. Gill, M. Polak. *How Great is the Great Firewall?
+  Measuring China's DNS Censorship.* USENIX Security 2021. §5, §6, §7.
 - Anonymous, A. A. Niaki, N. P. Hoang, P. Gill, A. Houmansadr. *Triplet
   Censors: Demystifying Great Firewall's DNS Censorship Behavior.* FOCI 2020.
-- RFC 1035 §4.1.4 (compression), RFC 2308 (negative caching), RFC 5452
-  (resilience against forged answers), RFC 7830 and RFC 8467 (EDNS(0)
-  padding), RFC 8484 (DNS-over-HTTPS), RFC 9619 (QDCOUNT is one).
+- RFC 1035 §4.1.4, RFC 2308, RFC 5452, RFC 7830 / 8467, RFC 8484, RFC 9619.

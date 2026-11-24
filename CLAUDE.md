@@ -275,7 +275,7 @@ job actually takes.
 | `NONPROXY_KEYWORDS` | Domain keywords for direct connection | bilibili,baidu,taobao... |
 | `REVERSE_GEO_PROXY` | Reverse geo logic (CN=proxy, overseas=direct) | false |
 | `TURELY_PROXY_SERVER` | Transparent proxy chain target (ip:port) | - |
-| `ENDPOINT_DNS` | Resolvers for node, relay-target and external-proxy hostnames: `system`, `encrypted` (DoH), `https://…`, `udp://IP`; a trailing `system` allows a plaintext fallback. See `docs/endpoint-dns.md` | system |
+| `ENDPOINT_DNS` | How node, relay-target and external-proxy hostnames are resolved: `auto` (DoH first), `system`, `encrypted`, `https://…`, `udp://IP`; a trailing `system` on a list allows a plaintext fallback. See `docs/endpoint-dns.md` | auto (`system` in `no-external-geo` builds) |
 
 Native client TCP, UDP, ICMP, control and probes always encrypt payloads.
 `NEED_CODEC_IP` and the old encryption switches no longer select a plaintext
